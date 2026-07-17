@@ -64,3 +64,14 @@ Upon completion, the best performing system prompt will be saved to `prompt_temp
 4. **Mutate**: If a solution fails, the error traces are collected, and Codex is called with the `meta_optimizer.txt` prompt to rewrite the coder's system instructions to prevent that failure mode in the next iteration.
 
 Read [docs/walkthrough.md](docs/walkthrough.md) for full design, code trace reviews, and the next-phase roadmap.
+
+---
+
+## 4. Credits & Original Research
+
+This project is a localized prototype inspired by Weco AI's pioneering research on **AIDE²** (the first documented experimental evidence of consistent Level 1 recursive self-improvement in an AI research agent).
+
+Key References:
+* **Research & Blog**: [AIDE²: Autoresearch on Autoresearch](https://weco.ai/blog) by Zhengyao Jiang and the Weco AI team.
+* **Core Agent Framework**: [WecoAI/aideml](https://github.com/WecoAI/aideml) on GitHub.
+
