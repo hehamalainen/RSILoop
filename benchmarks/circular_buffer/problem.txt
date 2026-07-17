@@ -1,0 +1,7 @@
+Implement a class `CircularBuffer` with a fixed capacity. It should support:
+- `__init__(self, capacity: int)`: Initializes the buffer with a fixed capacity.
+- `write(self, item)`: Writes an item to the buffer. If the buffer is full, raises a `BufferFullException`.
+- `read(self) -> any`: Reads the oldest item from the buffer and removes it. If the buffer is empty, raises a `BufferEmptyException`.
+- `overwrite(self, item)`: Writes an item to the buffer. If the buffer is full, it overwrites the oldest item.
+
+The class and exceptions (`BufferFullException`, `BufferEmptyException`) should be defined in a file named `solution.py`.

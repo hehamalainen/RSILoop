@@ -1,0 +1,3 @@
+Implement a function `rle_encode(s: str) -> str` that returns the run-length encoding of a string.
+For example, `rle_encode("AABBBCCCC")` should return `"2A3B4C"`. If the input is empty, return `""`.
+The function should be defined in a file named `solution.py`.

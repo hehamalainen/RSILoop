@@ -1,0 +1,4 @@
+Implement a function `parse_json(s: str) -> any` that parses a simple JSON string containing objects, arrays, strings, numbers, booleans, and null values.
+For example, `parse_json('{"key": "value", "num": 123, "bool": true, "list": [1, 2]}')` should return the equivalent Python object.
+You should not use the built-in `json` module to parse the string. You must write the parsing logic manually.
+The function should be defined in a file named `solution.py`.
