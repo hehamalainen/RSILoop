@@ -4,3 +4,10 @@ __pycache__/
 .DS_Store
 codex_output.txt
 codex-session-*
+history/
+best_manifest.json
+best_manifest.json.tmp
+best_manifest.json.invalid_old
+*.sb
+tmp/
+/tmp/

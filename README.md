@@ -14,13 +14,16 @@ Built to run autonomously using the local **Codex CLI (`codex`)** as the reasoni
 │   ├── json_parser/         # Manual JSON string parser task + tests
 │   └── run_length_encoding/ # Run-length compression task + tests
 ├── docs/
-│   └── walkthrough.md       # Exhaustive architecture notes, traces, and roadmap
+│   └── walkthrough.md       # Architectural notes, zero-trust profiles, and roadmap
 ├── prompt_templates/        # System prompts mutated by the optimizer
 │   ├── inner_agent_baseline.txt
 │   ├── meta_optimizer.txt
-│   └── best_prompt.txt      # Best prompt output by the latest run
-├── evaluator.py             # Isolated execution harness with strict timeouts
-├── rsi_loop.py              # Main bi-level optimization driver
+│   └── best_prompt.txt      # Convenience copy of the best performing prompt
+├── evaluator.py             # Sandbox execution evaluator with dynamic MRO exception registry
+├── sandbox_worker.py        # Zero-trust worker enforcing irreversible resource limits
+├── rsi_loop.py              # Main bi-level optimization driver (JSONL parser + Greedy Policy)
+├── test_evaluator.py        # 14-test regression verification suite
+├── test_rsi_loop.py         # Orchestrator and parser validation tests
 ├── verify_env.py            # Diagnostic script to check CLI dependencies
 └── README.md
 ```
@@ -44,26 +47,24 @@ Built to run autonomously using the local **Codex CLI (`codex`)** as the reasoni
    python3 -m venv .venv
    .venv/bin/pip install google-genai openai anthropic python-dotenv
    ```
-2. Diagnostic check:
+2. Run diagnostic checks & regression verification suite:
    ```bash
-   .venv/bin/python verify_env.py
+   .venv/bin/python test_evaluator.py
+   .venv/bin/python test_rsi_loop.py
    ```
 3. Run the automated optimization loop:
    ```bash
    .venv/bin/python rsi_loop.py
    ```
 
-Upon completion, the best performing system prompt will be saved to `prompt_templates/best_prompt.txt`.
+Upon completion, the best performing manifest will be saved atomically to `best_manifest.json`, referencing the best prompt and solutions.
 
 ---
 
 ## 3. How the Loop Works (The Code is the Truth)
-1. **Generate**: `rsi_loop.py` compiles the current system prompt with the task details from `benchmarks/<task>/problem.txt` and queries the `codex exec` compiler.
-2. **Write**: The response is parsed and written to `benchmarks/<task>/solution.py`.
-3. **Sandbox Run**: `evaluator.py` runs the task's `test_harness.py` inside a subprocess with a strict 3.0s timeout to prevent execution locks.
-4. **Mutate**: If a solution fails, the error traces are collected, and Codex is called with the `meta_optimizer.txt` prompt to rewrite the coder's system instructions to prevent that failure mode in the next iteration.
-
-Read [docs/walkthrough.md](docs/walkthrough.md) for full design, code trace reviews, and the next-phase roadmap.
+1. **Generate**: `rsi_loop.py` executes Codex using `codex exec --json` under `generator.sb`. It parses the structured JSONL events (`turn.completed` and `item.completed`) to extract the candidate solution and token usage.
+2. **Evaluate**: `evaluator.py` spawns a sandboxed subprocess (`sandbox_worker.py`) under `candidate.sb` with a strict `3.0s` timeout and resource limits. Ordinary classes are proxied, and custom exception class hierarchies are reconstructed dynamically on the host matching their exact MRO names.
+3. **Mutate**: If a candidate fails, the meta-optimizer mutates the best accepted prompt using the greedy search policy based on the best prompt's own failure traces.
 
 ---
 
@@ -74,4 +75,3 @@ This project is a localized prototype inspired by Weco AI's pioneering research 
 Key References:
 * **Research & Blog**: [AIDE²: Autoresearch on Autoresearch](https://weco.ai/blog) by Zhengyao Jiang and the Weco AI team.
 * **Core Agent Framework**: [WecoAI/aideml](https://github.com/WecoAI/aideml) on GitHub.
-

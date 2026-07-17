@@ -1,0 +1,30 @@
+(version 1)
+(deny default)
+
+(deny process-fork)
+(allow process-exec
+    (subpath "/opt/homebrew")
+    (subpath "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/.venv")
+)
+
+(allow sysctl-read)
+(allow mach-lookup)
+
+(allow file-read*
+    (literal "/")
+    (subpath "/System")
+    (subpath "/usr")
+    (subpath "/Library")
+    (subpath "/private/var/folders")
+    (subpath "/opt/homebrew")
+    (subpath "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/.venv")
+    (literal "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/sandbox_worker.py")
+    (subpath "{candidate_dir}")
+    (subpath "{temp_dir}")
+)
+
+(allow file-read-metadata)
+
+(allow file-write*
+    (subpath "{temp_dir}")
+)

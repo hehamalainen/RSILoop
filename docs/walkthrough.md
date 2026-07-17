@@ -2,189 +2,87 @@
 
 > "Talk is cheap. Show me the code." — Linus Torvalds
 
-This walkthrough documents the design, execution, and output of the Recursive Self-Improvement (RSI) prompt optimization loop implemented in this repository.
+This document provides a comprehensive, code-centric guide explaining the design, containment architecture, exception fidelity system, structured event parsing, and verification metrics for the **Recursive Self-Improvement (RSI)** prompt optimization loop.
 
 ---
 
-## 1. System Architecture
+## 1. Zero-Trust Containment Architecture
 
-The setup isolates the LLM generation environment from the evaluation environment to prevent execution risks while automating iterative prompt mutations.
+The framework isolates LLM code generation (Outer Loop) from execution/evaluation (Inner Loop) using macOS `sandbox-exec` profiles.
 
 ```mermaid
 flowchart TD
     subgraph Host [Host System / Outer Loop]
-        ORCH[rsi_loop.py] -->|1. Prompts & Tasks| CX[Codex CLI]
-        CX -->|2. Writes solution.py| SOL[solution.py]
-        ORCH -->|3. Launches| EV[evaluator.py]
+        ORCH[rsi_loop.py] -->|1. Prompts & Tasks| CX[Codex CLI --json]
+        CX -->|2. Captures JSONL| ORCH
+        ORCH -->|3. Writes solution.py| SOL[solution.py]
+        ORCH -->|4. Launches| EV[evaluator.py]
     end
     
     subgraph Sandbox [Sandboxed Subprocess / Inner Loop]
-        EV -->|4. Imports| SOL
-        EV -->|5. Runs Assertions| TEST[test_harness.py]
-        TEST -->|6. exit_code| EV
+        EV -->|5. Spawns Worker| WRK[sandbox_worker.py]
+        WRK -->|6. Sets resource limits| WRK
+        WRK -->|7. Imports| SOL
+        EV -->|8. Maps Proxies| TEST[test_harness.py]
+        TEST -->|9. Runs assertions| EV
     end
     
-    EV -->|7. Success / Failure / Logs| ORCH
-    ORCH -->|8. Mutates Prompt if score < 100%| ORCH
+    EV -->|10. Outputs Result| ORCH
 ```
+
+### Sandbox SBPL Profiles
+
+#### Candidate Profile (`candidate.sb.template`)
+Denies all filesystem reads and process forks by default. Allowlists only necessary system libraries, python virtualenv paths, and candidate source files:
+- Allows `process-exec` only for virtualenv and system Python executables.
+- Denies `process-fork` globally (python internal spawns permitted exclusively within allowed executables).
+- Read allowlist restricted to `/System`, `/usr`, `/Library`, `/opt/homebrew`, virtualenv paths, and candidate/temp working directories.
+
+#### Generator Profile (`generator.sb.template`)
+Restricts Codex file access to prevent private task holdout or credentials leakage:
+- Read access denied to `/Users` by default (except for `.codex` config and the isolated candidate directory).
+- Write access permitted only to `.codex` configuration and candidate working directories.
 
 ---
 
-## 2. Core Orchestration Code
+## 2. Dynamic Evaluator & Exception Reconstruction
 
-The system's behavior is dictated by two scripts. Below are the core implementations that act as the source of truth.
-
-### The Evaluator ([evaluator.py](evaluator.py))
-To prevent infinite loops from hanging the parent process, execution is constrained by a strict timeout. `sys.path` is manipulated dynamically to isolate the benchmark tests:
-
-```python
-def evaluate_benchmark(benchmark_dir):
-    test_harness_path = os.path.join(benchmark_dir, "test_harness.py")
-    if not os.path.exists(test_harness_path):
-        return {"success": False, "error": "test_harness.py not found"}
-    
-    solution_path = os.path.join(benchmark_dir, "solution.py")
-    if not os.path.exists(solution_path):
-        return {"success": False, "error": "solution.py not found"}
-        
-    try:
-        # Run python -m unittest test_harness.py in the directory
-        res = subprocess.run(
-            [sys.executable, "-m", "unittest", "test_harness.py"],
-            cwd=benchmark_dir,
-            capture_output=True,
-            text=True,
-            timeout=3.0 # strict timeout to prevent infinite loops
-        )
-        passed = (res.returncode == 0)
-        output = res.stdout + "\n" + res.stderr
-        return {
-            "success": passed,
-            "error": None if passed else output.strip(),
-            "code": res.returncode
-        }
-```
-
-### The LLM Driver ([rsi_loop.py](rsi_loop.py))
-To feed complex system prompts and task files directly to Codex without command-line argument length limitations or escaping errors, we pipe the text via `stdin` and read the agent response back from a redirected output file (`-o`):
-
-```python
-def call_codex(prompt: str, system_instruction: str = None) -> str:
-    full_prompt = ""
-    if system_instruction:
-        full_prompt += f"System Instruction:\n{system_instruction}\n\nTask Instruction:\n"
-    full_prompt += prompt
-    
-    output_file = os.path.join(BASE_DIR, "codex_output.txt")
-    if os.path.exists(output_file):
-        os.remove(output_file)
-        
-    cmd = [
-        "codex", "exec", "-", 
-        "--dangerously-bypass-approvals-and-sandbox",
-        "-o", output_file
-    ]
-    
-    try:
-        res = subprocess.run(
-            cmd,
-            input=full_prompt,
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-        if not os.path.exists(output_file):
-            print(f"Codex error (no output file). Stderr:\n{res.stderr}\nStdout:\n{res.stdout}")
-            return ""
-        
-        with open(output_file, "r") as f:
-            content = f.read()
-        os.remove(output_file)
-        return content
-```
+To verify candidate solutions containing class definitions and exceptions without running test code inside the host process:
+1. **Dynamic Mocks**: The host queries the worker's exports (`get_exports`). For ordinary classes, it instantiates dynamic proxies (`DynamicClassProxy`) capturing their names via a factory function.
+2. **Exception MRO Replication**: For custom exceptions, the worker gathers their Method Resolution Order (`__mro__`). The host dynamically reconstructs an identical class inheritance hierarchy (`type(name, tuple(bases), {})`) in a local registry, preserving qualified types and MRO identity.
+3. **Subprocess Reaping**: Terminated workers are reaped explicitly using `.wait(timeout=1.0)` to eliminate `ResourceWarning` leaks.
 
 ---
 
-## 3. Empirical Results & Generated Code
+## 3. Structured Event Stream Parsing & Greedy Search Policy
 
-In the Codex-based execution, the baseline prompt immediately achieved **3/3 (100.0%)** on the benchmarks. Here is how it solved the two most structurally complex benchmarks:
+### JSONL Parser
+Codex is called with `--json` to output structured JSONL streams. The orchestrator:
+- Accepts text only when `type == "item.completed"` and `item.type == "agent_message"`.
+- Requires exactly one valid `turn.completed` usage event.
+- Extracts token counts from the structured `usage` metadata (`output_tokens` applied against the 15,000 token budget).
+- Fails closed immediately on missing or malformed events.
 
-### Circular Buffer ([benchmarks/circular_buffer/solution.py](benchmarks/circular_buffer/solution.py))
-Instead of writing complex pointer arithmetic, the model leveraged `collections.deque` with `maxlen` to handle automatic overwriting of old items:
-
-```python
-from collections import deque
-
-class BufferFullException(Exception):
-    pass
-
-class BufferEmptyException(Exception):
-    pass
-
-class CircularBuffer:
-    def __init__(self, capacity: int):
-        self.capacity = capacity
-        self._buffer = deque(maxlen=capacity)
-
-    def write(self, item):
-        if len(self._buffer) == self.capacity:
-            raise BufferFullException()
-        self._buffer.append(item)
-
-    def read(self):
-        if not self._buffer:
-            raise BufferEmptyException()
-        return self._buffer.popleft()
-
-    def overwrite(self, item):
-        self._buffer.append(item)
-```
-
-### JSON Parser ([benchmarks/json_parser/solution.py](benchmarks/json_parser/solution.py))
-The manual JSON parser was implemented as a recursive-descent parser class contained inside a closure to prevent symbol leaking, handling decimal strings, escapes, and surrogate pairs manually:
-
-```python
-def parse_json(s: str) -> Any:
-    class Parser:
-        # ... Parser fields & state variables ...
-        def parse_unicode_escape(self) -> str:
-            code = self.read_hex_codepoint()
-            # Handle high/low surrogates
-            if 0xD800 <= code <= 0xDBFF:
-                if not self.text.startswith("\\u", self.pos):
-                    self.error("Missing low surrogate")
-                self.pos += 2
-                low = self.read_hex_codepoint()
-                if not 0xDC00 <= low <= 0xDFFF:
-                    self.error("Invalid low surrogate")
-                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
-            elif 0xDC00 <= code <= 0xDFFF:
-                self.error("Unexpected low surrogate")
-            return chr(code)
-        
-        # ... Number parser enforcing trailing/leading float logic ...
-```
+### Greedy Policy
+- Evolve mutations strictly using failure evidence generated by the *best accepted prompt*.
+- On score regression, mutations are discarded, search reverts to the best prompt, and previous failures are provided as negative search history to avoid repeating failed paths.
 
 ---
 
-## 4. Conservative Roadmap
+## 4. Verification & Holdout Generalization
 
-To scale this to a true self-improving agent platform, we must address existing limitations without overclaiming capabilities.
+### Automated Regression Suite
+A 14-test verification suite (`test_evaluator.py` and `test_rsi_loop.py`) runs as a gate to verify:
+- Class proxy late-binding.
+- deque import isolation.
+- Exception MRO reconstruction.
+- Sandbox file-read blocks.
+- Resource-limit enforcement (CPU, file size, process fork blocks).
+- Structured JSONL parsing (multiple agent messages, missing turn events, malformed input).
+- Atomic promotion.
 
-### Identified Limits:
-1. **Low Benchmark Diversity**: 3 benchmarks are not representative. An agent could easily overfit a prompt to pass these three while breaking general capabilities.
-2. **Greedy Trajectory Selection**: Currently, the outer loop accepts a mutated prompt only if the score is strictly higher. It does not allow for exploration of prompts that might yield long-term benefits despite minor short-term drops.
-
-### Recommended Next Steps:
-
-1. **Adversarial Benchmark Ingestion**
-   * Expand the suite to at least 15 heterogeneous tasks including: AST transformation, state-machine generators, and basic cryptographical routines.
-   * Write an automated script that extracts tasks from public datasets (like HumanEval) and structures them into the `/benchmarks` directory.
-
-2. **Cost-Agnostic vs. Cost-Aware Search**
-   * Track token usage of the inner loops programmatically.
-   * Mutate the fitness function from `score` to `score - alpha * (tokens_used / 1000)`. This forces the optimizer to actively seek smaller, tighter prompts (context compression).
-
-3. **Rollout Policies (Lineage Branching)**
-   * Avoid simple overwrite of prompts. Implement a prompt mutation tree.
-   * Spawn 3 parallel prompt variations per iteration, evaluate them in parallel branches, and choose the most promising path (similar to the tree-search policies discovered in AIDE²).
+### Unseen Holdout Task
+The final promoted best prompt is validated against the unseen `state_machine` holdout task:
+- Codex is run in a separate directory containing only the copied `problem.txt`.
+- The candidate code is executed securely against the host-side `test_holdout.py` (which is kept out of the worker's sandbox).
+- Results, solution hashes, and harness hashes are written to the sealed `best_manifest.json` validation log.

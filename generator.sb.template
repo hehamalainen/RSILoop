@@ -1,0 +1,32 @@
+(version 1)
+(deny default)
+
+(allow process-fork)
+(allow process-exec)
+(allow sysctl-read)
+(allow mach-lookup)
+(allow network-outbound)
+
+(allow file-read*
+    (literal "/")
+    (subpath "/System")
+    (subpath "/usr")
+    (subpath "/Library")
+    (subpath "/opt/homebrew")
+    (subpath "/Users/heikkihamalainen/.codex")
+    (literal "/Users/heikkihamalainen/.CFUserTextEncoding")
+    (subpath "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop")
+    (subpath "{candidate_dir}")
+    (subpath "{temp_dir}")
+    (subpath "/private/etc/resolv.conf")
+    (subpath "/private/etc/ssl")
+    (subpath "/etc")
+)
+
+(allow file-read-metadata)
+
+(allow file-write*
+    (subpath "/Users/heikkihamalainen/.codex")
+    (subpath "{candidate_dir}")
+    (subpath "{temp_dir}")
+)
