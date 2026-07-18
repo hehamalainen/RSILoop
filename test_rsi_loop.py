@@ -16,10 +16,14 @@ from unittest import mock
 # Treat warnings as errors
 warnings.simplefilter('error', ResourceWarning)
 
-unraisable_exceptions = []
-def custom_unraisable_hook(unraisable):
-    unraisable_exceptions.append(unraisable)
-sys.unraisablehook = custom_unraisable_hook
+if getattr(sys.unraisablehook, "__name__", "") == "unraisable_hook":
+    main_mod = sys.modules.get('__main__')
+    unraisable_exceptions = getattr(main_mod, 'unraisable_exceptions', [])
+else:
+    unraisable_exceptions = []
+    def custom_unraisable_hook(unraisable):
+        unraisable_exceptions.append(unraisable)
+    sys.unraisablehook = custom_unraisable_hook
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -182,6 +186,47 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
                     "test prompt", "system", "/tmp", ctx
                 )
             self.assertIn("ceiling breached", str(ctx_err.exception).lower())
+            self.assertEqual(ctx.consumed_tokens, 50001)
+
+    # ── Test 29b: mock Codex invalid token values ─────────────────────────────
+
+    def test_mock_codex_invalid_token_values(self):
+        from rsi_loop import call_codex_sandboxed
+
+        # Test cases for invalid token values
+        invalid_tokens = [
+            "45",         # String
+            -10,          # Negative
+            12.5,         # Float
+            True,         # Boolean
+        ]
+
+        for val in invalid_tokens:
+            fake_stdout = "\n".join([
+                '{"type":"turn.started"}',
+                '{"type":"item.completed","item":{"type":"agent_message","text":"code"}}',
+                f'{{"type":"turn.completed","usage":{{"input_tokens":100,"output_tokens":{json.dumps(val)}}}}}',
+            ])
+
+            ctx = RunContext()
+            ctx.consumed_tokens = 0
+            ctx.codex_model = "codex-mini-latest"
+
+            with mock.patch("rsi_loop._build_codex_temp_home", return_value=tempfile.mkdtemp()), \
+                 mock.patch("rsi_loop._build_generator_sb", return_value="/dev/null"), \
+                 mock.patch("rsi_loop._cleanup_temp_home"), \
+                 mock.patch("subprocess.run") as mock_run:
+                mock_run.return_value = mock.Mock(
+                    returncode=0,
+                    stdout=fake_stdout,
+                    stderr="",
+                )
+                with self.assertRaises(ExperimentInvalidError) as ctx_err:
+                    call_codex_sandboxed(
+                        "test prompt", "system", "/tmp", ctx
+                    )
+                self.assertTrue(ctx.unknown_token_state)
+                self.assertEqual(ctx.consumed_tokens, 0)
 
     # ── Test 30: generator credential isolation denials ──────────────────────
 
@@ -520,6 +565,21 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         escaped_link = os.path.join(base, "history", "link_out")
         os.symlink(outside, escaped_link)
         self.assertFalse(is_contained(escaped_link, base))
+
+    # ── Test 36: Codex binary path detection ──────────────────────────────────
+
+    def test_codex_bin_path_detection(self):
+        from rsi_loop import _get_codex_bin_path
+
+        # Test fallback order
+        with mock.patch("os.path.exists", side_effect=lambda p: p == "/usr/local/bin/codex"):
+            self.assertEqual(_get_codex_bin_path(), "/usr/local/bin/codex")
+
+        with mock.patch("os.path.exists", side_effect=lambda p: p == "/opt/homebrew/bin/codex"):
+            self.assertEqual(_get_codex_bin_path(), "/opt/homebrew/bin/codex")
+
+        with mock.patch("os.path.exists", return_value=False):
+            self.assertEqual(_get_codex_bin_path(), "/opt/homebrew/bin/codex")
 
 if __name__ == "__main__":
     unittest.main()

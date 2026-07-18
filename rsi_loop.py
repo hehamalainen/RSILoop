@@ -45,6 +45,7 @@ class RunContext:
         self.consumed_tokens = 0
         self.unknown_token_state = False
         self.current_stage = "pre-init"
+        self.allow_no_holdout = os.environ.get("ALLOW_NO_HOLDOUT") == "1"
 
 # ── Containment Helpers ───────────────────────────────────────────────────────
 
@@ -98,6 +99,14 @@ def parse_codex_jsonl_output(stdout_lines: list) -> tuple:
         raise ExperimentInvalidError(f"Codex JSONL stream missing turn.completed event (count={turn_completed_count})")
     if not usage_data:
         raise ExperimentInvalidError("Codex JSONL turn.completed has no usage data — fail closed")
+
+    output_tokens = usage_data.get("output_tokens")
+    if output_tokens is None:
+        raise ExperimentInvalidError("Codex JSONL usage has no output_tokens")
+    if not isinstance(output_tokens, int) or isinstance(output_tokens, bool):
+        raise ExperimentInvalidError(f"output_tokens must be an integer, got: {type(output_tokens).__name__} ({output_tokens!r})")
+    if output_tokens < 0:
+        raise ExperimentInvalidError(f"output_tokens must be non-negative, got: {output_tokens}")
 
     return code, usage_data
 
@@ -267,7 +276,7 @@ def call_codex_sandboxed(
             "TMPDIR": real_temp_home,
         }
 
-        codex_bin = "/opt/homebrew/bin/codex"
+        codex_bin = _get_codex_bin_path()
         cmd = [
             "sandbox-exec", "-f", sb_path,
             codex_bin, "exec", "-",
@@ -629,11 +638,15 @@ def run_holdout_evaluation(
     harness_file = os.path.join(PRIVATE_DIR, "simple_regex_matcher", "test_holdout.py")
 
     if not os.path.exists(PRIVATE_DIR):
+        if not getattr(ctx, "allow_no_holdout", False):
+            raise ExperimentInvalidError("Private holdout directory is missing and no-holdout mode is not authorized")
         return None, 0
 
     verify_holdout_hashes(PRIVATE_DIR)
 
     if not os.path.exists(problem_file) or not os.path.exists(harness_file):
+        if not getattr(ctx, "allow_no_holdout", False):
+            raise ExperimentInvalidError("Private holdout files simple_regex_matcher are missing and no-holdout mode is not authorized")
         sys.stdout.write("Holdout simple_regex_matcher files not found. Skipping.\n")
         return None, 0
 
@@ -1035,7 +1048,8 @@ def _main_exec(ctx: RunContext) -> None:
             "50000 ceiling is authoritative."
         ),
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "note": "Statistical significance is not established by validation gate sampling."
+        "note": "Statistical significance is not established by validation gate sampling.",
+        "no_holdout_mode_active": ctx.allow_no_holdout,
     }
     if holdout_record:
         promoted_manifest["holdout"] = holdout_record

@@ -65,6 +65,25 @@ def main():
     executed_count = result.testsRun
     sys.stdout.write(f"Executed test cases: {executed_count}\n")
 
+    # Assert that the active hook is still our unraisable_hook
+    if sys.unraisablehook is not unraisable_hook:
+        sys.stderr.write("FATAL: sys.unraisablehook was overwritten during test discovery!\n")
+        success = False
+
+    # Test with a controlled unraisable exception
+    import collections
+    UnraisableArgs = collections.namedtuple('UnraisableArgs', ['exc_type', 'exc_value', 'exc_traceback', 'err_msg', 'object'])
+    dummy_args = UnraisableArgs(exc_type=ValueError, exc_value=ValueError("Controlled test exception"), exc_traceback=None, err_msg="Controlled test", object=None)
+
+    initial_len = len(unraisable_exceptions)
+    sys.unraisablehook(dummy_args)
+    if len(unraisable_exceptions) <= initial_len or unraisable_exceptions[-1].exc_value is not dummy_args.exc_value:
+        sys.stderr.write("FATAL: sys.unraisablehook failed to collect the controlled unraisable exception!\n")
+        success = False
+    else:
+        # Remove the controlled exception from the list so it doesn't trigger "unraisable exception detected" failure
+        unraisable_exceptions.pop()
+
     if not success:
         sys.exit(1)
 

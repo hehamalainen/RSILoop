@@ -17,10 +17,14 @@ import math
 # Treat warnings as errors
 warnings.simplefilter('error', ResourceWarning)
 
-unraisable_exceptions = []
-def custom_unraisable_hook(unraisable):
-    unraisable_exceptions.append(unraisable)
-sys.unraisablehook = custom_unraisable_hook
+if getattr(sys.unraisablehook, "__name__", "") == "unraisable_hook":
+    main_mod = sys.modules.get('__main__')
+    unraisable_exceptions = getattr(main_mod, 'unraisable_exceptions', [])
+else:
+    unraisable_exceptions = []
+    def custom_unraisable_hook(unraisable):
+        unraisable_exceptions.append(unraisable)
+    sys.unraisablehook = custom_unraisable_hook
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
