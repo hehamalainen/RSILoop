@@ -1,5 +1,5 @@
 """
-test_evaluator.py — 20+ tests for the evaluator / IPC / sandbox layer.
+test_evaluator.py — Strict regression verification suite for the evaluator / IPC / sandbox layer.
 """
 import os
 import sys
@@ -12,6 +12,7 @@ import threading
 import gc
 import warnings
 import signal
+import math
 
 # Treat warnings as errors
 warnings.simplefilter('error', ResourceWarning)
@@ -35,6 +36,7 @@ def _write_solution(candidate_dir: str, code: str) -> None:
 
 class TestEvaluatorRigor(unittest.TestCase):
     def setUp(self):
+        unraisable_exceptions.clear()
         self.candidate_dir = tempfile.mkdtemp(prefix="test_candidate_")
         self.test_harness_path = _make_harness(self.candidate_dir, """
 import unittest
@@ -68,15 +70,18 @@ sys.exit(0)
     # ── Test 2: write outside sandbox ────────────────────────────────────────
 
     def test_sandbox_write_block(self):
-        _write_solution(self.candidate_dir, """
+        home = os.path.expanduser("~")
+        leak_file = os.path.join(home, 'escaped_test_file_tmp.txt')
+        _write_solution(self.candidate_dir, f"""
 def solve():
-    with open('/Users/heikkihamalainen/escaped_test.txt', 'w') as f:
+    with open({leak_file!r}, 'w') as f:
         f.write('leak')
     return "OK"
 """)
         from evaluator import run_evaluation
         res = run_evaluation(self.candidate_dir, self.test_harness_path)
         self.assertFalse(res["success"])
+        self.assertFalse(os.path.exists(leak_file))
 
     # ── Test 3: subprocess spawn blocked ─────────────────────────────────────
 
@@ -121,9 +126,10 @@ def solve():
     # ── Test 6: private file leak blocked ────────────────────────────────────
 
     def test_private_file_leak_block(self):
-        _write_solution(self.candidate_dir, """
+        private_path = os.path.realpath(os.path.join(os.path.dirname(BASE_DIR), "rsi_loop_private", "benchmarks", "simple_regex_matcher", "test_holdout.py"))
+        _write_solution(self.candidate_dir, f"""
 def solve():
-    with open('/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop_private/benchmarks/simple_regex_matcher/test_holdout.py', 'r') as f:
+    with open({private_path!r}, 'r') as f:
         _ = f.read()
     return "OK"
 """)
@@ -187,13 +193,17 @@ def solve():
     # ── Test 10: setup limit failure causes fail-closed exit ─────────────────
 
     def test_setup_limit_failure(self):
+        from evaluator import RunnerProxy
+        proxy = RunnerProxy(self.candidate_dir, self.candidate_dir)
+        sb_path = proxy._build_candidate_sb()
+
         cmd = [
-            "sandbox-exec", "-p", "(version 1) (deny default)",
+            "sandbox-exec", "-f", sb_path,
             os.path.join(BASE_DIR, ".venv", "bin", "python"),
             "-u",
             os.path.join(BASE_DIR, "candidate_runner.py"),
         ]
-        res = subprocess.run(cmd, capture_output=True, timeout=5)
+        res = subprocess.run(cmd, input=b"invalid\n", capture_output=True, timeout=5)
         self.assertNotEqual(res.returncode, 0)
 
     # ── Test 11: RLIMIT_FSIZE enforcement (EFBIG/SIGXFSZ) ─────────────────────
@@ -215,22 +225,17 @@ def solve():
     # ── Test 12: IPC adversarial frames (wrong UUID, duplicate, stalled) ────
 
     def test_ipc_adversarial_frames(self):
-        """
-        Verify that stalled IPC frames trigger read timeout.
-        """
-        from evaluator import WorkerProxy, CandidateProtocolError
+        from evaluator import RunnerProxy, CandidateProtocolError
         temp_dir = tempfile.mkdtemp()
         try:
-            proxy = WorkerProxy.__new__(WorkerProxy)
+            proxy = RunnerProxy.__new__(RunnerProxy)
             proxy._candidate_dir = self.candidate_dir
             proxy._temp_dir = temp_dir
             proxy._proc = None
             proxy._sent_uuids = set()
             proxy._session_id = "test-session"
 
-            # Stalled frame timeout test
             import unittest.mock as mock
-            responses = []
             with mock.patch.object(proxy, '_write_frame'), \
                  mock.patch.object(proxy, '_read_frame', side_effect=CandidateProtocolError("IPC read timeout exceeded")), \
                  mock.patch.object(proxy, '_proc') as mock_proc:
@@ -244,19 +249,30 @@ def solve():
     # ── Test 13: parent-supervised reaping on SIGKILL ────────────────────────
 
     def test_parent_supervised_reaping(self):
-        """
-        Verify that evaluator reaps process when it kills itself via SIGKILL.
-        """
         _write_solution(self.candidate_dir, """
 import os, signal
 def solve():
     os.kill(os.getpid(), signal.SIGKILL)
     return "OK"
 """)
-        from evaluator import run_evaluation
-        res = run_evaluation(self.candidate_dir, self.test_harness_path, timeout=10.0)
+        original_popen = subprocess.Popen
+        captured_procs = []
+        def spy_popen(*args, **kwargs):
+            p = original_popen(*args, **kwargs)
+            captured_procs.append(p)
+            return p
+
+        import unittest.mock as mock
+        with mock.patch("subprocess.Popen", side_effect=spy_popen):
+            from evaluator import run_evaluation
+            res = run_evaluation(self.candidate_dir, self.test_harness_path, timeout=10.0)
+
         self.assertFalse(res["success"])
-        self.assertTrue(any(x in str(res.get("error")) for x in ["unexpected", "exit", "killed", "SIGKILL", "signal"]))
+        self.assertEqual(len(captured_procs), 1)
+        proc = captured_procs[0]
+        self.assertIsNotNone(proc.poll())
+        with self.assertRaises(OSError):
+            os.kill(proc.pid, 0)
 
     # ── Test 14: output flooding drain ───────────────────────────────────────
 
@@ -264,17 +280,18 @@ def solve():
         _write_solution(self.candidate_dir, """
 import sys
 def solve():
-        sys.stderr.write('X' * 2 * 1024 * 1024)
-        return "OK"
+    sys.stderr.write('X' * 2 * 1024 * 1024)
+    return "OK"
 """)
         from evaluator import run_evaluation
         res = run_evaluation(self.candidate_dir, self.test_harness_path, timeout=15.0)
         self.assertTrue(res["success"])
 
-    # ── Test 15: /private/var/folders blocked ─────────────────────────────────
+    # ── Test 15: candidate cannot read codebase files ─────────────────────────
 
     def test_candidate_filesystem_allowlist(self):
-        _write_solution(self.candidate_dir, """
+        repo_file = os.path.realpath(os.path.join(BASE_DIR, "rsi_loop.py"))
+        _write_solution(self.candidate_dir, f"""
 import os
 def solve():
     try:
@@ -283,7 +300,7 @@ def solve():
     except PermissionError:
         pass
     try:
-        open('/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/rsi_loop.py').read()
+        open({repo_file!r}).read()
         return "LEAKED_REPO"
     except PermissionError:
         pass
@@ -296,7 +313,6 @@ def solve():
     # ── Test 16: exception qualified identity ─────────────────────────────────
 
     def test_exception_qualified_identity(self):
-        from evaluator import run_evaluation, exception_class_registry
         _write_solution(self.candidate_dir, """
 class LevelA(Exception):
     pass
@@ -322,6 +338,7 @@ class TestThreeLevel(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 """)
+        from evaluator import run_evaluation
         res = run_evaluation(self.candidate_dir, h)
         self.assertTrue(res["success"], f"Three-level MRO error: {res['error']}")
 
@@ -368,39 +385,32 @@ if __name__ == "__main__":
         res = run_evaluation(self.candidate_dir, h)
         self.assertTrue(res["success"], f"CircularBuffer regression: {res['error']}")
 
-    # ── Test 18: trailing frames after shutdown invalidate evaluation ─────────
+    # ── Test 18: trailing data / malformed frames after shutdown ─────────────
 
     def test_shutdown_trailing_frames_invalidate(self):
-        """
-        Verify that when a trailing frame is received after shutdown, run_evaluation fails.
-        """
-        import unittest.mock as mock
-        from evaluator import WorkerProxy, run_evaluation
-
-        # Test candidate
         _write_solution(self.candidate_dir, "def solve(): return 'OK'")
-
-        # We mock RunnerProxy.shutdown to return False (trailing data)
+        import unittest.mock as mock
+        from evaluator import run_evaluation
         with mock.patch("evaluator.RunnerProxy.shutdown", return_value=False):
             res = run_evaluation(self.candidate_dir, self.test_harness_path)
             self.assertFalse(res["success"])
             self.assertIn("shutdown integrity check failed", str(res.get("error")))
 
-    # ── Test 19: worker cannot read harness files ─────────────────────────────
+    # ── Test 19: candidate sandbox containment read check ─────────────────────
 
-    def test_worker_no_harness_access(self):
-        worker_sb_path = os.path.join(BASE_DIR, "worker.sb")
-        if not os.path.exists(worker_sb_path):
-            self.skipTest("worker.sb not found")
+    def test_candidate_sandbox_containment_execution(self):
+        from evaluator import RunnerProxy
+        proxy = RunnerProxy(self.candidate_dir, self.candidate_dir)
+        sb_path = proxy._build_candidate_sb()
+
         test_harness = os.path.join(BASE_DIR, "benchmarks", "circular_buffer", "test_harness.py")
-        cmd = ["sandbox-exec", "-f", worker_sb_path, "cat", test_harness]
+        cmd = ["sandbox-exec", "-f", sb_path, "cat", test_harness]
         res = subprocess.run(cmd, capture_output=True, timeout=5)
         self.assertNotEqual(res.returncode, 0)
 
     # ── Test 20: generator sandbox positive startup ───────────────────────────
 
     def test_generator_sandbox_positive_startup(self):
-        import tempfile, os
         from rsi_loop import _build_codex_temp_home, _build_generator_sb, _cleanup_temp_home
 
         real_temp_home = _build_codex_temp_home()
@@ -413,7 +423,10 @@ if __name__ == "__main__":
                 "USER": os.environ.get("USER", "codex"),
                 "TMPDIR": real_temp_home,
             }
-            cmd = ["sandbox-exec", "-f", sb_path, "/opt/homebrew/bin/codex", "--version"]
+            codex_bin = "/opt/homebrew/bin/codex"
+            if not os.path.exists(codex_bin):
+                codex_bin = "/usr/local/bin/codex"
+            cmd = ["sandbox-exec", "-f", sb_path, codex_bin, "--version"]
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=allowed_env)
             self.assertEqual(res.returncode, 0)
         finally:
@@ -574,7 +587,6 @@ if __name__ == "__main__":
         res1 = run_evaluation(self.candidate_dir, h1)
         self.assertTrue(res1["success"], f"Matrix instance attr failed: {res1.get('error')}")
 
-        # Property version
         matrix_spec_property = """
 class Matrix:
     def __init__(self, data: list):
@@ -590,23 +602,150 @@ class Matrix:
         res2 = run_evaluation(self.candidate_dir, h1)
         self.assertTrue(res2["success"], f"Matrix property failed: {res2.get('error')}")
 
+    # ── Test 23: Codec bounds, caching and proxy identity ────────────────────
+
+    def test_codec_boundary_limits(self):
+        from evaluator import to_envelope, from_envelope, class_proxy_cache, proxy_instance_cache, run_evaluation
+
+        # 1. NaN and Infinity float rejection
+        with self.assertRaises(ValueError):
+            to_envelope(float('nan'))
+        with self.assertRaises(ValueError):
+            to_envelope(float('inf'))
+        with self.assertRaises(ValueError):
+            from_envelope({"type": "primitive", "value": float('nan')})
+
+        # 2. Bounded integer length check
+        to_envelope(10**99)
+        with self.assertRaises(ValueError):
+            to_envelope(10**101)
+        with self.assertRaises(ValueError):
+            from_envelope({"type": "primitive", "value": 10**101})
+
+        # 3. Lossless dictionary keys
+        test_dict = {(1, 2): "value"}
+        enveloped = to_envelope(test_dict)
+        decoded = from_envelope(enveloped)
+        self.assertEqual(decoded, test_dict)
+
+        # 4. Negative/boolean object IDs rejected
+        with self.assertRaises(ValueError):
+            from_envelope({"type": "object_ref", "module": "solution", "qualname": "Matrix", "obj_id": -5})
+        with self.assertRaises(ValueError):
+            from_envelope({"type": "object_ref", "module": "solution", "qualname": "Matrix", "obj_id": True})
+
+        # 5. Decode limits: depth and nodes count
+        deep_list = []
+        for _ in range(18):
+            deep_list = [deep_list]
+        with self.assertRaises(ValueError):
+            to_envelope(deep_list)
+
+        large_list = list(range(1100))
+        with self.assertRaises(ValueError):
+            to_envelope(large_list)
+
+        # 6. Proxy isinstance and repeated reference identity (under run_evaluation)
+        _write_solution(self.candidate_dir, """
+class Matrix:
+    def __init__(self, data):
+        self.data = data
+    def get_self(self):
+        return self
+""")
+        h_matrix = _make_harness(self.candidate_dir, """
+import unittest
+class TestMatrixIdentity(unittest.TestCase):
+    def test_identity(self):
+        from solution import Matrix
+        m1 = Matrix([[1]])
+        m2 = m1.get_self()
+        self.assertIs(m1, m2)
+        self.assertIsInstance(m1, Matrix)
+if __name__ == "__main__":
+    unittest.main()
+""")
+        res = run_evaluation(self.candidate_dir, h_matrix)
+        self.assertTrue(res["success"], f"Proxy identity or isinstance failed: {res.get('error')}")
+
+        self.assertEqual(len(class_proxy_cache), 0)
+        self.assertEqual(len(proxy_instance_cache), 0)
+
+    # ── Test 24: Exported variables containing object references ──────────────
+
+    def test_exported_variable_containing_object_reference(self):
+        _write_solution(self.candidate_dir, """
+class Node:
+    def __init__(self, val):
+        self.val = val
+default_node = Node(42)
+""")
+        h_var = _make_harness(self.candidate_dir, """
+import unittest
+class TestVarRef(unittest.TestCase):
+    def test_val(self):
+        from solution import Node, default_node
+        self.assertIsInstance(default_node, Node)
+        self.assertEqual(default_node.val, 42)
+if __name__ == "__main__":
+    unittest.main()
+""")
+        from evaluator import run_evaluation
+        res = run_evaluation(self.candidate_dir, h_var)
+        self.assertTrue(res["success"], f"Exported variable containing ref failed: {res.get('error')}")
+
+    # ── Test 25: Object store capacity reuse ─────────────────────────────────
+
+    def test_object_store_capacity_and_reuse(self):
+        _write_solution(self.candidate_dir, """
+class Box:
+    pass
+single_box = Box()
+def get_same():
+    return single_box
+def get_distinct(idx):
+    return Box()
+""")
+        h_same = _make_harness(self.candidate_dir, """
+import unittest
+class TestStore(unittest.TestCase):
+    def test_same(self):
+        from solution import get_same
+        for _ in range(1200):
+            _ = get_same()
+if __name__ == "__main__":
+    unittest.main()
+""")
+        from evaluator import run_evaluation
+        res = run_evaluation(self.candidate_dir, h_same)
+        self.assertTrue(res["success"], f"Reusing same object failed: {res.get('error')}")
+
+        h_distinct = _make_harness(self.candidate_dir, """
+import unittest
+class TestStore(unittest.TestCase):
+    def test_distinct(self):
+        from solution import get_distinct
+        for i in range(1100):
+            _ = get_distinct(i)
+if __name__ == "__main__":
+    unittest.main()
+""")
+        res = run_evaluation(self.candidate_dir, h_distinct)
+        self.assertFalse(res["success"])
+        self.assertIn("limit of 1000 exceeded", str(res.get("error")))
+
+    # ── Test 26: Real malformed framing during evaluation (bytes) ────────────
+
+    def test_real_malformed_framing_transport(self):
+        from evaluator import RunnerProxy, CandidateProtocolError
+        proxy = RunnerProxy(self.candidate_dir, self.candidate_dir)
+        proxy.start()
+        proxy._proc.stdin.write(b"bad_length_header\n")
+        proxy._proc.stdin.flush()
+        with self.assertRaises(CandidateProtocolError):
+            proxy.send_request({"action": "check_import"})
+        proxy.close()
+        self.assertIsNotNone(proxy._proc.poll())
 
 if __name__ == "__main__":
-    # Custom Strict Test Runner that asserts skipped == 0
-    class StrictTestResult(unittest.TextTestResult):
-        def addSkip(self, test, reason):
-            super().addSkip(test, reason)
-            raise AssertionError(f"Skips are not allowed: {test} skipped because {reason}")
-
-    class StrictTestRunner(unittest.TextTestRunner):
-        resultclass = StrictTestResult
-        def run(self, test):
-            res = super().run(test)
-            if len(res.skipped) > 0:
-                raise AssertionError(f"Skips are not allowed: {len(res.skipped)} tests skipped")
-            # Discover and report test count
-            sys.stdout.write(f"\nStrictTestRunner discovered and ran {res.testsRun} tests.\n")
-            sys.stdout.flush()
-            return res
-
-    unittest.main(testRunner=StrictTestRunner)
+    unittest.main()

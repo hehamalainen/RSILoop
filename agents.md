@@ -5,7 +5,7 @@ Welcome! This document provides the necessary context and entry points for any a
 ---
 
 ## 🎯 Project Overview
-**RSILoop** is a bi-level optimization harness designed for **Recursive Self-Improvement (RSI)** of LLM-based coding prompts. The loop automatically evaluates a coding agent, runs generated solutions in a zero-trust sandbox, feeds traceback errors into a meta-optimizer, and mutates system prompts to iteratively improve performance.
+**RSILoop** is a bi-level optimization harness designed for **Recursive Self-Improvement (RSI)** of LLM-based coding prompts. The loop automatically evaluates a coding agent, runs generated solutions in a host-contained sandbox, feeds traceback errors into a meta-optimizer, and mutates system prompts to iteratively improve performance.
 
 ```mermaid
 flowchart TD
@@ -17,9 +17,9 @@ flowchart TD
     end
 
     subgraph Sandbox [Sandboxed Subprocess / Inner Loop]
-        EV -->|5. Spawns Worker| WRK[sandbox_worker.py]
-        WRK -->|6. Sets resource limits| WRK
-        WRK -->|7. Imports| SOL
+        EV -->|5. Spawns Runner| RUN[candidate_runner.py]
+        RUN -->|6. Sets resource limits| RUN
+        RUN -->|7. Imports| SOL
         EV -->|8. Maps Proxies| TEST[test_harness.py]
         TEST -->|9. Runs assertions| EV
     end
@@ -30,11 +30,12 @@ flowchart TD
 ---
 
 ## 📂 Codebase Navigation
-- **[rsi_loop.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/rsi_loop.py)**: Main bi-level optimization driver (JSONL parser + Greedy Policy).
-- **[evaluator.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/evaluator.py)**: Sandbox execution evaluator with dynamic MRO exception registry.
-- **[sandbox_worker.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/sandbox_worker.py)**: Zero-trust worker enforcing irreversible resource limits.
-- **[test_evaluator.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/test_evaluator.py)**: 14-test regression verification suite.
-- **[test_rsi_loop.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/test_rsi_loop.py)**: Orchestrator and parser validation tests.
+- **[rsi_loop.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/rsi_loop.py)**: Main bi-level optimization driver (JSONL parser + Greedy Policy, RunContext).
+- **[evaluator.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/evaluator.py)**: Sandbox execution evaluator with dynamic class/instance caching and unified clean exit.
+- **[candidate_runner.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/candidate_runner.py)**: Host-contained runner enforcing irreversible resource limits and RPC envelope codec.
+- **[test_evaluator.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/test_evaluator.py)**: Containment, IPC, and reference solution regression tests.
+- **[test_rsi_loop.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/test_rsi_loop.py)**: Orchestrator, preflight verification, and E2E state tests.
+- **[run_tests.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/run_tests.py)**: Strict test runner enforcing zero skips and zero ResourceWarnings.
 - **[prompt_templates/](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/prompt_templates/)**:
   - `inner_agent_baseline.txt`: Initial prompt for the generator.
   - `meta_optimizer.txt`: System prompt guiding the prompt mutation logic.
@@ -49,19 +50,18 @@ flowchart TD
    ```bash
    .venv/bin/python verify_env.py
    ```
-2. **Run All Regression Tests**:
+2. **Run All Regression Tests**: Run the strict test launcher:
    ```bash
-   .venv/bin/python test_evaluator.py
-   .venv/bin/python test_rsi_loop.py
+   python3 run_tests.py
    ```
 3. **Run Optimization Loop**: Spin up the automated prompt-mutation iteration.
    ```bash
-   .venv/bin/python rsi_loop.py
+   python3 rsi_loop.py
    ```
 
 ---
 
 ## 📈 Current Project State
-- All baseline benchmarks pass under the zero-trust sandbox containment framework.
-- Active verification suite contains 14 regression and behavioral resource limit tests.
+- All baseline benchmarks pass under the host-contained sandbox framework.
+- Active verification suite contains 41+ regression and behavioral resource limit tests.
 - The authoritative promoted run state is recorded atomically inside `best_manifest.json`.

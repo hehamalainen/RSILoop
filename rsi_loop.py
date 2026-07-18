@@ -34,12 +34,42 @@ class ExperimentInvalidError(Exception):
     """Raised when the experiment is invalidated due to infrastructure failures."""
     pass
 
+class RunContext:
+    def __init__(self):
+        self.run_id = None
+        self.run_dir = None
+        self.approved_commit_sha = None
+        self.lock_file_hash = None
+        self.codex_version = None
+        self.codex_model = "codex-mini-latest"
+        self.consumed_tokens = 0
+        self.unknown_token_state = False
+        self.current_stage = "pre-init"
+
+# ── Containment Helpers ───────────────────────────────────────────────────────
+
+def is_contained(target_path: str, base_dir: str) -> bool:
+    real_target = os.path.realpath(target_path)
+    real_base = os.path.realpath(base_dir)
+    try:
+        common = os.path.commonpath([real_target, real_base])
+        return common == real_base
+    except ValueError:
+        return False
+
+def check_parent_symlinks(path: str):
+    components = []
+    head, tail = os.path.split(path)
+    while tail:
+        components.append(head)
+        head, tail = os.path.split(head)
+    for comp in reversed(components):
+        if comp and comp != "/" and os.path.islink(comp):
+            raise ExperimentInvalidError(f"Symlink detected in path component: {comp}")
+
 # ── JSONL parsing ─────────────────────────────────────────────────────────────
 
 def parse_codex_jsonl_output(stdout_lines: list) -> tuple:
-    """
-    Parse Codex structured JSONL output.
-    """
     code = ""
     usage_data: dict | None = None
     turn_completed_count = 0
@@ -54,24 +84,18 @@ def parse_codex_jsonl_output(stdout_lines: list) -> tuple:
             raise ExperimentInvalidError(f"Malformed JSON line: {line!r} — fail closed: {e}")
 
         etype = event.get("type")
-
         if etype == "item.completed":
             item = event.get("item", {})
             if item.get("type") == "agent_message":
                 code = item.get("text", "").strip()
-
         elif etype == "turn.completed":
             turn_completed_count += 1
             if turn_completed_count > 1:
-                raise ExperimentInvalidError(
-                    "Codex JSONL stream has multiple turn.completed events — fail closed"
-                )
+                raise ExperimentInvalidError("Codex JSONL stream has multiple turn.completed events — fail closed")
             usage_data = event.get("usage")
 
     if turn_completed_count != 1:
-        raise ExperimentInvalidError(
-            f"Codex JSONL stream missing turn.completed event (count={turn_completed_count})"
-        )
+        raise ExperimentInvalidError(f"Codex JSONL stream missing turn.completed event (count={turn_completed_count})")
     if not usage_data:
         raise ExperimentInvalidError("Codex JSONL turn.completed has no usage data — fail closed")
 
@@ -89,9 +113,7 @@ def extract_code(raw_output: str) -> str:
 def _build_codex_temp_home() -> str:
     real_codex_auth = os.path.expanduser("~/.codex/auth.json")
     if not os.path.exists(real_codex_auth):
-        raise ExperimentInvalidError(
-            "Codex auth.json not found at ~/.codex/auth.json — cannot proceed"
-        )
+        raise ExperimentInvalidError("Codex auth.json not found at ~/.codex/auth.json — cannot proceed")
 
     temp_home = tempfile.mkdtemp(prefix="codex_home_")
     os.chmod(temp_home, 0o700)
@@ -119,9 +141,27 @@ def _build_generator_sb(real_temp_home: str, real_candidate_input_dir: str) -> s
     template_path = os.path.join(BASE_DIR, "generator.sb.template")
     with open(template_path) as f:
         tmpl = f.read()
+
+    user_home = os.path.realpath(os.path.expanduser("~"))
+    codex_real_path = os.path.realpath("/opt/homebrew/bin/codex")
+    if os.path.exists(codex_real_path):
+        codex_prefix = os.path.dirname(os.path.dirname(codex_real_path))
+        codex_base_dir = "/opt/homebrew"
+    else:
+        codex_real_path = os.path.realpath("/usr/local/bin/codex")
+        if os.path.exists(codex_real_path):
+            codex_prefix = os.path.dirname(os.path.dirname(codex_real_path))
+            codex_base_dir = "/usr/local"
+        else:
+            codex_prefix = "/opt/homebrew"
+            codex_base_dir = "/opt/homebrew"
+
     sb_content = tmpl.format(
         real_temp_home=real_temp_home,
         real_candidate_input_dir=real_candidate_input_dir,
+        user_home=user_home,
+        codex_prefix=codex_prefix,
+        codex_base_dir=codex_base_dir,
     )
     sb_path = os.path.join(real_temp_home, "generator.sb")
     with open(sb_path, "w") as f:
@@ -143,7 +183,7 @@ def _run_codex_version_smoke_test(sb_path: str, env: dict) -> str:
     return version
 
 def _run_codex_canary(
-    sb_path: str, env: dict, token_ceiling: int, consumed_so_far: int
+    sb_path: str, env: dict, ctx: RunContext
 ) -> int:
     codex_bin = "/opt/homebrew/bin/codex"
     canary_prompt = "Reply with exactly one word: ready"
@@ -152,29 +192,44 @@ def _run_codex_canary(
         codex_bin, "exec", "-",
         "--ephemeral",
         "--json",
-        "--model", "codex-mini-latest",
+        "--model", ctx.codex_model,
     ]
-    res = subprocess.run(
-        cmd,
-        input=canary_prompt,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=env,
-    )
+    try:
+        res = subprocess.run(
+            cmd,
+            input=canary_prompt,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+    except Exception as e:
+        ctx.unknown_token_state = True
+        raise ExperimentInvalidError(f"Canary process execution failed: {e}")
+
     if res.returncode != 0:
+        ctx.unknown_token_state = True
         raise ExperimentInvalidError(
             f"Codex canary call failed (rc={res.returncode}):\nstderr: {res.stderr[:500]}"
         )
-    _, usage = parse_codex_jsonl_output(res.stdout.splitlines())
+
+    try:
+        _, usage = parse_codex_jsonl_output(res.stdout.splitlines())
+    except Exception as e:
+        ctx.unknown_token_state = True
+        raise e
+
     tokens = usage.get("output_tokens")
     if tokens is None:
+        ctx.unknown_token_state = True
         raise ExperimentInvalidError("Codex canary call returned no output_tokens — fail closed")
     tokens = int(tokens)
-    if consumed_so_far + tokens > token_ceiling:
+
+    if ctx.consumed_tokens + tokens > TOKEN_CEILING:
         raise ExperimentInvalidError(
-            f"Token ceiling breached during canary: {consumed_so_far} + {tokens} > {token_ceiling}"
+            f"Token ceiling breached during canary: {ctx.consumed_tokens} + {tokens} > {TOKEN_CEILING}"
         )
+    ctx.consumed_tokens += tokens
     sys.stderr.write(f"[canary] API access verified. Canary output tokens: {tokens}\n")
     sys.stderr.flush()
     return tokens
@@ -183,9 +238,8 @@ def call_codex_sandboxed(
     prompt: str,
     system_instruction: str,
     candidate_dir: str,
+    ctx: RunContext,
     expect_json_code: bool = True,
-    cumulative_tokens: int = 0,
-    token_ceiling: int = TOKEN_CEILING,
 ) -> tuple:
     full_prompt = ""
     if system_instruction:
@@ -214,33 +268,46 @@ def call_codex_sandboxed(
             "-s", "read-only",
             "--ephemeral",
             "--json",
-            "--model", "codex-mini-latest",
+            "--model", ctx.codex_model,
             "-C", real_candidate_input_dir,
         ]
 
-        res = subprocess.run(
-            cmd,
-            input=full_prompt,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=allowed_env,
-        )
+        try:
+            res = subprocess.run(
+                cmd,
+                input=full_prompt,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=allowed_env,
+            )
+        except Exception as e:
+            ctx.unknown_token_state = True
+            raise ExperimentInvalidError(f"Codex process execution failed: {e}")
 
         if res.returncode != 0:
+            ctx.unknown_token_state = True
             raise ExperimentInvalidError(f"Codex returned non-zero exit code {res.returncode}. Stderr: {res.stderr[:500]}")
 
-        raw_msg, usage = parse_codex_jsonl_output(res.stdout.splitlines())
+        try:
+            raw_msg, usage = parse_codex_jsonl_output(res.stdout.splitlines())
+        except Exception as e:
+            ctx.unknown_token_state = True
+            raise e
+
         tokens = usage.get("output_tokens")
         if tokens is None:
+            ctx.unknown_token_state = True
             raise ExperimentInvalidError("Codex call returned no output_tokens — fail closed")
         tokens = int(tokens)
 
-        if cumulative_tokens + tokens > token_ceiling:
+        if ctx.consumed_tokens + tokens > TOKEN_CEILING:
             raise ExperimentInvalidError(
-                f"Token ceiling breached: {cumulative_tokens} + {tokens} = "
-                f"{cumulative_tokens + tokens} > {token_ceiling}"
+                f"Token ceiling breached: {ctx.consumed_tokens} + {tokens} = "
+                f"{ctx.consumed_tokens + tokens} > {TOKEN_CEILING}"
             )
+
+        ctx.consumed_tokens += tokens
 
         if expect_json_code:
             return extract_code(raw_msg), tokens
@@ -253,9 +320,11 @@ def call_codex_sandboxed(
 # ── Evaluation helpers ────────────────────────────────────────────────────────
 
 def run_evaluation_on_candidate(candidate_dir: str, test_harness_path: str) -> dict:
-    from evaluator import run_evaluation
-    # run_evaluation handles exceptions internally; HarnessInfrastructureError is raised
-    return run_evaluation(candidate_dir, test_harness_path)
+    from evaluator import run_evaluation, HarnessInfrastructureError
+    try:
+        return run_evaluation(candidate_dir, test_harness_path)
+    except HarnessInfrastructureError as e:
+        raise ExperimentInvalidError(f"Harness infrastructure failure: {e}") from e
 
 def _list_optimization_benchmarks() -> list:
     return sorted(
@@ -273,11 +342,12 @@ def _list_validation_benchmarks() -> list:
 
 def evaluate_prompt_on_tasks(
     prompt_text: str,
-    run_id: str,
+    run_dir: str,
     iter_id: str,
     benchmarks_root: str,
     task_names: list,
     cumulative_tokens: int,
+    ctx: RunContext,
 ) -> tuple:
     results = {}
     passed_count = 0
@@ -285,7 +355,9 @@ def evaluate_prompt_on_tasks(
 
     for benchmark in task_names:
         benchmark_dir = os.path.join(benchmarks_root, benchmark)
-        iter_task_dir = os.path.join(HISTORY_DIR, f"run_{run_id}", iter_id, benchmark)
+        iter_task_dir = os.path.realpath(os.path.join(run_dir, iter_id, benchmark))
+        if not is_contained(iter_task_dir, run_dir):
+            raise ExperimentInvalidError(f"Directory traversal attempt: {iter_task_dir} is outside {run_dir}")
         os.makedirs(iter_task_dir, exist_ok=True)
 
         task_file = os.path.join(benchmark_dir, "problem.txt")
@@ -293,9 +365,8 @@ def evaluate_prompt_on_tasks(
             task_desc = f.read()
 
         solution_code, tokens = call_codex_sandboxed(
-            task_desc, prompt_text, iter_task_dir,
+            task_desc, prompt_text, iter_task_dir, ctx,
             expect_json_code=True,
-            cumulative_tokens=cumulative_tokens + total_tokens,
         )
         total_tokens += tokens
 
@@ -326,7 +397,7 @@ def mutate_prompt(
     current_prompt: str,
     failures: list,
     iter_dir: str,
-    cumulative_tokens: int,
+    ctx: RunContext,
 ) -> tuple:
     with open(OPTIMIZER_PROMPT_PATH) as f:
         meta_prompt = f.read()
@@ -339,9 +410,8 @@ def mutate_prompt(
         context += f"Test Error:\n{fail['error']}\n\n"
 
     return call_codex_sandboxed(
-        context, meta_prompt, iter_dir,
+        context, meta_prompt, iter_dir, ctx,
         expect_json_code=False,
-        cumulative_tokens=cumulative_tokens,
     )
 
 # ── Write-Once Fsynced Manifest Helpers ───────────────────────────────────────
@@ -374,8 +444,15 @@ def load_and_verify_best_manifest() -> dict | None:
             ptr = json.load(f)
         if ptr.get("pointer_schema_version") != "2":
             return ptr
-        path = os.path.join(BASE_DIR, ptr["run_manifest_path"])
+        path = os.path.realpath(os.path.join(BASE_DIR, ptr["run_manifest_path"]))
         expected_hash = ptr["run_manifest_sha256"]
+
+        # Validate pointer target resolves beneath history/ and filename is run_manifest.json
+        if not is_contained(path, os.path.realpath(HISTORY_DIR)):
+            raise RuntimeError(f"Pointer target {path} is not contained within HISTORY_DIR")
+        if os.path.basename(path) != "run_manifest.json":
+            raise RuntimeError(f"Pointer target filename {os.path.basename(path)} is not run_manifest.json")
+
         if not os.path.exists(path):
             raise RuntimeError(f"Manifest file missing: {path}")
         actual_hash = _sha256_file(path)
@@ -402,7 +479,7 @@ def update_best_manifest_pointer(manifest_path: str) -> None:
 
 # ── Verification Checkers ─────────────────────────────────────────────────────
 
-def verify_experiment_lock() -> str:
+def verify_experiment_lock(ctx: RunContext) -> str:
     try:
         res = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -418,6 +495,9 @@ def verify_experiment_lock() -> str:
     lock_path = os.path.join(BASE_DIR, "experiment.lock")
     if not os.path.exists(lock_path):
         raise ExperimentInvalidError("experiment.lock file missing — fail closed")
+
+    ctx.lock_file_hash = _sha256_file(lock_path)
+
     try:
         with open(lock_path) as f:
             lock_data = json.load(f)
@@ -442,7 +522,27 @@ def verify_experiment_lock() -> str:
             f"Git HEAD mismatch: current HEAD is {current_sha}, "
             f"but approved commit SHA in experiment.lock is {approved_sha}"
         )
+    ctx.approved_commit_sha = approved_sha
     return approved_sha
+
+EXPECTED_PREFLIGHT_KEYS = {
+    "prompt_templates/inner_agent_baseline.txt",
+    "prompt_templates/meta_optimizer.txt",
+    "benchmarks/circular_buffer/problem.txt",
+    "benchmarks/circular_buffer/test_harness.py",
+    "benchmarks/json_parser/problem.txt",
+    "benchmarks/json_parser/test_harness.py",
+    "benchmarks/run_length_encoding/problem.txt",
+    "benchmarks/run_length_encoding/test_harness.py",
+    "benchmarks/huffman_coding/problem.txt",
+    "benchmarks/huffman_coding/test_harness.py",
+    "benchmarks/validation/string_calculator/problem.txt",
+    "benchmarks/validation/string_calculator/test_harness.py",
+    "benchmarks/validation/matrix_operations/problem.txt",
+    "benchmarks/validation/matrix_operations/test_harness.py",
+    "candidate.sb.template",
+    "generator.sb.template"
+}
 
 def verify_preflight_hashes():
     if not os.path.exists(PREFLIGHT_HASHES_PATH):
@@ -450,36 +550,21 @@ def verify_preflight_hashes():
     with open(PREFLIGHT_HASHES_PATH) as f:
         preflight_hashes = json.load(f)
 
-    expected_keys = {
-        "prompt_templates/inner_agent_baseline.txt",
-        "prompt_templates/meta_optimizer.txt",
-        "benchmarks/circular_buffer/problem.txt",
-        "benchmarks/circular_buffer/test_harness.py",
-        "benchmarks/json_parser/problem.txt",
-        "benchmarks/json_parser/test_harness.py",
-        "benchmarks/run_length_encoding/problem.txt",
-        "benchmarks/run_length_encoding/test_harness.py",
-        "benchmarks/huffman_coding/problem.txt",
-        "benchmarks/huffman_coding/test_harness.py",
-        "benchmarks/validation/string_calculator/problem.txt",
-        "benchmarks/validation/string_calculator/test_harness.py",
-        "benchmarks/validation/matrix_operations/problem.txt",
-        "benchmarks/validation/matrix_operations/test_harness.py",
-        "candidate.sb.template",
-        "generator.sb.template",
-        "worker.sb"
-    }
-
     actual_keys = set(preflight_hashes.keys())
-    if expected_keys != actual_keys:
-        raise ExperimentInvalidError(f"Preflight keys mismatch. Missing: {expected_keys - actual_keys}, Extra: {actual_keys - expected_keys}")
+    if EXPECTED_PREFLIGHT_KEYS != actual_keys:
+        raise ExperimentInvalidError(f"Preflight keys mismatch. Missing: {EXPECTED_PREFLIGHT_KEYS - actual_keys}, Extra: {actual_keys - EXPECTED_PREFLIGHT_KEYS}")
 
     for rel_path, expected_hash in preflight_hashes.items():
-        if ".." in rel_path or rel_path.startswith("/"):
+        unresolved_path = os.path.join(BASE_DIR, rel_path)
+        if os.path.islink(unresolved_path):
+            raise ExperimentInvalidError(f"Symlink detected in preflight file: {unresolved_path}")
+
+        full_path = os.path.realpath(unresolved_path)
+        if not is_contained(full_path, BASE_DIR):
             raise ExperimentInvalidError(f"Path traversal detected in preflight hash key: {rel_path}")
-        full_path = os.path.join(BASE_DIR, rel_path)
-        if os.path.islink(full_path):
-            raise ExperimentInvalidError(f"Symlink detected in preflight file: {full_path}")
+
+        check_parent_symlinks(full_path)
+
         if not os.path.exists(full_path):
             raise ExperimentInvalidError(f"Preflight file missing: {full_path}")
         actual_hash = _sha256_file(full_path)
@@ -511,11 +596,16 @@ def verify_holdout_hashes(private_dir: str):
         )
 
     for rel_path, expected_hash in holdout_hashes.items():
-        if ".." in rel_path or rel_path.startswith("/"):
+        unresolved_path = os.path.join(private_dir, rel_path)
+        if os.path.islink(unresolved_path):
+            raise ExperimentInvalidError(f"Symlink detected in holdout file: {unresolved_path}")
+
+        full_path = os.path.realpath(unresolved_path)
+        if not is_contained(full_path, private_dir):
             raise ExperimentInvalidError(f"Path traversal detected in holdout hash key: {rel_path}")
-        full_path = os.path.join(private_dir, rel_path)
-        if os.path.islink(full_path):
-            raise ExperimentInvalidError(f"Symlink detected in holdout file: {full_path}")
+
+        check_parent_symlinks(full_path)
+
         if not os.path.exists(full_path):
             raise ExperimentInvalidError(f"Holdout file missing: {full_path}")
         actual_hash = _sha256_file(full_path)
@@ -530,13 +620,12 @@ PRIVATE_DIR = os.path.join(
 
 def run_holdout_evaluation(
     best_prompt: str,
-    run_id: str,
-    cumulative_tokens: int,
+    run_dir: str,
+    ctx: RunContext,
 ) -> tuple:
     problem_file = os.path.join(PRIVATE_DIR, "operator_holdout", "problem.txt")
     harness_file = os.path.join(PRIVATE_DIR, "operator_holdout", "test_holdout.py")
 
-    # If simple_regex_matcher exists but not operator_holdout, check hashes of rsi_loop_private
     if not os.path.exists(PRIVATE_DIR):
         return None, 0
 
@@ -558,9 +647,8 @@ def run_holdout_evaluation(
             task_desc = f.read()
 
         solution_code, tokens = call_codex_sandboxed(
-            task_desc, best_prompt, temp_gen_dir,
+            task_desc, best_prompt, temp_gen_dir, ctx,
             expect_json_code=True,
-            cumulative_tokens=cumulative_tokens,
         )
 
         solution_file = os.path.join(temp_gen_dir, "solution.py")
@@ -570,7 +658,9 @@ def run_holdout_evaluation(
         eval_res = run_evaluation_on_candidate(temp_gen_dir, harness_file)
         solution_hash = hashlib.sha256(solution_code.encode()).hexdigest()
 
-        run_holdout_dir = os.path.join(HISTORY_DIR, f"run_{run_id}", "holdout_evaluation")
+        run_holdout_dir = os.path.realpath(os.path.join(run_dir, "holdout_evaluation"))
+        if not is_contained(run_holdout_dir, run_dir):
+            raise ExperimentInvalidError("Path traversal in holdout evaluation run directory")
         os.makedirs(run_holdout_dir, exist_ok=True)
         shutil.copy2(solution_file, os.path.join(run_holdout_dir, "solution.py"))
 
@@ -595,7 +685,7 @@ def run_holdout_evaluation(
 
 # ── Smoke + canary pre-flight ─────────────────────────────────────────────────
 
-def run_smoke_and_canary() -> tuple:
+def run_smoke_and_canary(ctx: RunContext) -> tuple:
     real_temp_home = _build_codex_temp_home()
     try:
         real_candidate_input_dir = BASE_DIR
@@ -608,15 +698,17 @@ def run_smoke_and_canary() -> tuple:
             "TMPDIR": real_temp_home,
         }
         version = _run_codex_version_smoke_test(sb_path, allowed_env)
-        canary_tokens = _run_codex_canary(sb_path, allowed_env, TOKEN_CEILING, 0)
+        ctx.codex_version = version
+        canary_tokens = _run_codex_canary(sb_path, allowed_env, ctx)
         return version, canary_tokens
     finally:
         _cleanup_temp_home(real_temp_home)
 
 # ── Main execution entry point ────────────────────────────────────────────────
 
-def _main_exec() -> None:
-    approved_sha = verify_experiment_lock()
+def _main_exec(ctx: RunContext) -> None:
+    ctx.current_stage = "preflight_verifications"
+    approved_sha = verify_experiment_lock(ctx)
     verify_preflight_hashes()
 
     if not os.path.exists(BASELINE_PROMPT_PATH):
@@ -626,19 +718,18 @@ def _main_exec() -> None:
     baseline_hash = hashlib.sha256(baseline_prompt.encode()).hexdigest()
     sys.stdout.write(f"Baseline hash: {baseline_hash}\n")
 
+    ctx.current_stage = "smoke_and_canary"
     sys.stdout.write("Running smoke test and canary...\n")
     sys.stdout.flush()
-    codex_version, canary_tokens = run_smoke_and_canary()
-    consumed_tokens = canary_tokens
-
-    run_id = f"run_{int(time.time())}_{baseline_hash[:8]}"
-    run_dir = os.path.join(HISTORY_DIR, run_id)
-    os.makedirs(run_dir, exist_ok=True)
+    codex_version, canary_tokens = run_smoke_and_canary(ctx)
 
     # Isolated Huffman baseline preflight check
+    ctx.current_stage = "huffman_preflight"
     sys.stdout.write("Running isolated Huffman preflight check...\n")
     sys.stdout.flush()
-    huffman_iter_dir = os.path.join(run_dir, "huffman_preflight")
+    huffman_iter_dir = os.path.realpath(os.path.join(ctx.run_dir, "huffman_preflight"))
+    if not is_contained(huffman_iter_dir, ctx.run_dir):
+         raise ExperimentInvalidError("Path traversal in huffman preflight run directory")
     os.makedirs(huffman_iter_dir, exist_ok=True)
 
     huffman_problem = os.path.join(BENCHMARKS_DIR, "huffman_coding", "problem.txt")
@@ -646,10 +737,9 @@ def _main_exec() -> None:
         huffman_desc = f.read()
 
     huffman_code, huff_tokens = call_codex_sandboxed(
-        huffman_desc, baseline_prompt, huffman_iter_dir,
-        expect_json_code=True, cumulative_tokens=consumed_tokens
+        huffman_desc, baseline_prompt, huffman_iter_dir, ctx,
+        expect_json_code=True,
     )
-    consumed_tokens += huff_tokens
 
     solution_file = os.path.join(huffman_iter_dir, "solution.py")
     with open(solution_file, "w") as f:
@@ -666,34 +756,42 @@ def _main_exec() -> None:
     if not tests_run_match or int(tests_run_match.group(1)) != 5:
         raise ExperimentInvalidError(f"Huffman preflight failed: expected 5 tests to run, log output:\n{huffman_log}")
 
-    preflight_huffman_path = os.path.join(run_dir, "preflight_huffman.json")
+    preflight_huffman_path = os.path.join(ctx.run_dir, "preflight_huffman.json")
     preflight_huffman_data = {
         "huffman_preflight_score": 1.0 if huffman_success else 0.0,
         "huffman_preflight_success": huffman_success,
         "huffman_log": huffman_log,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "solution_hash": hashlib.sha256(huffman_code.encode()).hexdigest(),
+        "tokens_consumed": huff_tokens,
     }
     _write_once_fsynced_manifest(preflight_huffman_path, preflight_huffman_data)
 
     if huffman_success:
         sys.stdout.write("Huffman preflight scored 5/5 (no headroom). Trials never invoked.\n")
-        no_headroom_manifest_path = os.path.join(run_dir, "run_manifest.json")
+        no_headroom_manifest_path = os.path.join(ctx.run_dir, "run_manifest.json")
         no_headroom_manifest = {
             "schema_version": "2",
-            "run_id": run_id,
+            "run_id": ctx.run_id,
             "approved_commit_sha": approved_sha,
+            "lock_file_hash": ctx.lock_file_hash,
             "status": "no_headroom",
             "baseline_hash": baseline_hash,
+            "codex_version": ctx.codex_version,
+            "model_name": ctx.codex_model,
+            "canary_tokens_consumed": canary_tokens,
             "preflight_hashes": preflight_hashes_global(),
             "preflight_huffman": preflight_huffman_data,
             "token_ceiling": TOKEN_CEILING,
-            "tokens_consumed": consumed_tokens,
+            "tokens_consumed": ctx.consumed_tokens,
+            "unknown_token_state": ctx.unknown_token_state,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         _write_once_fsynced_manifest(no_headroom_manifest_path, no_headroom_manifest)
         return
 
     # Trial Execution
+    ctx.current_stage = "trials"
     optimization_tasks = _list_optimization_benchmarks()
     validation_tasks = _list_validation_benchmarks()
     sys.stdout.write(f"Optimization tasks: {optimization_tasks}\n")
@@ -711,18 +809,20 @@ def _main_exec() -> None:
         sys.stdout.write(f"\n{'='*50}\nTRIAL {trial_idx + 1}/3\n{'='*50}\n")
         sys.stdout.flush()
 
-        trial_dir = os.path.join(run_dir, trial_id)
+        trial_dir = os.path.realpath(os.path.join(ctx.run_dir, trial_id))
+        if not is_contained(trial_dir, ctx.run_dir):
+            raise ExperimentInvalidError(f"Path traversal in trial run directory: {trial_dir}")
         os.makedirs(trial_dir, exist_ok=True)
 
         baseline_score, baseline_results, baseline_tokens = evaluate_prompt_on_tasks(
-            baseline_prompt, run_id, f"{trial_id}/baseline",
-            BENCHMARKS_DIR, optimization_tasks, consumed_tokens,
+            baseline_prompt, ctx.run_dir, f"{trial_id}/baseline",
+            BENCHMARKS_DIR, optimization_tasks, ctx.consumed_tokens, ctx
         )
-        consumed_tokens += baseline_tokens
 
         best_trial_score = baseline_score
         best_trial_prompt = baseline_prompt
         current_prompt = baseline_prompt
+        mutations_history = []
 
         for mut_idx in range(3):
             if best_trial_score >= 1.0:
@@ -732,7 +832,7 @@ def _main_exec() -> None:
             for task, res in baseline_results.items():
                 if not res["success"]:
                     task_file = os.path.join(BENCHMARKS_DIR, task, "problem.txt")
-                    sol_path = os.path.join(run_dir, f"{trial_id}/baseline", task, "solution.py")
+                    sol_path = os.path.realpath(os.path.join(ctx.run_dir, f"{trial_id}/baseline", task, "solution.py"))
                     with open(task_file) as f:
                         desc = f.read()
                     code = ""
@@ -744,19 +844,31 @@ def _main_exec() -> None:
             if not failures:
                 break
 
-            mut_dir = os.path.join(trial_dir, f"mutation_{mut_idx + 1}")
+            mut_dir = os.path.realpath(os.path.join(trial_dir, f"mutation_{mut_idx + 1}"))
+            if not is_contained(mut_dir, ctx.run_dir):
+                raise ExperimentInvalidError(f"Path traversal in mutation run directory: {mut_dir}")
             os.makedirs(mut_dir, exist_ok=True)
             sys.stdout.write(f"[{trial_id}] Mutation {mut_idx + 1}...\n")
 
-            new_prompt, mut_tokens = mutate_prompt(current_prompt, failures, mut_dir, consumed_tokens)
-            consumed_tokens += mut_tokens
+            new_prompt, mut_tokens = mutate_prompt(current_prompt, failures, mut_dir, ctx)
 
             sys.stdout.write(f"[{trial_id}] Evaluating mutated prompt...\n")
             mut_score, mut_results, eval_tokens = evaluate_prompt_on_tasks(
-                new_prompt, run_id, f"{trial_id}/mut_{mut_idx + 1}",
-                BENCHMARKS_DIR, optimization_tasks, consumed_tokens,
+                new_prompt, ctx.run_dir, f"{trial_id}/mut_{mut_idx + 1}",
+                BENCHMARKS_DIR, optimization_tasks, ctx.consumed_tokens, ctx
             )
-            consumed_tokens += eval_tokens
+
+            mutation_record = {
+                "mutation_index": mut_idx + 1,
+                "prompt_hash": hashlib.sha256(new_prompt.encode()).hexdigest(),
+                "prompt": new_prompt,
+                "optimizer_tokens_consumed": mut_tokens,
+                "evaluation_run": {
+                    "benchmarks": mut_results,
+                    "tokens_consumed": eval_tokens
+                }
+            }
+            mutations_history.append(mutation_record)
 
             if mut_score > best_trial_score:
                 best_trial_score = mut_score
@@ -773,36 +885,63 @@ def _main_exec() -> None:
             "delta": best_trial_score - baseline_score,
             "candidate_prompt": best_trial_prompt,
             "candidate_prompt_hash": hashlib.sha256(best_trial_prompt.encode()).hexdigest(),
+            "baseline_run": {
+                "benchmarks": baseline_results,
+                "tokens_consumed": baseline_tokens
+            },
+            "mutations": mutations_history
         })
 
     mean_delta = sum(t["delta"] for t in trial_results) / len(trial_results)
 
     # Evaluate baseline validation
-    baseline_val_score, _, val_baseline_tokens = evaluate_prompt_on_tasks(
-        baseline_prompt, run_id, "validation_baseline",
-        VALIDATION_DIR, validation_tasks, consumed_tokens,
+    ctx.current_stage = "validation"
+    baseline_val_score, baseline_val_results, val_baseline_tokens = evaluate_prompt_on_tasks(
+        baseline_prompt, ctx.run_dir, "validation_baseline",
+        VALIDATION_DIR, validation_tasks, ctx.consumed_tokens, ctx
     )
-    consumed_tokens += val_baseline_tokens
 
     # Evaluate candidates validation
     candidate_val_scores = []
+    candidate_val_results_list = []
     for t in trial_results:
-        score, _, vtokens = evaluate_prompt_on_tasks(
-            t["candidate_prompt"], run_id, f"validation_{t['trial']}",
-            VALIDATION_DIR, validation_tasks, consumed_tokens,
+        score, val_res, vtokens = evaluate_prompt_on_tasks(
+            t["candidate_prompt"], ctx.run_dir, f"validation_{t['trial']}",
+            VALIDATION_DIR, validation_tasks, ctx.consumed_tokens, ctx
         )
-        consumed_tokens += vtokens
         candidate_val_scores.append(score)
+        candidate_val_results_list.append(val_res)
 
-    gate_passed = (
-        mean_delta > 0
-        and baseline_val_score is not None
-        and any(s is not None and s > baseline_val_score for s in candidate_val_scores)
-    )
+    eligible = []
+    for i, t in enumerate(trial_results):
+        val_score = candidate_val_scores[i]
+        is_different = t["candidate_prompt_hash"] != baseline_hash
+        is_positive_delta = t["delta"] > 0
+        is_better_val = val_score > baseline_val_score
+        if is_different and is_positive_delta and is_better_val:
+            eligible.append((i, val_score))
+
+    gate_passed = (mean_delta > 0 and len(eligible) > 0)
 
     candidate_profile_hash = _sha256_file(os.path.join(BASE_DIR, "candidate.sb.template"))
     generator_profile_hash = _sha256_file(os.path.join(BASE_DIR, "generator.sb.template"))
     preflight_hashes = preflight_hashes_global()
+
+    validation_run_record = {
+        "baseline": {
+            "score": baseline_val_score,
+            "benchmarks": baseline_val_results,
+            "tokens_consumed": val_baseline_tokens
+        },
+        "candidates": {
+            t["trial"]: {
+                "score": candidate_val_scores[idx],
+                "benchmarks": candidate_val_results_list[idx],
+                "tokens_consumed": ctx.consumed_tokens  # accumulated up to this point
+            }
+            for idx, t in enumerate(trial_results)
+        }
+    }
 
     if not gate_passed:
         # State: completed_no_improvement
@@ -810,32 +949,38 @@ def _main_exec() -> None:
             f"mean_delta={mean_delta:.4f}, "
             f"baseline_val={baseline_val_score}, candidate_vals={candidate_val_scores}"
         )
-        run_manifest_path = os.path.join(run_dir, "run_manifest.json")
+        run_manifest_path = os.path.join(ctx.run_dir, "run_manifest.json")
         no_improvement_manifest = {
             "schema_version": "2",
-            "run_id": run_id,
+            "run_id": ctx.run_id,
             "approved_commit_sha": approved_sha,
+            "lock_file_hash": ctx.lock_file_hash,
             "status": "completed_no_improvement",
             "baseline_hash": baseline_hash,
+            "codex_version": ctx.codex_version,
+            "model_name": ctx.codex_model,
+            "canary_tokens_consumed": canary_tokens,
             "promotion_gate_passed": False,
             "retention_reason": retention_reason,
             "mean_paired_delta": mean_delta,
             "trial_results": trial_results,
+            "validation_run": validation_run_record,
             "candidate_profile_hash": candidate_profile_hash,
             "generator_profile_hash": generator_profile_hash,
             "preflight_hashes": preflight_hashes,
             "preflight_huffman": preflight_huffman_data,
             "token_ceiling": TOKEN_CEILING,
-            "tokens_consumed": consumed_tokens,
+            "tokens_consumed": ctx.consumed_tokens,
+            "unknown_token_state": ctx.unknown_token_state,
             "budget_note": (
                 "46992 is a 712-tokens/call estimate (historical avg); not a worst-case bound. "
                 "50000 ceiling is authoritative."
             ),
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "note": "Statistical significance is not established by validation gate sampling."
         }
         _write_once_fsynced_manifest(run_manifest_path, no_improvement_manifest)
 
-        # Pointer check: only initialize baseline if best_manifest.json does not exist
         if not os.path.exists(BEST_MANIFEST_PATH):
             update_best_manifest_pointer(run_manifest_path)
 
@@ -843,26 +988,26 @@ def _main_exec() -> None:
         return
 
     # Select best candidate
-    eligible = [
-        (i, s) for i, s in enumerate(candidate_val_scores)
-        if s is not None and s > baseline_val_score
-    ]
     eligible.sort(key=lambda x: (-x[1], x[0]))
     best_idx = eligible[0][0]
     best_trial = trial_results[best_idx]
     best_prompt = best_trial["candidate_prompt"]
 
-    holdout_record, holdout_tokens = run_holdout_evaluation(best_prompt, run_id, consumed_tokens)
-    consumed_tokens += holdout_tokens
+    ctx.current_stage = "holdout"
+    holdout_record, holdout_tokens = run_holdout_evaluation(best_prompt, ctx.run_dir, ctx)
 
     # State: completed_promoted
-    run_manifest_path = os.path.join(run_dir, "run_manifest.json")
+    run_manifest_path = os.path.join(ctx.run_dir, "run_manifest.json")
     promoted_manifest = {
         "schema_version": "2",
-        "run_id": run_id,
+        "run_id": ctx.run_id,
         "approved_commit_sha": approved_sha,
+        "lock_file_hash": ctx.lock_file_hash,
         "status": "completed_promoted",
         "baseline_hash": baseline_hash,
+        "codex_version": ctx.codex_version,
+        "model_name": ctx.codex_model,
+        "canary_tokens_consumed": canary_tokens,
         "selected_prompt_hash": best_trial["candidate_prompt_hash"],
         "selected_from_trial": best_trial["trial"],
         "validation_score": candidate_val_scores[best_idx],
@@ -870,17 +1015,20 @@ def _main_exec() -> None:
         "promotion_gate_passed": True,
         "mean_paired_delta": mean_delta,
         "trial_results": trial_results,
+        "validation_run": validation_run_record,
         "candidate_profile_hash": candidate_profile_hash,
         "generator_profile_hash": generator_profile_hash,
         "preflight_hashes": preflight_hashes,
         "preflight_huffman": preflight_huffman_data,
         "token_ceiling": TOKEN_CEILING,
-        "tokens_consumed": consumed_tokens,
+        "tokens_consumed": ctx.consumed_tokens,
+        "unknown_token_state": ctx.unknown_token_state,
         "budget_note": (
             "46992 is a 712-tokens/call estimate (historical avg); not a worst-case bound. "
             "50000 ceiling is authoritative."
         ),
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "note": "Statistical significance is not established by validation gate sampling."
     }
     if holdout_record:
         promoted_manifest["holdout"] = holdout_record
@@ -892,7 +1040,7 @@ def _main_exec() -> None:
     with open(best_prompt_path, "w") as f:
         f.write(best_prompt)
 
-    # Update atomic root pointer
+    # Update atomic pointer
     update_best_manifest_pointer(run_manifest_path)
     sys.stdout.write(f"Promotion gate passed. Manifest promoted to best_manifest.json.\n")
 
@@ -903,22 +1051,33 @@ def preflight_hashes_global() -> dict:
     return {}
 
 def main() -> None:
+    ctx = RunContext()
+    ctx.run_id = f"run_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    ctx.run_dir = os.path.realpath(os.path.join(HISTORY_DIR, ctx.run_id))
     try:
-        _main_exec()
-        sys.exit(0)
-    except ExperimentInvalidError as e:
-        sys.stderr.write(f"FATAL: Experiment invalidated: {e}\n")
-        # Write invalid manifest
-        run_id = f"invalid_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-        run_dir = os.path.join(HISTORY_DIR, f"run_{run_id}")
-        os.makedirs(run_dir, exist_ok=True)
+        os.makedirs(ctx.run_dir, exist_ok=True)
+    except Exception as e:
+        sys.stderr.write(f"FATAL: failed to create run directory: {e}\n")
+        sys.exit(1)
 
-        invalid_manifest_path = os.path.join(run_dir, "invalid_manifest.json")
+    try:
+        _main_exec(ctx)
+        sys.exit(0)
+    except Exception as e:
+        sys.stderr.write(f"FATAL: Experiment invalidated: {e}\n")
+        invalid_manifest_path = os.path.join(ctx.run_dir, "invalid_manifest.json")
         invalid_data = {
             "schema_version": "2",
-            "run_id": run_id,
+            "run_id": ctx.run_id,
             "status": "invalid",
-            "error_message": str(e),
+            "approved_commit_sha": ctx.approved_commit_sha,
+            "lock_file_hash": ctx.lock_file_hash,
+            "codex_version": ctx.codex_version,
+            "model_name": ctx.codex_model,
+            "error_message": f"{type(e).__name__}: {e}",
+            "tokens_consumed": ctx.consumed_tokens,
+            "unknown_token_state": ctx.unknown_token_state,
+            "current_stage": ctx.current_stage,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         try:

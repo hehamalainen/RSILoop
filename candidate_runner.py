@@ -31,7 +31,24 @@ import uuid
 import math
 import types
 
-# --- 1. Control channel I/O using the saved fd ---
+# --- 1. Set irreversible resource limits ---
+def _set_limits() -> None:
+    limits = {
+        resource.RLIMIT_CPU:    (30, 30),
+        resource.RLIMIT_FSIZE:  (1 * 1024 * 1024, 1 * 1024 * 1024),
+        resource.RLIMIT_NOFILE: (256, 256),
+        resource.RLIMIT_CORE:   (0, 0),
+    }
+    for lim, values in limits.items():
+        try:
+            resource.setrlimit(lim, values)
+        except Exception as e:
+            os.write(_control_fd, f"FATAL: limit {lim} failed: {e}\n".encode())
+            sys.exit(1)
+
+_set_limits()
+
+# --- 2. Control channel I/O using the saved fd ---
 _control_write = os.fdopen(_control_fd, 'wb', buffering=0)
 
 def send_response(data: dict) -> None:
@@ -60,22 +77,26 @@ def send_response(data: dict) -> None:
 
 def read_request() -> dict | None:
     """Read a length-prefixed JSON frame from stdin with 2MB bounds."""
-    length_line = sys.stdin.buffer.readline()
+    length_line = sys.stdin.buffer.readline(32)
     if not length_line:
         return None  # EOF — clean shutdown
+    if not length_line.endswith(b'\n'):
+        raise ValueError('Malformed header line or exceeds 32 bytes limit')
     try:
         length = int(length_line.strip())
     except ValueError:
         raise ValueError(f'Malformed length line: {length_line!r}')
-    if length > 2 * 1024 * 1024:  # 2 MB cap
-        raise ValueError(f'Request payload exceeds 2 MB limit: {length}')
+    if length <= 0 or length > 2 * 1024 * 1024:  # 2 MB cap
+        raise ValueError(f'Invalid frame length: {length}')
     data = sys.stdin.buffer.read(length)
     if len(data) != length:
         raise ValueError(f'Truncated payload: expected {length}, got {len(data)}')
-    sys.stdin.buffer.readline()  # consume trailing newline
+    delim = sys.stdin.buffer.read(1)
+    if delim != b'\n':
+        raise ValueError(f'Malformed trailing delimiter: expected b\'\\n\', got {delim!r}')
     return json.loads(data.decode('utf-8'))
 
-# --- 2. Handshake Verification ---
+# --- 3. Handshake Verification ---
 _session_id = None
 try:
     first_req = read_request()
@@ -98,23 +119,6 @@ except Exception as e:
         pass
     sys.exit(1)
 
-# --- 3. Set irreversible resource limits ---
-def _set_limits() -> None:
-    limits = {
-        resource.RLIMIT_CPU:    (30, 30),
-        resource.RLIMIT_FSIZE:  (1 * 1024 * 1024, 1 * 1024 * 1024),
-        resource.RLIMIT_NOFILE: (256, 256),
-        resource.RLIMIT_CORE:   (0, 0),
-    }
-    for lim, values in limits.items():
-        try:
-            resource.setrlimit(lim, values)
-        except Exception as e:
-            send_response({'status': 'error', 'message': f'FATAL: limit {lim} failed: {e}'})
-            sys.exit(1)
-
-_set_limits()
-
 # --- 4. Load candidate solution ---
 _solution = None
 _import_error = None
@@ -130,8 +134,19 @@ _objects = {}
 _next_obj_id = 1
 _exported_class_types = set()
 
-def to_envelope(val, depth=0, stats=None) -> dict:
+def register_object(val) -> int:
+    for existing_id, obj in _objects.items():
+        if obj is val:
+            return existing_id
+    if len(_objects) >= 1000:
+        raise RuntimeError("Runner object store limit of 1000 exceeded")
     global _next_obj_id
+    obj_id = _next_obj_id
+    _next_obj_id += 1
+    _objects[obj_id] = val
+    return obj_id
+
+def to_envelope(val, depth=0, stats=None) -> dict:
     if stats is None:
         stats = {"nodes": 0, "string_bytes": 0}
     stats["nodes"] += 1
@@ -188,19 +203,7 @@ def to_envelope(val, depth=0, stats=None) -> dict:
     # Check if object is an instance of an exported candidate class
     cls = type(val)
     if cls in _exported_class_types:
-        if len(_objects) >= 1000:
-            raise RuntimeError("Runner object store limit of 1000 exceeded")
-        for existing_id, obj in _objects.items():
-            if obj is val:
-                return {
-                    "type": "object_ref",
-                    "module": cls.__module__,
-                    "qualname": cls.__qualname__,
-                    "obj_id": existing_id
-                }
-        obj_id = _next_obj_id
-        _next_obj_id += 1
-        _objects[obj_id] = val
+        obj_id = register_object(val)
         return {
             "type": "object_ref",
             "module": cls.__module__,
@@ -210,7 +213,15 @@ def to_envelope(val, depth=0, stats=None) -> dict:
 
     raise TypeError(f"Unserializable return type: {cls.__name__}")
 
-def from_envelope(envelope):
+def from_envelope(envelope, depth=0, stats=None):
+    if stats is None:
+        stats = {"nodes": 0, "string_bytes": 0}
+    stats["nodes"] += 1
+    if stats["nodes"] > 1000:
+        raise ValueError("Payload exceeds maximum node limit of 1000")
+    if depth > 16:
+        raise ValueError("Payload depth exceeds maximum limit of 16")
+
     if not isinstance(envelope, dict):
         raise ValueError("Invalid envelope: not a dictionary")
     t = envelope.get("type")
@@ -224,13 +235,19 @@ def from_envelope(envelope):
         if isinstance(val, float):
             if math.isnan(val) or math.isinf(val):
                 raise ValueError("NaN and Infinity are not allowed")
+        elif isinstance(val, bool):
+            pass
         elif isinstance(val, int):
             if len(str(val)) > 100:
                 raise ValueError("Integer length exceeds 100 digits")
         elif isinstance(val, str):
-            if len(val.encode('utf-8')) > 1 * 1024 * 1024:
+            utf8_size = len(val.encode('utf-8'))
+            stats["string_bytes"] += utf8_size
+            if stats["string_bytes"] > 2 * 1024 * 1024:
+                raise ValueError("Cumulative string/bytes size exceeds 2 MB")
+            if utf8_size > 1 * 1024 * 1024:
                 raise ValueError("String size exceeds 1 MB limit")
-        elif val is not None and not isinstance(val, bool):
+        elif val is not None:
             raise ValueError(f"Invalid primitive value type: {type(val)}")
         return val
 
@@ -240,7 +257,13 @@ def from_envelope(envelope):
         hex_val = envelope["hex"]
         if not isinstance(hex_val, str) or len(hex_val) > 2 * 1024 * 1024:
             raise ValueError("Invalid bytes hex length")
-        return bytes.fromhex(hex_val)
+        val = bytes.fromhex(hex_val)
+        if len(val) > 1 * 1024 * 1024:
+            raise ValueError("Bytes size exceeds 1 MB limit")
+        stats["string_bytes"] += len(val)
+        if stats["string_bytes"] > 2 * 1024 * 1024:
+            raise ValueError("Cumulative string/bytes size exceeds 2 MB")
+        return val
 
     if t == "tuple":
         if set(envelope.keys()) != {"type", "value"}:
@@ -248,7 +271,7 @@ def from_envelope(envelope):
         items = envelope["value"]
         if not isinstance(items, list):
             raise ValueError("Tuple envelope value must be a list of envelopes")
-        return tuple(from_envelope(x) for x in items)
+        return tuple(from_envelope(x, depth + 1, stats) for x in items)
 
     if t == "list":
         if set(envelope.keys()) != {"type", "value"}:
@@ -256,7 +279,7 @@ def from_envelope(envelope):
         items = envelope["value"]
         if not isinstance(items, list):
             raise ValueError("List envelope value must be a list of envelopes")
-        return [from_envelope(x) for x in items]
+        return [from_envelope(x, depth + 1, stats) for x in items]
 
     if t == "dict":
         if set(envelope.keys()) != {"type", "value"}:
@@ -268,7 +291,7 @@ def from_envelope(envelope):
         for pair in items:
             if not isinstance(pair, list) or len(pair) != 2:
                 raise ValueError("Dict envelope items must be key-value envelope pairs")
-            res[from_envelope(pair[0])] = from_envelope(pair[1])
+            res[from_envelope(pair[0], depth + 1, stats)] = from_envelope(pair[1], depth + 1, stats)
         return res
 
     if t == "not_implemented":
@@ -280,8 +303,8 @@ def from_envelope(envelope):
         if set(envelope.keys()) != {"type", "module", "qualname", "obj_id"}:
             raise ValueError("Invalid envelope fields for object_ref")
         obj_id = envelope["obj_id"]
-        if not isinstance(obj_id, int):
-            raise ValueError("Invalid object ID type")
+        if isinstance(obj_id, bool) or not isinstance(obj_id, int) or obj_id <= 0:
+            raise ValueError("Invalid object ID")
         if obj_id not in _objects:
             raise ValueError(f"Unknown object ID: {obj_id}")
         obj = _objects[obj_id]
@@ -356,9 +379,9 @@ def _handle(req: dict) -> None:
                     exports.append({'name': name, 'type': 'function'})
                 else:
                     try:
-                        json.dumps(attr)
-                        exports.append({'name': name, 'type': 'variable', 'value': attr})
-                    except TypeError:
+                        enveloped = to_envelope(attr)
+                        exports.append({'name': name, 'type': 'variable', 'value': enveloped})
+                    except Exception:
                         pass
             send_response({'status': 'success', 'exports': exports, 'uuid': req_uuid})
 
@@ -388,12 +411,7 @@ def _handle(req: dict) -> None:
                 send_response({'status': 'error', 'message': f'Class {class_name} not found', 'uuid': req_uuid})
                 return
             obj = cls(*args, **kwargs)
-            if len(_objects) >= 1000:
-                raise RuntimeError("Runner object store limit of 1000 exceeded")
-            global _next_obj_id
-            obj_id = _next_obj_id
-            _next_obj_id += 1
-            _objects[obj_id] = obj
+            obj_id = register_object(obj)
             send_response({'status': 'success', 'obj_id': obj_id, 'uuid': req_uuid})
 
         elif action == 'call_method':
@@ -482,8 +500,6 @@ def _handle(req: dict) -> None:
             'traceback': tb_str,
             'uuid': req_uuid,
         })
-
-
 
 def main():
     while True:

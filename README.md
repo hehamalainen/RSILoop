@@ -37,15 +37,15 @@ evaluator.py  (host, unsandboxed — trusted supervisor)
 ├── prompt_templates/
 │   ├── inner_agent_baseline.txt  # Frozen baseline (hashed before optimization)
 │   └── meta_optimizer.txt        # Meta-optimizer system prompt
-├── evaluator.py                  # Host supervisor: RunnerProxy, drain threads, MRO registry
-├── candidate_runner.py           # Untrusted process: fd1→/dev/null, RLIMIT_*, UUID framing
-├── rsi_loop.py                   # Orchestrator: smoke+canary, three trials, promotion gate
-├── candidate.sb.template         # macOS sandbox profile for candidate_runner.py
-├── generator.sb.template         # macOS sandbox profile for Codex generator
-├── worker.sb                     # Static profile used by boundary tests
+├── evaluator.py                  # Host supervisor: RunnerProxy, MRO registry, class/instance caching
+├── candidate_runner.py           # Untrusted process: fd1→/dev/null, RLIMIT_*, UUID framing, object store
+├── rsi_loop.py                   # Orchestrator: smoke+canary, three trials, promotion gate, RunContext
+├── candidate.sb.template         # macOS sandbox profile for candidate_runner.py (parameterized)
+├── generator.sb.template         # macOS sandbox profile for Codex generator (parameterized)
 ├── preflight_hashes.json         # SHA-256 hashes of all task files (frozen before optimization)
-├── test_evaluator.py             # 20+ containment, IPC, and reference solution tests
-└── test_rsi_loop.py              # 13 orchestrator, parser, and state validation tests
+├── test_evaluator.py             # Containment, IPC, and reference solution tests
+├── test_rsi_loop.py              # Orchestrator, parser, and state validation tests
+└── run_tests.py                  # Strict combined test launcher (enforces zero skips, zero warnings)
 ```
 
 ---
@@ -68,9 +68,10 @@ pip install google-genai openai anthropic python-dotenv
 
 ### Run the test suite
 
+Run the strict test launcher from outside any sandbox (sandbox-exec calls require host access). The launcher enforces zero skips, zero warnings, and returns nonzero on any warnings, unraisable exceptions, skips, failures, or errors:
+
 ```bash
-# Run from outside any sandbox (sandbox-exec calls require host access)
-python3 -W error::ResourceWarning -m unittest test_evaluator test_rsi_loop -v
+python3 run_tests.py
 ```
 
 ### Run the optimization loop
@@ -105,7 +106,8 @@ Token ceiling: **50,000 output tokens** across all calls. Any breach immediately
 | Property | Mechanism |
 |----------|-----------|
 | Candidate cannot write outside its dir | `candidate.sb`: `file-write*` limited to `{temp_dir}` |
-| Candidate cannot fork/exec | `candidate.sb`: `(deny process-fork)` |
+| Candidate cannot fork | `candidate.sb`: `(deny process-fork)` |
+| Candidate process exec limit | `candidate.sb`: `(allow process-exec)` limited strictly to resolved virtualenv, Python interpreter, prefix, base prefix, and Homebrew paths |
 | Candidate cannot reach network | `candidate.sb`: `(deny network-outbound)` |
 | Candidate cannot read repo or private benchmarks | `candidate.sb`: no allowlist entry for those paths |
 | Candidate output flood cannot deadlock host | Non-daemon drain thread; 10 KB retained, excess discarded |
@@ -123,7 +125,8 @@ A candidate prompt is promoted only when **all** of the following hold:
 
 1. Mean paired delta across three trials is positive (`mean_delta > 0`).
 2. At least one candidate prompt outperforms the baseline on the validation suite.
-3. A deterministic tie-break selects one prompt.
+3. The selected candidate prompt must differ from the baseline prompt, have its own positive optimization delta (`delta > 0`), and beat the baseline validation score.
+4. **Note**: Statistical significance is not established by the validation gate sampling.
 
 If the gate fails, baseline is retained, and pointer is updated only if no manifest exists.
 

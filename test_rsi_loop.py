@@ -1,5 +1,5 @@
 """
-test_rsi_loop.py — Tests for the RSI orchestrator layer.
+test_rsi_loop.py — Tests for the RSI orchestrator layer and main execution path.
 """
 import os
 import sys
@@ -9,7 +9,6 @@ import tempfile
 import shutil
 import hashlib
 import subprocess
-import threading
 import gc
 import warnings
 from unittest import mock
@@ -32,13 +31,22 @@ from rsi_loop import (
     BENCHMARKS_DIR,
     VALIDATION_DIR,
     ExperimentInvalidError,
+    RunContext,
+    is_contained,
+    verify_preflight_hashes,
+    verify_experiment_lock,
+    main,
 )
 
 class TestRsiLoopOrchestrator(unittest.TestCase):
     def setUp(self):
+        unraisable_exceptions.clear()
         self.tmp_dir = tempfile.mkdtemp()
+        self.patchers = []
 
     def tearDown(self):
+        for patcher in self.patchers:
+            patcher.stop()
         gc.collect()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
         if unraisable_exceptions:
@@ -136,7 +144,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
 
         tmp_path = test_best + ".tmp"
         with open(tmp_path, "w") as f:
-            f.write('{"score": 1.0')  # truncated JSON
+            f.write('{"score": 1.0')
 
         with open(test_best) as f:
             loaded2 = json.load(f)
@@ -156,6 +164,10 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":49999}}',
         ])
 
+        ctx = RunContext()
+        ctx.consumed_tokens = 2
+        ctx.codex_model = "codex-mini-latest"
+
         with mock.patch("rsi_loop._build_codex_temp_home", return_value=tempfile.mkdtemp()), \
              mock.patch("rsi_loop._build_generator_sb", return_value="/dev/null"), \
              mock.patch("rsi_loop._cleanup_temp_home"), \
@@ -165,21 +177,16 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
                 stdout=fake_stdout,
                 stderr="",
             )
-            with self.assertRaises(ExperimentInvalidError) as ctx:
+            with self.assertRaises(ExperimentInvalidError) as ctx_err:
                 call_codex_sandboxed(
-                    "test prompt", "system", "/tmp",
-                    cumulative_tokens=2,
-                    token_ceiling=TOKEN_CEILING,
+                    "test prompt", "system", "/tmp", ctx
                 )
-            self.assertIn("ceiling breached", str(ctx.exception).lower())
+            self.assertIn("ceiling breached", str(ctx_err.exception).lower())
 
     # ── Test 30: generator credential isolation denials ──────────────────────
 
     def test_generator_credential_isolation_denials(self):
         sb_template_path = os.path.join(BASE_DIR, "generator.sb.template")
-        if not os.path.exists(sb_template_path):
-            self.skipTest("generator.sb.template not found")
-
         real_temp_home = tempfile.mkdtemp()
         try:
             from rsi_loop import _build_generator_sb
@@ -195,60 +202,217 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
     # ── Test 31: Run states & invalid-run pointer isolation ───────────────────
 
     def test_run_states_and_pointer_isolation(self):
-        """
-        Verify that:
-        - completed_promoted, completed_no_improvement, no_headroom, invalid manifest keys are correct.
-        - invalid runs cannot modify root-level best_manifest.json.
-        """
         from rsi_loop import update_best_manifest_pointer, load_and_verify_best_manifest
 
-        # Setup temp manifest paths
         run_dir = tempfile.mkdtemp()
         try:
-            run_manifest = os.path.join(run_dir, "run_manifest.json")
+            history_dir = os.path.join(run_dir, "history")
+            os.makedirs(history_dir)
+            target_dir = os.path.join(history_dir, "run_123")
+            os.makedirs(target_dir)
+
+            run_manifest = os.path.join(target_dir, "run_manifest.json")
             data = {"pointer_schema_version": "2", "status": "completed_promoted"}
 
-            # Atomic pointer setup
-            with mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.join(run_dir, "best_manifest.json")):
+            with mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.join(run_dir, "best_manifest.json")), \
+                 mock.patch("rsi_loop.HISTORY_DIR", history_dir):
                 with open(run_manifest, "w") as f:
                     json.dump(data, f)
                 update_best_manifest_pointer(run_manifest)
 
-                # Load and verify
                 loaded = load_and_verify_best_manifest()
                 self.assertIsNotNone(loaded)
                 self.assertEqual(loaded["status"], "completed_promoted")
         finally:
             shutil.rmtree(run_dir)
 
-    # ── Test 32: Hash verification failure checks ────────────────────────────
+    # ── Test 32: Hash verification failure checks (Missing/Extra/Traversal/Symlink) ──
 
     def test_preflight_hash_verification_failures(self):
-        """
-        Verify that missing files, symlinks, extra keys, or path traversal fail closed.
-        """
         from rsi_loop import verify_preflight_hashes
 
-        # Test case: missing preflight hashes file
         with mock.patch("rsi_loop.PREFLIGHT_HASHES_PATH", "/nonexistent_preflight.json"):
             with self.assertRaises(ExperimentInvalidError):
                 verify_preflight_hashes()
 
+        bad_hashes = {"bad/file.txt": "dummy_sha"}
+        hashes_file = os.path.join(self.tmp_dir, "preflight_hashes.json")
+        with open(hashes_file, "w") as f:
+            json.dump(bad_hashes, f)
+
+        with mock.patch("rsi_loop.PREFLIGHT_HASHES_PATH", hashes_file):
+            with self.assertRaises(ExperimentInvalidError) as ctx:
+                verify_preflight_hashes()
+            self.assertIn("Preflight keys mismatch", str(ctx.exception))
+
+        traversal_hashes = {"../bad/file.txt": "dummy_sha"}
+        with open(hashes_file, "w") as f:
+            json.dump(traversal_hashes, f)
+        with mock.patch("rsi_loop.PREFLIGHT_HASHES_PATH", hashes_file), \
+             mock.patch("rsi_loop.preflight_hashes_global", return_value=traversal_hashes), \
+             mock.patch("rsi_loop.EXPECTED_PREFLIGHT_KEYS", {"../bad/file.txt"}):
+            with self.assertRaises(ExperimentInvalidError) as ctx:
+                verify_preflight_hashes()
+            self.assertIn("Path traversal detected", str(ctx.exception))
+
+        symlink_dir = os.path.join(self.tmp_dir, "sym_dir")
+        os.makedirs(symlink_dir, exist_ok=True)
+        target_file = os.path.join(symlink_dir, "target.txt")
+        with open(target_file, "w") as f:
+            f.write("hello")
+
+        link_file = os.path.join(self.tmp_dir, "link.txt")
+        os.symlink(target_file, link_file)
+
+        symlink_hashes = {"candidate.sb.template": "dummy"}
+        with open(hashes_file, "w") as f:
+            json.dump(symlink_hashes, f)
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.PREFLIGHT_HASHES_PATH", hashes_file), \
+             mock.patch("rsi_loop.preflight_hashes_global", return_value={"candidate.sb.template": "dummy"}), \
+             mock.patch("rsi_loop.EXPECTED_PREFLIGHT_KEYS", {"candidate.sb.template"}):
+            shutil.copy2(target_file, os.path.join(self.tmp_dir, "candidate.sb.template"))
+            os.remove(os.path.join(self.tmp_dir, "candidate.sb.template"))
+            os.symlink(target_file, os.path.join(self.tmp_dir, "candidate.sb.template"))
+
+            with self.assertRaises(ExperimentInvalidError) as ctx:
+                verify_preflight_hashes()
+            self.assertIn("Symlink detected", str(ctx.exception))
+
+    # ── Test 33: Git lock verification integration test ────────────────────────
+
+    def test_git_lock_integration(self):
+        git_dir = os.path.join(self.tmp_dir, "git_repo")
+        os.makedirs(git_dir)
+
+        subprocess.run(["git", "init"], cwd=git_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=git_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=git_dir, check=True)
+
+        dummy_file = os.path.join(git_dir, "file.txt")
+        with open(dummy_file, "w") as f:
+            f.write("initial commit")
+        subprocess.run(["git", "add", "file.txt"], cwd=git_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "commit1"], cwd=git_dir, check=True, capture_output=True)
+
+        gitignore_path = os.path.join(git_dir, ".gitignore")
+        with open(gitignore_path, "w") as f:
+            f.write("experiment.lock\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=git_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add gitignore"], cwd=git_dir, check=True, capture_output=True)
+
+        res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=git_dir, capture_output=True, text=True, check=True)
+        commit_sha = res.stdout.strip()
+
+        lock_path = os.path.join(git_dir, "experiment.lock")
+        lock_data = {"approved_commit_sha": commit_sha}
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+
+        ctx = RunContext()
+        with mock.patch("rsi_loop.BASE_DIR", git_dir):
+            sha = verify_experiment_lock(ctx)
+            self.assertEqual(sha, commit_sha)
+            self.assertEqual(ctx.approved_commit_sha, commit_sha)
+
+        with open(dummy_file, "w") as f:
+            f.write("dirty change")
+        with mock.patch("rsi_loop.BASE_DIR", git_dir):
+            with self.assertRaises(ExperimentInvalidError):
+                verify_experiment_lock(ctx)
+
+    # ── Test 34: E2E main() states check (no_headroom, completed_no_improvement, completed_promoted, invalid) ──
+
+    def test_main_orchestration_states(self):
+        mock_verify_lock = mock.patch("rsi_loop.verify_experiment_lock", return_value="approved_sha")
+        mock_verify_hashes = mock.patch("rsi_loop.verify_preflight_hashes")
+        mock_smoke = mock.patch("rsi_loop.run_smoke_and_canary", return_value=("1.0", 50))
+        mock_list_opt = mock.patch("rsi_loop._list_optimization_benchmarks", return_value=["task1"])
+        mock_list_val = mock.patch("rsi_loop._list_validation_benchmarks", return_value=["val1"])
+
+        self.patchers.extend([mock_verify_lock, mock_verify_hashes, mock_smoke, mock_list_opt, mock_list_val])
+        for p in self.patchers:
+            p.start()
+
+        eval_success = {"success": True, "log": "Ran 5 tests\nOK"}
+        eval_fail = {"success": False, "log": "Ran 5 tests\nFAIL"}
+
+        with mock.patch("rsi_loop.call_codex_sandboxed", return_value=("mock_code", 10)), \
+             mock.patch("rsi_loop.run_evaluation_on_candidate", return_value=eval_success), \
+             mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.join(self.tmp_dir, "best_manifest.json")), \
+             mock.patch("rsi_loop.BASELINE_PROMPT_PATH", os.path.join(self.tmp_dir, "baseline.txt")), \
+             self.assertRaises(SystemExit) as sy_exit:
+            os.makedirs(os.path.join(self.tmp_dir, "prompt_templates"), exist_ok=True)
+            with open(os.path.join(self.tmp_dir, "baseline.txt"), "w") as f:
+                f.write("baseline prompt")
+            main()
+        self.assertEqual(sy_exit.exception.code, 0)
+
+        runs = [d for d in os.listdir(self.tmp_dir) if d.startswith("run_")]
+        self.assertEqual(len(runs), 1)
+        manifest_path = os.path.join(self.tmp_dir, runs[0], "run_manifest.json")
+        with open(manifest_path) as f:
+            manifest_data = json.load(f)
+        self.assertEqual(manifest_data["status"], "no_headroom")
+
+        shutil.rmtree(self.tmp_dir)
+        self.tmp_dir = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.tmp_dir, "prompt_templates"), exist_ok=True)
+        with open(os.path.join(self.tmp_dir, "baseline.txt"), "w") as f:
+            f.write("baseline prompt")
+
+        with mock.patch("rsi_loop.call_codex_sandboxed", return_value=("mock_code", 10)), \
+             mock.patch("rsi_loop.run_evaluation_on_candidate", return_value=eval_fail), \
+             mock.patch("rsi_loop.evaluate_prompt_on_tasks", return_value=(0.5, {}, 10)), \
+             mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.join(self.tmp_dir, "best_manifest.json")), \
+             mock.patch("rsi_loop.BASELINE_PROMPT_PATH", os.path.join(self.tmp_dir, "baseline.txt")), \
+             self.assertRaises(SystemExit) as sy_exit:
+            main()
+        self.assertEqual(sy_exit.exception.code, 0)
+        runs = [d for d in os.listdir(self.tmp_dir) if d.startswith("run_")]
+        self.assertEqual(len(runs), 1)
+        manifest_path = os.path.join(self.tmp_dir, runs[0], "run_manifest.json")
+        with open(manifest_path) as f:
+            manifest_data = json.load(f)
+        self.assertEqual(manifest_data["status"], "completed_no_improvement")
+
+        shutil.rmtree(self.tmp_dir)
+        self.tmp_dir = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.tmp_dir, "prompt_templates"), exist_ok=True)
+        with open(os.path.join(self.tmp_dir, "baseline.txt"), "w") as f:
+            f.write("baseline prompt")
+
+        with mock.patch("rsi_loop.call_codex_sandboxed", side_effect=RuntimeError("API failure")), \
+             mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.join(self.tmp_dir, "best_manifest.json")), \
+             mock.patch("rsi_loop.BASELINE_PROMPT_PATH", os.path.join(self.tmp_dir, "baseline.txt")), \
+             self.assertRaises(SystemExit) as sy_exit:
+            main()
+        self.assertEqual(sy_exit.exception.code, 1)
+        runs = [d for d in os.listdir(self.tmp_dir) if d.startswith("run_")]
+        self.assertEqual(len(runs), 1)
+        invalid_manifest_path = os.path.join(self.tmp_dir, runs[0], "invalid_manifest.json")
+        with open(invalid_manifest_path) as f:
+            invalid_data = json.load(f)
+        self.assertEqual(invalid_data["status"], "invalid")
+        self.assertIn("API failure", invalid_data["error_message"])
+
+    # ── Test 35: Layout & symlink containment automation ─────────────────────
+
+    def test_layout_and_symlink_containment(self):
+        base = os.path.realpath(self.tmp_dir)
+        sub = os.path.realpath(os.path.join(base, "history", "run_123"))
+        os.makedirs(sub, exist_ok=True)
+        self.assertTrue(is_contained(sub, base))
+
+        outside = os.path.realpath(os.path.join(base, ".."))
+        self.assertFalse(is_contained(outside, base))
+
+        escaped_link = os.path.join(base, "history", "link_out")
+        os.symlink(outside, escaped_link)
+        self.assertFalse(is_contained(escaped_link, base))
 
 if __name__ == "__main__":
-    class StrictTestResult(unittest.TextTestResult):
-        def addSkip(self, test, reason):
-            super().addSkip(test, reason)
-            raise AssertionError(f"Skips are not allowed: {test} skipped because {reason}")
-
-    class StrictTestRunner(unittest.TextTestRunner):
-        resultclass = StrictTestResult
-        def run(self, test):
-            res = super().run(test)
-            if len(res.skipped) > 0:
-                raise AssertionError(f"Skips are not allowed: {len(res.skipped)} tests skipped")
-            sys.stdout.write(f"\nStrictTestRunner discovered and ran {res.testsRun} tests.\n")
-            sys.stdout.flush()
-            return res
-
-    unittest.main(testRunner=StrictTestRunner)
+    unittest.main()

@@ -32,6 +32,16 @@ class CandidateProtocolError(Exception):
 # ── Exception registry ────────────────────────────────────────────────────────
 
 exception_class_registry: dict = {}
+class_proxy_cache: dict = {}
+proxy_instance_cache: dict = {}
+
+def get_or_create_class_proxy(session_id: str, module: str, qualname: str, magic_methods: list):
+    key = (session_id, module, qualname)
+    if key in class_proxy_cache:
+        return class_proxy_cache[key]
+    proxy_cls = make_class_proxy(qualname, magic_methods)
+    class_proxy_cache[key] = proxy_cls
+    return proxy_cls
 
 def _builtin_bases(module: str, qualname: str) -> type | None:
     BUILTINS = {
@@ -202,7 +212,15 @@ def to_envelope(val, depth=0, stats=None) -> dict:
 
     raise TypeError(f"Unserializable argument type: {type(val)}")
 
-def from_envelope(envelope):
+def from_envelope(envelope, depth=0, stats=None):
+    if stats is None:
+        stats = {"nodes": 0, "string_bytes": 0}
+    stats["nodes"] += 1
+    if stats["nodes"] > 1000:
+        raise ValueError("Payload exceeds maximum node limit of 1000")
+    if depth > 16:
+        raise ValueError("Payload depth exceeds maximum limit of 16")
+
     if not isinstance(envelope, dict):
         raise ValueError("Invalid envelope: not a dictionary")
     t = envelope.get("type")
@@ -216,13 +234,19 @@ def from_envelope(envelope):
         if isinstance(val, float):
             if math.isnan(val) or math.isinf(val):
                 raise ValueError("NaN and Infinity are not allowed")
+        elif isinstance(val, bool):
+            pass
         elif isinstance(val, int):
             if len(str(val)) > 100:
                 raise ValueError("Integer length exceeds 100 digits")
         elif isinstance(val, str):
-            if len(val.encode('utf-8')) > 1 * 1024 * 1024:
+            utf8_size = len(val.encode('utf-8'))
+            stats["string_bytes"] += utf8_size
+            if stats["string_bytes"] > 2 * 1024 * 1024:
+                raise ValueError("Cumulative string/bytes size exceeds 2 MB")
+            if utf8_size > 1 * 1024 * 1024:
                 raise ValueError("String size exceeds 1 MB limit")
-        elif val is not None and not isinstance(val, bool):
+        elif val is not None:
             raise ValueError(f"Invalid primitive value type: {type(val)}")
         return val
 
@@ -232,7 +256,13 @@ def from_envelope(envelope):
         hex_val = envelope["hex"]
         if not isinstance(hex_val, str) or len(hex_val) > 2 * 1024 * 1024:
             raise ValueError("Invalid bytes hex length")
-        return bytes.fromhex(hex_val)
+        val = bytes.fromhex(hex_val)
+        if len(val) > 1 * 1024 * 1024:
+            raise ValueError("Bytes size exceeds 1 MB limit")
+        stats["string_bytes"] += len(val)
+        if stats["string_bytes"] > 2 * 1024 * 1024:
+            raise ValueError("Cumulative string/bytes size exceeds 2 MB")
+        return val
 
     if t == "tuple":
         if set(envelope.keys()) != {"type", "value"}:
@@ -240,7 +270,7 @@ def from_envelope(envelope):
         items = envelope["value"]
         if not isinstance(items, list):
             raise ValueError("Tuple envelope value must be a list of envelopes")
-        return tuple(from_envelope(x) for x in items)
+        return tuple(from_envelope(x, depth + 1, stats) for x in items)
 
     if t == "list":
         if set(envelope.keys()) != {"type", "value"}:
@@ -248,7 +278,7 @@ def from_envelope(envelope):
         items = envelope["value"]
         if not isinstance(items, list):
             raise ValueError("List envelope value must be a list of envelopes")
-        return [from_envelope(x) for x in items]
+        return [from_envelope(x, depth + 1, stats) for x in items]
 
     if t == "dict":
         if set(envelope.keys()) != {"type", "value"}:
@@ -260,7 +290,7 @@ def from_envelope(envelope):
         for pair in items:
             if not isinstance(pair, list) or len(pair) != 2:
                 raise ValueError("Dict envelope items must be key-value envelope pairs")
-            res[from_envelope(pair[0])] = from_envelope(pair[1])
+            res[from_envelope(pair[0], depth + 1, stats)] = from_envelope(pair[1], depth + 1, stats)
         return res
 
     if t == "not_implemented":
@@ -272,17 +302,33 @@ def from_envelope(envelope):
         if set(envelope.keys()) != {"type", "module", "qualname", "obj_id"}:
             raise ValueError("Invalid envelope fields for object_ref")
         cls_name = envelope["qualname"]
+        mod_name = envelope["module"]
         obj_id = envelope["obj_id"]
+
+        if isinstance(obj_id, bool) or not isinstance(obj_id, int) or obj_id <= 0:
+            raise ValueError("Invalid object ID")
+
+        session_id = global_runner._session_id if global_runner else ""
+        instance_key = (session_id, obj_id)
+        if instance_key in proxy_instance_cache:
+            return proxy_instance_cache[instance_key]
+
+        is_exported = False
         magic_methods = []
         if global_runner:
             for item in global_runner._all_exports:
-                if item.get("qualname") == cls_name and item.get("module") == envelope["module"]:
+                if item.get("type") == "class" and item.get("qualname") == cls_name and item.get("module") == mod_name:
+                    is_exported = True
                     magic_methods = item.get("magic_methods", [])
                     break
-        proxy_cls = make_class_proxy(cls_name, magic_methods)
+        if not is_exported:
+            raise CandidateProtocolError(f"Rejected unknown class identity: ({mod_name!r}, {cls_name!r})")
+
+        proxy_cls = get_or_create_class_proxy(session_id, mod_name, cls_name, magic_methods)
         proxy = proxy_cls(_DirectObjRef(obj_id))
-        proxy._module = envelope["module"]
+        proxy._module = mod_name
         proxy._qualname = cls_name
+        proxy_instance_cache[instance_key] = proxy
         return proxy
 
     if t == "callable_ref":
@@ -359,9 +405,28 @@ class RunnerProxy:
             raise HarnessInfrastructureError(f"Sandbox template missing: {template_path}")
         with open(template_path) as f:
             tmpl = f.read()
+
+        import sys
+        real_python_exe = os.path.realpath(sys.executable)
+        real_python_prefix = os.path.realpath(sys.prefix)
+        real_base_prefix = os.path.realpath(sys.base_prefix)
+
+        # Codex prefix fallback
+        codex_real_path = os.path.realpath("/opt/homebrew/bin/codex")
+        if os.path.exists(codex_real_path):
+            codex_prefix = os.path.dirname(os.path.dirname(codex_real_path))
+        else:
+            codex_prefix = "/opt/homebrew" # fallback
+
         sb_content = tmpl.format(
+            repository_root=BASE_DIR,
+            virtualenv_path=os.path.join(BASE_DIR, ".venv"),
             candidate_dir=self._candidate_dir,
             temp_dir=self._temp_dir,
+            real_python_exe=real_python_exe,
+            real_python_prefix=real_python_prefix,
+            real_base_prefix=real_base_prefix,
+            codex_prefix=codex_prefix,
         )
         sb_path = os.path.join(self._temp_dir, "candidate.sb")
         with open(sb_path, "w") as f:
@@ -435,7 +500,7 @@ class RunnerProxy:
         sel.register(fd, selectors.EVENT_READ)
         try:
             while len(buf) < n:
-                rem = deadline - time.time()
+                rem = deadline - time.monotonic()
                 if rem <= 0:
                     raise TimeoutError("IPC read timeout exceeded")
                 events = sel.select(timeout=max(0.1, rem))
@@ -464,7 +529,7 @@ class RunnerProxy:
         sel.register(fd, selectors.EVENT_READ)
         try:
             while True:
-                rem = deadline - time.time()
+                rem = deadline - time.monotonic()
                 if rem <= 0:
                     raise TimeoutError("IPC read timeout exceeded")
                 events = sel.select(timeout=max(0.1, rem))
@@ -486,27 +551,33 @@ class RunnerProxy:
 
     def _read_frame(self, timeout: float = 10.0) -> dict | None:
         import time
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         try:
             length_line = self._read_line_with_deadline(deadline)
         except (TimeoutError, ValueError) as e:
             raise CandidateProtocolError(f"IPC read timeout/failure: {e}")
         if not length_line:
             return None
+        if not length_line.endswith("\n") or len(length_line) > 32:
+            raise CandidateProtocolError(f"Malformed header line: {length_line!r}")
         try:
             length = int(length_line.strip())
         except ValueError:
             raise CandidateProtocolError(f"Malformed length from runner: {length_line!r}")
-        if length > 2 * 1024 * 1024:
-            raise CandidateProtocolError("Oversized runner response (>2MB)")
+        if length <= 0 or length > 2 * 1024 * 1024:
+            raise CandidateProtocolError(f"Invalid frame length from runner: {length}")
         try:
             data = self._read_bytes_with_deadline(length, deadline)
         except (TimeoutError, ValueError) as e:
             raise CandidateProtocolError(f"IPC payload read timeout/failure: {e}")
         try:
-            self._read_bytes_with_deadline(1, deadline)  # trailing newline
-        except Exception:
-            pass
+            delim = self._read_bytes_with_deadline(1, deadline)  # trailing newline
+            if delim != b"\n":
+                raise CandidateProtocolError(f"Malformed trailing delimiter: expected b'\\n', got {delim!r}")
+        except Exception as e:
+            if isinstance(e, CandidateProtocolError):
+                raise
+            raise CandidateProtocolError(f"Trailing delimiter read failure: {e}")
         return json.loads(data.decode('utf-8'))
 
     def send_request(self, req: dict) -> dict:
@@ -544,52 +615,44 @@ class RunnerProxy:
 
     def shutdown(self) -> bool:
         if self._proc is None or self._proc.poll() is not None:
-            sys.stderr.write("DEBUG: shutdown: process already terminated\n")
             return True
         req_uuid = str(uuid.uuid4())
         try:
             self._write_frame({"action": "shutdown", "uuid": req_uuid, "session_id": self._session_id})
             resp = self._read_frame()
-            sys.stderr.write(f"DEBUG: shutdown response: {resp}\n")
-            sys.stderr.flush()
             if resp is None:
                 self._shutdown_clean = False
-                sys.stderr.write("DEBUG: shutdown: resp is None\n")
                 return False
             if resp.get("status") == "shutdown_ok" and resp.get("uuid") == req_uuid:
                 # EOF read validation
                 import time
-                deadline = time.time() + 2.0
+                deadline = time.monotonic() + 2.0
                 try:
                     extra = self._read_frame(timeout=2.0)
-                    sys.stderr.write(f"DEBUG: shutdown extra check: {extra}\n")
                     if extra is not None:
                         self._shutdown_clean = False
                         return False
                 except Exception as ex:
-                    sys.stderr.write(f"DEBUG: shutdown extra exception: {ex}\n")
+                    self._shutdown_clean = False
+                    return False
 
                 os.set_blocking(self._proc.stdout.fileno(), False)
                 try:
                     trailing = os.read(self._proc.stdout.fileno(), 4096)
-                    sys.stderr.write(f"DEBUG: shutdown trailing check: {trailing!r}\n")
                     if trailing:
                         self._shutdown_clean = False
                         return False
-                except OSError as oe:
-                    sys.stderr.write(f"DEBUG: shutdown trailing OSError: {oe}\n")
+                except OSError:
+                    pass
                 finally:
                     os.set_blocking(self._proc.stdout.fileno(), True)
 
                 self._shutdown_clean = True
                 return True
             else:
-                sys.stderr.write(f"DEBUG: shutdown status/uuid mismatch: status={resp.get('status')}, uuid={resp.get('uuid')}\n")
                 self._shutdown_clean = False
                 return False
         except Exception as e:
-            sys.stderr.write(f"DEBUG: shutdown exception: {e}\n")
-            sys.stderr.flush()
             self._shutdown_clean = False
             return False
 
@@ -696,6 +759,8 @@ def make_class_proxy(class_name: str, magic_methods: list):
                 serialized_args = [to_envelope(x) for x in args]
                 serialized_kwargs = {k: to_envelope(v) for k, v in kwargs.items()}
                 self.obj_id = global_runner.init_class(class_name, serialized_args, serialized_kwargs)
+            session_id = global_runner._session_id if global_runner else ""
+            proxy_instance_cache[(session_id, self.obj_id)] = self
 
         def __getattr__(self, name: str):
             if name.startswith('_'):
@@ -747,12 +812,14 @@ def make_class_proxy(class_name: str, magic_methods: list):
 # ── Main evaluation entry point ───────────────────────────────────────────────
 
 def run_evaluation(candidate_dir: str, test_harness_path: str, timeout: float = 30.0) -> dict:
-    global global_runner, exception_class_registry
+    global global_runner, exception_class_registry, class_proxy_cache, proxy_instance_cache
+
+    exception_class_registry.clear()
+    class_proxy_cache.clear()
+    proxy_instance_cache.clear()
 
     if not os.path.exists("/usr/bin/sandbox-exec"):
         return {"success": False, "error": "sandbox-exec not available"}
-
-    exception_class_registry.clear()
 
     temp_dir = tempfile.mkdtemp(prefix="rsi_run_")
     os.chmod(temp_dir, 0o700)
@@ -774,20 +841,19 @@ def run_evaluation(candidate_dir: str, test_harness_path: str, timeout: float = 
         global_runner = runner
 
         try:
-            try:
-                runner.check_import()
-            except Exception as e:
-                eval_result = {"success": False, "error": f"Import failed: {e}"}
-                return eval_result
+            runner.check_import()
+            exports = runner.get_exports()
 
-            try:
-                exports = runner.get_exports()
-            except Exception as e:
-                eval_result = {"success": False, "error": f"Export failed: {e}"}
-                return eval_result
+            # Two-pass Variable Decoding:
+            # Pass 1: Register class MROs
+            for item in exports:
+                if item["type"] == "class" and item.get("is_exception", False):
+                    _ = _get_or_create_exception_class(item["qualname"], item["module"], exports)
 
             mock_solution = types.ModuleType("solution")
+            sys.modules["solution"] = mock_solution
 
+            # Pass 2: Assign functions/classes
             for item in exports:
                 name = item["name"]
                 itype = item["type"]
@@ -803,11 +869,15 @@ def run_evaluation(candidate_dir: str, test_harness_path: str, timeout: float = 
                         setattr(mock_solution, name, exc_cls)
                     else:
                         magic_methods = item.get("magic_methods", [])
-                        setattr(mock_solution, name, make_class_proxy(name, magic_methods))
-                elif itype == "variable":
-                    setattr(mock_solution, name, item["value"])
+                        session_id = global_runner._session_id if global_runner else ""
+                        setattr(mock_solution, name, get_or_create_class_proxy(session_id, item["module"], item["qualname"], magic_methods))
 
-            sys.modules["solution"] = mock_solution
+            # Pass 3: Decode variables
+            for item in exports:
+                name = item["name"]
+                itype = item["type"]
+                if itype == "variable":
+                    setattr(mock_solution, name, from_envelope(item["value"]))
 
             import importlib.util, io
             spec = importlib.util.spec_from_file_location("test_module", test_harness_path)
@@ -823,7 +893,6 @@ def run_evaluation(candidate_dir: str, test_harness_path: str, timeout: float = 
                 suite = unittest.defaultTestLoader.loadTestsFromModule(test_module)
                 stream = io.StringIO()
 
-                # Custom Test Runner with strict skipped check
                 class CustomTextTestRunner(unittest.TextTestRunner):
                     def run(self, test):
                         result = super().run(test)
@@ -870,6 +939,10 @@ def run_evaluation(candidate_dir: str, test_harness_path: str, timeout: float = 
         global_runner = None
         if "solution" in sys.modules:
             del sys.modules["solution"]
+
+        exception_class_registry.clear()
+        class_proxy_cache.clear()
+        proxy_instance_cache.clear()
 
         try:
             shutil.rmtree(temp_dir)
