@@ -26,6 +26,11 @@ BEST_MANIFEST_PATH = os.path.join(BASE_DIR, "best_manifest.json")
 PREFLIGHT_HASHES_PATH = os.path.join(BASE_DIR, "preflight_hashes.json")
 
 TOKEN_CEILING = 50_000
+MODEL_RESOLUTION_SENTINEL = "resolve-at-canary"
+_EXPLICIT_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_CODEX_VERSION_RE = re.compile(
+    r"^codex-cli\s+\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?$"
+)
 
 os.makedirs(HISTORY_DIR, exist_ok=True)
 os.makedirs(PROMPTS_DIR, exist_ok=True)
@@ -39,10 +44,26 @@ class ExperimentInvalidError(Exception):
         *,
         stdout: str | bytes | None = None,
         stderr: str | bytes | None = None,
+        stderr_summary: str | None = None,
+        unresolved_codex_home: str | None = None,
+        cleanup_error: BaseException | str | None = None,
     ):
         super().__init__(message)
         self.stdout = normalize_and_truncate_stream(stdout)
         self.stderr = normalize_and_truncate_stream(stderr)
+        self.stderr_summary = (
+            stderr_summary
+            if stderr_summary is not None
+            else get_stderr_summary(stderr)
+        )
+        self.unresolved_codex_home = unresolved_codex_home
+        self.cleanup_error = (
+            None
+            if cleanup_error is None
+            else f"{type(cleanup_error).__name__}: {cleanup_error}"
+            if isinstance(cleanup_error, BaseException)
+            else str(cleanup_error)
+        )
 
 class RunContext:
     def __init__(self):
@@ -52,10 +73,14 @@ class RunContext:
         self.lock_file_hash = None
         self.codex_version = None
         self.codex_cli_version = "unavailable"
+        self.lock_model = None
         self.codex_model = None
+        self.model_resolved = None
         self.sw_vers = "unavailable"
         self.python_version = sys.version
         self.created_codex_home = None
+        self.unresolved_codex_home = None
+        self.cleanup_error = None
         self.consumed_tokens = 0
         self.unknown_token_state = False
         self.current_stage = "pre-init"
@@ -69,13 +94,9 @@ def normalize_and_truncate_stream(
     """Return bounded UTF-8 text, including the truncation marker in the bound."""
     if max_bytes < 0:
         raise ValueError("max_bytes must be non-negative")
-    if stream is None:
-        return ""
-    value = (
-        stream.decode("utf-8", errors="replace")
-        if isinstance(stream, bytes)
-        else str(stream)
-    )
+    value = _normalize_stream_unbounded(stream)
+    if not value:
+        return value
     encoded = value.encode("utf-8", errors="replace")
     if len(encoded) <= max_bytes:
         return value
@@ -86,13 +107,27 @@ def normalize_and_truncate_stream(
     return prefix + marker.decode("ascii")
 
 
+def _normalize_stream_unbounded(stream: str | bytes | None) -> str:
+    if stream is None:
+        return ""
+    return (
+        stream.decode("utf-8", errors="replace")
+        if isinstance(stream, bytes)
+        else str(stream)
+    )
+
+
 def get_stderr_summary(stderr: str | bytes | None) -> str:
-    normalized = normalize_and_truncate_stream(stderr)
+    normalized = _normalize_stream_unbounded(stderr)
     lines = [line for line in normalized.splitlines() if line.strip()]
     if not lines:
-        return ""
-    non_warnings = [line for line in lines if not line.startswith("WARNING")]
-    return (non_warnings or lines)[-1]
+        return "stderr was empty"
+    non_warnings = [
+        line for line in lines if not line.lstrip().startswith("WARNING")
+    ]
+    if not non_warnings:
+        return "stderr contained only WARNING lines"
+    return non_warnings[-1]
 
 # ── Containment Helpers ───────────────────────────────────────────────────────
 
@@ -117,10 +152,31 @@ def check_parent_symlinks(path: str):
 
 # ── JSONL parsing ─────────────────────────────────────────────────────────────
 
-def parse_codex_jsonl_output(stdout_lines: list) -> tuple:
+def _resolved_model_candidates(event: dict) -> list[str]:
+    if event.get("type") != "turn.completed":
+        return []
+    candidates = []
+    for key in ("model_resolved", "model"):
+        if key not in event:
+            continue
+        value = event[key]
+        if not isinstance(value, str) or not value.strip():
+            raise ExperimentInvalidError(
+                f"Codex turn.completed {key} must be a nonblank string"
+            )
+        candidates.append(value.strip())
+    return candidates
+
+
+def parse_codex_jsonl_output(
+    stdout_lines: list,
+    *,
+    require_model: bool = False,
+) -> tuple:
     code = ""
     usage_data: dict | None = None
     turn_completed_count = 0
+    resolved_models = []
 
     for line in stdout_lines:
         line = line.strip()
@@ -130,6 +186,11 @@ def parse_codex_jsonl_output(stdout_lines: list) -> tuple:
             event = json.loads(line)
         except Exception as e:
             raise ExperimentInvalidError(f"Malformed JSON line: {line!r} — fail closed: {e}")
+
+        if not isinstance(event, dict):
+            raise ExperimentInvalidError("Codex JSONL event must be an object")
+        if require_model:
+            resolved_models.extend(_resolved_model_candidates(event))
 
         etype = event.get("type")
         if etype == "item.completed":
@@ -155,6 +216,17 @@ def parse_codex_jsonl_output(stdout_lines: list) -> tuple:
     if output_tokens < 0:
         raise ExperimentInvalidError(f"output_tokens must be non-negative, got: {output_tokens}")
 
+    if require_model:
+        unique_models = set(resolved_models)
+        if not unique_models:
+            raise ExperimentInvalidError(
+                "Codex JSONL stream has no parseable resolved model"
+            )
+        if len(unique_models) != 1:
+            raise ExperimentInvalidError(
+                f"Codex JSONL stream reports conflicting resolved models: {sorted(unique_models)}"
+            )
+        return code, usage_data, resolved_models[0]
     return code, usage_data
 
 def extract_code(raw_output: str) -> str:
@@ -341,18 +413,30 @@ def _build_codex_run_scoped_home(
         ctx.created_codex_home = real_home
         created_by_this_call = False
         return real_home
-    except Exception as error:
+    except BaseException as error:
         if created_by_this_call:
             try:
                 _remove_owned_codex_home(absolute_home, absolute_parent)
-            except Exception as cleanup_error:
-                sys.stderr.write(
-                    f"WARNING: failed to clean partially created Codex home {absolute_home!r}: {cleanup_error}\n"
-                )
-                sys.stderr.flush()
-            finally:
+            except BaseException as cleanup_error:
+                ctx.created_codex_home = absolute_home
+                ctx.unresolved_codex_home = absolute_home
+                ctx.cleanup_error = f"{type(cleanup_error).__name__}: {cleanup_error}"
+                primary_stdout = getattr(error, "stdout", None)
+                primary_stderr = getattr(error, "stderr", None)
+                raise ExperimentInvalidError(
+                    f"{type(error).__name__}: {error}; cleanup of Codex home "
+                    f"{absolute_home!r} failed: {type(cleanup_error).__name__}: {cleanup_error}",
+                    stdout=primary_stdout,
+                    stderr=primary_stderr,
+                    stderr_summary=getattr(error, "stderr_summary", None),
+                    unresolved_codex_home=absolute_home,
+                    cleanup_error=cleanup_error,
+                ) from error
+            else:
                 created_by_this_call = False
         ctx.created_codex_home = None
+        ctx.unresolved_codex_home = None
+        ctx.cleanup_error = None
         if isinstance(error, ExperimentInvalidError):
             raise
         raise ExperimentInvalidError(
@@ -362,19 +446,57 @@ def _build_codex_run_scoped_home(
 
 def _cleanup_codex_run_scoped_home(ctx: RunContext, expected_home: str) -> None:
     owned_home = ctx.created_codex_home
+    if owned_home is None:
+        return
     try:
-        if owned_home is None:
-            return
         if os.path.abspath(owned_home) != os.path.abspath(expected_home):
             raise ExperimentInvalidError("Codex home cleanup sentinel mismatch")
-        _remove_owned_codex_home(owned_home, os.path.dirname(os.path.abspath(BASE_DIR)))
-    except Exception as cleanup_error:
-        sys.stderr.write(
-            f"WARNING: Codex home cleanup failed for {owned_home!r}: {cleanup_error}\n"
+        _remove_owned_codex_home(
+            owned_home,
+            os.path.dirname(os.path.abspath(BASE_DIR)),
         )
-        sys.stderr.flush()
-    finally:
+    except BaseException as cleanup_error:
+        ctx.unresolved_codex_home = owned_home
+        ctx.cleanup_error = f"{type(cleanup_error).__name__}: {cleanup_error}"
+        raise ExperimentInvalidError(
+            f"Codex home cleanup failed for {owned_home!r}: "
+            f"{type(cleanup_error).__name__}: {cleanup_error}",
+            unresolved_codex_home=owned_home,
+            cleanup_error=cleanup_error,
+        ) from cleanup_error
+    else:
         ctx.created_codex_home = None
+        ctx.unresolved_codex_home = None
+        ctx.cleanup_error = None
+
+
+def _cleanup_after_call(
+    ctx: RunContext,
+    expected_home: str,
+    primary_error: BaseException | None,
+) -> None:
+    try:
+        _cleanup_codex_run_scoped_home(ctx, expected_home)
+    except ExperimentInvalidError as cleanup_failure:
+        if primary_error is None:
+            raise
+        unresolved_home = (
+            cleanup_failure.unresolved_codex_home
+            or ctx.unresolved_codex_home
+            or expected_home
+        )
+        cleanup_diagnostic = (
+            cleanup_failure.cleanup_error or str(cleanup_failure)
+        )
+        raise ExperimentInvalidError(
+            f"{type(primary_error).__name__}: {primary_error}; "
+            f"{cleanup_failure}",
+            stdout=getattr(primary_error, "stdout", None),
+            stderr=getattr(primary_error, "stderr", None),
+            stderr_summary=getattr(primary_error, "stderr_summary", None),
+            unresolved_codex_home=unresolved_home,
+            cleanup_error=cleanup_diagnostic,
+        ) from primary_error
 
 
 # Compatibility for the existing generator startup regression. Production
@@ -458,14 +580,44 @@ def _build_canary_command(sb_path: str, ctx: RunContext) -> list[str]:
         _get_codex_bin_path(), "exec", "-",
         "--ephemeral",
         "--json",
-        "--model", ctx.codex_model,
     ]
+
+
+def _validate_canary_model(ctx: RunContext, resolved_model: str) -> None:
+    ctx.model_resolved = resolved_model
+    requested_model = ctx.lock_model or ctx.codex_model
+    if requested_model is None:
+        raise ExperimentInvalidError("Lock model was not validated before canary")
+    if (
+        requested_model != MODEL_RESOLUTION_SENTINEL
+        and resolved_model != requested_model
+    ):
+        raise ExperimentInvalidError(
+            f"Canary resolved model {resolved_model!r}, expected explicit lock model "
+            f"{requested_model!r}"
+        )
+
+
+def _enforce_model_invariant(ctx: RunContext, resolved_model: str) -> None:
+    if not isinstance(ctx.model_resolved, str) or not ctx.model_resolved:
+        raise ExperimentInvalidError(
+            "Canary model_resolved is unavailable before a subsequent Codex call"
+        )
+    if resolved_model != ctx.model_resolved:
+        raise ExperimentInvalidError(
+            f"Model drift detected: canary resolved {ctx.model_resolved!r}, "
+            f"subsequent call resolved {resolved_model!r}"
+        )
 
 
 def _raise_launch_failure(label: str, error: BaseException) -> None:
     stdout = getattr(error, "stdout", None)
     stderr = getattr(error, "stderr", None)
-    summary = get_stderr_summary(stderr) or str(error)
+    summary = (
+        get_stderr_summary(stderr)
+        if _normalize_stream_unbounded(stderr).strip()
+        else str(error)
+    )
     raise ExperimentInvalidError(
         f"{label} process execution failed: {summary}",
         stdout=stdout,
@@ -487,17 +639,26 @@ def _run_codex_version_smoke_test(sb_path: str, env: dict) -> str:
         )
     except (subprocess.SubprocessError, OSError) as error:
         _raise_launch_failure("Codex smoke test", error)
-    stdout = normalize_and_truncate_stream(res.stdout)
-    stderr = normalize_and_truncate_stream(res.stderr)
+    raw_stdout = res.stdout
+    raw_stderr = res.stderr
+    stdout = normalize_and_truncate_stream(raw_stdout)
+    stderr_summary = get_stderr_summary(raw_stderr)
     if res.returncode != 0:
-        summary = get_stderr_summary(stderr)
         raise ExperimentInvalidError(
             f"Codex smoke test failed (codex --version returned {res.returncode}):\n"
-            f"stderr: {summary}",
-            stdout=stdout,
-            stderr=stderr,
+            f"stderr: {stderr_summary}",
+            stdout=raw_stdout,
+            stderr=raw_stderr,
+            stderr_summary=stderr_summary,
         )
     version = stdout.strip()
+    if not version or not _CODEX_VERSION_RE.fullmatch(version):
+        raise ExperimentInvalidError(
+            f"Codex smoke test returned invalid version output: {version!r}",
+            stdout=raw_stdout,
+            stderr=raw_stderr,
+            stderr_summary=stderr_summary,
+        )
     sys.stderr.write(f"[smoke] codex --version OK: {version}\n")
     sys.stderr.flush()
     return version
@@ -521,16 +682,19 @@ def _run_codex_canary(
         ctx.unknown_token_state = True
         _raise_launch_failure("Canary", error)
 
-    stdout = normalize_and_truncate_stream(res.stdout)
-    stderr = normalize_and_truncate_stream(res.stderr)
+    raw_stdout = res.stdout
+    raw_stderr = res.stderr
+    stdout = normalize_and_truncate_stream(raw_stdout)
+    stderr_summary = get_stderr_summary(raw_stderr)
 
     if res.returncode != 0:
         ctx.unknown_token_state = True
         raise ExperimentInvalidError(
             f"Codex canary call failed (rc={res.returncode}): "
-            f"{get_stderr_summary(stderr)}",
-            stdout=stdout,
-            stderr=stderr,
+            f"{stderr_summary}",
+            stdout=raw_stdout,
+            stderr=raw_stderr,
+            stderr_summary=stderr_summary,
         )
 
     try:
@@ -545,15 +709,42 @@ def _run_codex_canary(
         ctx.unknown_token_state = True
         raise ExperimentInvalidError(
             f"Canary token parsing failed: {e}",
-            stdout=stdout,
-            stderr=stderr,
+            stdout=raw_stdout,
+            stderr=raw_stderr,
+            stderr_summary=stderr_summary,
         ) from e
 
     ctx.consumed_tokens += tokens
+    try:
+        _, _, resolved_model = parse_codex_jsonl_output(
+            stdout.splitlines(),
+            require_model=True,
+        )
+    except ExperimentInvalidError as error:
+        raise ExperimentInvalidError(
+            f"Canary model resolution failed: {error}",
+            stdout=raw_stdout,
+            stderr=raw_stderr,
+            stderr_summary=stderr_summary,
+        ) from error
+
+    ctx.model_resolved = resolved_model
     if ctx.consumed_tokens > TOKEN_CEILING:
         raise ExperimentInvalidError(
-            f"Token ceiling breached during canary: {ctx.consumed_tokens} > {TOKEN_CEILING}"
+            f"Token ceiling breached during canary: {ctx.consumed_tokens} > {TOKEN_CEILING}",
+            stdout=raw_stdout,
+            stderr=raw_stderr,
+            stderr_summary=stderr_summary,
         )
+    try:
+        _validate_canary_model(ctx, resolved_model)
+    except ExperimentInvalidError as error:
+        raise ExperimentInvalidError(
+            str(error),
+            stdout=raw_stdout,
+            stderr=raw_stderr,
+            stderr_summary=stderr_summary,
+        ) from error
     sys.stderr.write(f"[canary] API access verified. Canary output tokens: {tokens}\n")
     sys.stderr.flush()
     return tokens
@@ -573,6 +764,7 @@ def call_codex_sandboxed(
     call_run_id = ctx.run_id or f"adhoc_{uuid.uuid4().hex}"
     real_temp_home = _build_codex_run_scoped_home(ctx, call_run_id)
     real_candidate_input_dir = os.path.realpath(candidate_dir)
+    primary_error = None
 
     try:
         sb_path = _build_generator_sb(real_temp_home, real_candidate_input_dir)
@@ -586,7 +778,6 @@ def call_codex_sandboxed(
             "-s", "read-only",
             "--ephemeral",
             "--json",
-            "--model", ctx.codex_model,
             "-C", real_candidate_input_dir,
         ]
 
@@ -604,16 +795,19 @@ def call_codex_sandboxed(
             ctx.unknown_token_state = True
             _raise_launch_failure("Codex", error)
 
-        stdout = normalize_and_truncate_stream(res.stdout)
-        stderr = normalize_and_truncate_stream(res.stderr)
+        raw_stdout = res.stdout
+        raw_stderr = res.stderr
+        stdout = normalize_and_truncate_stream(raw_stdout)
+        stderr_summary = get_stderr_summary(raw_stderr)
 
         if res.returncode != 0:
             ctx.unknown_token_state = True
             raise ExperimentInvalidError(
                 f"Codex returned non-zero exit code {res.returncode}. "
-                f"Stderr: {get_stderr_summary(stderr)}",
-                stdout=stdout,
-                stderr=stderr,
+                f"Stderr: {stderr_summary}",
+                stdout=raw_stdout,
+                stderr=raw_stderr,
+                stderr_summary=stderr_summary,
             )
 
         try:
@@ -628,23 +822,56 @@ def call_codex_sandboxed(
             ctx.unknown_token_state = True
             raise ExperimentInvalidError(
                 f"Codex call token parsing failed: {e}",
-                stdout=stdout,
-                stderr=stderr,
+                stdout=raw_stdout,
+                stderr=raw_stderr,
+                stderr_summary=stderr_summary,
             ) from e
 
         ctx.consumed_tokens += tokens
+        try:
+            _, _, resolved_model = parse_codex_jsonl_output(
+                stdout.splitlines(),
+                require_model=True,
+            )
+        except ExperimentInvalidError as error:
+            raise ExperimentInvalidError(
+                f"Codex call model resolution failed: {error}",
+                stdout=raw_stdout,
+                stderr=raw_stderr,
+                stderr_summary=stderr_summary,
+            ) from error
+
         if ctx.consumed_tokens > TOKEN_CEILING:
             raise ExperimentInvalidError(
-                f"Token ceiling breached: {ctx.consumed_tokens} > {TOKEN_CEILING}"
+                f"Token ceiling breached: {ctx.consumed_tokens} > {TOKEN_CEILING}",
+                stdout=raw_stdout,
+                stderr=raw_stderr,
+                stderr_summary=stderr_summary,
             )
+        try:
+            _enforce_model_invariant(ctx, resolved_model)
+        except ExperimentInvalidError as error:
+            raise ExperimentInvalidError(
+                str(error),
+                stdout=raw_stdout,
+                stderr=raw_stderr,
+                stderr_summary=stderr_summary,
+            ) from error
 
         if expect_json_code:
             return extract_code(raw_msg), tokens
         else:
             return raw_msg, tokens
 
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        _cleanup_codex_run_scoped_home(ctx, real_temp_home)
+        _cleanup_after_call(
+            ctx,
+            real_temp_home,
+            primary_error,
+        )
 
 # ── Evaluation helpers ────────────────────────────────────────────────────────
 
@@ -903,11 +1130,16 @@ def verify_experiment_lock(ctx: RunContext) -> str:
         raise ExperimentInvalidError("approved_commit_sha missing from experiment.lock")
 
     model = lock_data.get("model")
-    if not isinstance(model, str) or not model.strip():
+    if not isinstance(model, str) or (
+        model != MODEL_RESOLUTION_SENTINEL
+        and not _EXPLICIT_MODEL_RE.fullmatch(model)
+    ):
         raise ExperimentInvalidError(
-            "model missing, empty, or not a string in experiment.lock"
+            "model in experiment.lock must be exactly 'resolve-at-canary' "
+            "or a valid explicit model name"
         )
-    ctx.codex_model = model.strip()
+    ctx.lock_model = model
+    ctx.codex_model = model
 
     lock_allow_no_holdout = lock_data.get("allow_no_holdout", False)
     if not isinstance(lock_allow_no_holdout, bool):
@@ -1103,6 +1335,7 @@ def run_holdout_evaluation(
 def run_smoke_and_canary(ctx: RunContext) -> tuple:
     call_run_id = ctx.run_id or f"adhoc_{uuid.uuid4().hex}"
     real_temp_home = _build_codex_run_scoped_home(ctx, call_run_id)
+    primary_error = None
     try:
         real_candidate_input_dir = BASE_DIR
         sb_path = _build_generator_sb(real_temp_home, real_candidate_input_dir)
@@ -1112,8 +1345,11 @@ def run_smoke_and_canary(ctx: RunContext) -> tuple:
         ctx.codex_cli_version = version
         canary_tokens = _run_codex_canary(sb_path, allowed_env, ctx)
         return version, canary_tokens
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        _cleanup_codex_run_scoped_home(ctx, real_temp_home)
+        _cleanup_after_call(ctx, real_temp_home, primary_error)
 
 # ── Main execution entry point ────────────────────────────────────────────────
 
@@ -1201,7 +1437,7 @@ def _main_exec(ctx: RunContext) -> None:
             "status": "no_headroom",
             "baseline_hash": baseline_hash,
             "codex_version": ctx.codex_version,
-            "model_name": ctx.codex_model,
+            **_model_manifest_fields(ctx),
             "canary_tokens_consumed": canary_tokens,
             "preflight_hashes": preflight_hashes_global(),
             "preflight_huffman": preflight_huffman_data,
@@ -1389,7 +1625,7 @@ def _main_exec(ctx: RunContext) -> None:
             "status": "completed_no_improvement",
             "baseline_hash": baseline_hash,
             "codex_version": ctx.codex_version,
-            "model_name": ctx.codex_model,
+            **_model_manifest_fields(ctx),
             "canary_tokens_consumed": canary_tokens,
             "promotion_gate_passed": False,
             "retention_reason": retention_reason,
@@ -1438,7 +1674,7 @@ def _main_exec(ctx: RunContext) -> None:
         "status": "completed_promoted",
         "baseline_hash": baseline_hash,
         "codex_version": ctx.codex_version,
-        "model_name": ctx.codex_model,
+        **_model_manifest_fields(ctx),
         "canary_tokens_consumed": canary_tokens,
         "selected_prompt_hash": best_trial["candidate_prompt_hash"],
         "selected_from_trial": best_trial["trial"],
@@ -1517,6 +1753,14 @@ def _terminal_environment_metadata(ctx: RunContext) -> dict:
     }
 
 
+def _model_manifest_fields(ctx: RunContext) -> dict:
+    return {
+        "model_requested": ctx.lock_model or ctx.codex_model,
+        "model_resolved": ctx.model_resolved,
+        "model_name": ctx.model_resolved,
+    }
+
+
 def main() -> None:
     ctx = RunContext()
     _capture_environment_metadata(ctx)
@@ -1542,10 +1786,23 @@ def main() -> None:
             "approved_commit_sha": ctx.approved_commit_sha,
             "lock_file_hash": ctx.lock_file_hash,
             "codex_version": ctx.codex_version,
-            "model_name": ctx.codex_model,
+            **_model_manifest_fields(ctx),
             "error_message": f"{type(e).__name__}: {e}",
             "error_stdout": normalize_and_truncate_stream(getattr(e, "stdout", None)),
             "error_stderr": normalize_and_truncate_stream(getattr(e, "stderr", None)),
+            "stderr_summary": getattr(
+                e,
+                "stderr_summary",
+                get_stderr_summary(getattr(e, "stderr", None)),
+            ),
+            "unresolved_codex_home": (
+                getattr(e, "unresolved_codex_home", None)
+                or ctx.unresolved_codex_home
+            ),
+            "cleanup_error": (
+                getattr(e, "cleanup_error", None)
+                or ctx.cleanup_error
+            ),
             "tokens_consumed": ctx.consumed_tokens,
             "unknown_token_state": ctx.unknown_token_state,
             "current_stage": ctx.current_stage,
