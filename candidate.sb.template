@@ -10,15 +10,20 @@
 (allow sysctl-read)
 (allow mach-lookup)
 
+; Allow /dev/null for stdout redirect in candidate_runner.py
+(allow file-read*  (literal "/dev/null"))
+(allow file-write* (literal "/dev/null"))
+(allow file-ioctl  (literal "/dev/null"))
+
 (allow file-read*
     (literal "/")
     (subpath "/System")
     (subpath "/usr")
     (subpath "/Library")
-    (subpath "/private/var/folders")
     (subpath "/opt/homebrew")
     (subpath "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/.venv")
     (literal "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/sandbox_worker.py")
+    (literal "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/candidate_runner.py")
     (subpath "{candidate_dir}")
     (subpath "{temp_dir}")
 )

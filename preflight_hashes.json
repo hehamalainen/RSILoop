@@ -1,0 +1,8 @@
+{
+  "benchmarks/huffman_coding/problem.txt": "4bbae970cdb6ea8461af1aecf44ee61b3aaccfad3570298c0eb91cc3b3cf2488",
+  "benchmarks/huffman_coding/test_harness.py": "e403e18b92ce3d58dca677b85da1c4f51db773745374fc8a248ec2d56c09209c",
+  "benchmarks/validation/string_calculator/problem.txt": "d65dbb5cecc38ca278d515062a07ea2409a8d6b2e457ae398576fa9bad877861",
+  "benchmarks/validation/string_calculator/test_harness.py": "4902a9e9224632524b505371745b3d92bf5d881e8604db12bf40609098b2207a",
+  "benchmarks/validation/matrix_operations/problem.txt": "0f21d35df3bcc0d0a212033600af07eee9a3b73f2dcc825f36b21956e215e19e",
+  "benchmarks/validation/matrix_operations/test_harness.py": "735b0f2e8c5af946663b631db4aec17f40b6b77702b08e7082fb06ca76104c0e"
+}

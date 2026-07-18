@@ -1,0 +1,21 @@
+Implement a class `HuffmanCoder` with two methods:
+
+1. `encode(text: str) -> bytes`
+   - If `text` is empty, return `b''`.
+   - Build a frequency table from `text`.
+   - Build a Huffman tree using a min-heap priority queue.
+     Priority-queue key (ascending): `(frequency, minimum_descendant_symbol, node_kind, creation_index)`
+     where `node_kind` is 0 for leaf nodes and 1 for internal nodes,
+     and `creation_index` is a monotonically increasing counter assigned at insertion.
+   - Assign bit codes: traversing left adds '0', traversing right adds '1'.
+   - For a single unique symbol, assign code '0' (one bit).
+   - Encode `text` to a bit string, then pack bits MSB-first into bytes, right-padding the final byte with '0' bits.
+   - Prepend a UTF-8 JSON header `{"freq": {symbol: count, ...}}` followed by a single null byte `\x00` separator.
+   - Return the complete `bytes` object.
+
+2. `decode(data: bytes) -> str`
+   - If `data` is empty, return `''`.
+   - Read bytes up to and including the first `\x00` byte; parse the preceding bytes as a UTF-8 JSON header to obtain the frequency table.
+   - Reconstruct the Huffman tree using the same deterministic algorithm.
+   - Decode exactly `sum(freq.values())` symbols from the remaining bits (MSB-first), stopping after that count.
+   - Return the decoded string.

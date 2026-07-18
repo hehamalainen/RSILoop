@@ -1,0 +1,9 @@
+Implement a class `Matrix` that wraps a list of lists of numbers and supports:
+
+1. `__init__(self, data: list)` - stores the 2D list
+2. `__add__(self, other: 'Matrix') -> 'Matrix'` - element-wise addition; raise `ValueError` if dimensions differ
+3. `__mul__(self, other: 'Matrix') -> 'Matrix'` - matrix multiplication; raise `ValueError` if inner dimensions don't match
+4. `transpose(self) -> 'Matrix'` - returns the transpose
+5. `data` property or attribute returning the underlying list of lists
+
+All returned values should be new `Matrix` instances.
