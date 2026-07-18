@@ -584,36 +584,91 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
     # ── Test 37: Legacy best manifest startup archival and failure ──
 
     def test_legacy_best_manifest_startup_archival_and_failure(self):
-        from rsi_loop import verify_existing_best_manifest_startup, load_and_verify_best_manifest, ExperimentInvalidError
+        from rsi_loop import verify_existing_best_manifest_startup, load_and_verify_best_manifest, ExperimentInvalidError, _main_exec, RunContext
 
         test_dir = os.path.join(self.tmp_dir, "legacy_manifest_test")
         os.makedirs(test_dir)
         best_manifest_path = os.path.join(test_dir, "best_manifest.json")
+        history_dir = os.path.join(test_dir, "history")
+        legacy_dir = os.path.join(history_dir, "legacy")
+        os.makedirs(legacy_dir)
 
-        # 1. Write a legacy manifest
+        # 1. Test status "invalid" is rejected
+        target_dir = os.path.join(history_dir, "run_123")
+        os.makedirs(target_dir)
+        run_manifest_path = os.path.join(target_dir, "run_manifest.json")
+        with open(run_manifest_path, "w") as f:
+            json.dump({"pointer_schema_version": "2", "status": "invalid"}, f)
+
+        # Calculate expected hash of run manifest
+        import hashlib
+        with open(run_manifest_path, "rb") as f:
+            manifest_hash = hashlib.sha256(f.read()).hexdigest()
+
+        pointer_data = {
+            "pointer_schema_version": "2",
+            "run_manifest_path": "history/run_123/run_manifest.json",
+            "run_manifest_sha256": manifest_hash
+        }
+        with open(best_manifest_path, "w") as f:
+            json.dump(pointer_data, f)
+
+        with mock.patch("rsi_loop.BEST_MANIFEST_PATH", best_manifest_path), \
+             mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch("rsi_loop.HISTORY_DIR", history_dir):
+
+            # Loading an invalid manifest should raise/abort
+            with self.assertRaises(ExperimentInvalidError) as ctx:
+                verify_existing_best_manifest_startup()
+            self.assertIn("Invalid target manifest status", str(ctx.exception))
+
+            # The manifest pointer is recoverably archived to history/legacy/
+            self.assertFalse(os.path.exists(best_manifest_path))
+            files = os.listdir(legacy_dir)
+            self.assertEqual(len(files), 1)
+            self.assertTrue(files[0].startswith("best_manifest.json.archive_"))
+            self.assertTrue(files[0].endswith(".backup"))
+
+        # 2. Test collision safety (multiple archival calls produce separate files)
+        # Recreate a legacy file
         legacy_data = {"status": "success", "some_data": 123}
         with open(best_manifest_path, "w") as f:
             json.dump(legacy_data, f)
 
         with mock.patch("rsi_loop.BEST_MANIFEST_PATH", best_manifest_path), \
-             mock.patch("rsi_loop.BASE_DIR", test_dir):
+             mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch("rsi_loop.HISTORY_DIR", history_dir):
 
-            # Test that loading legacy manifest returns None (raising RuntimeError inside load_and_verify_best_manifest)
-            self.assertIsNone(load_and_verify_best_manifest())
-
-            # Test that startup check raises ExperimentInvalidError
             with self.assertRaises(ExperimentInvalidError) as ctx:
                 verify_existing_best_manifest_startup()
             self.assertIn("was invalid/legacy", str(ctx.exception))
 
-            # Test that the legacy file was archived (not silently deleted)
+            # Now we should have 2 archived files under history/legacy
             self.assertFalse(os.path.exists(best_manifest_path))
-            files = os.listdir(test_dir)
-            archived_files = [f for f in files if f.startswith("best_manifest.json.archive_") and f.endswith(".backup")]
-            self.assertEqual(len(archived_files), 1)
+            files = os.listdir(legacy_dir)
+            self.assertEqual(len(files), 2)
+            self.assertNotEqual(files[0], files[1])
 
-            # Test that loading after archival returns None
-            self.assertIsNone(load_and_verify_best_manifest())
+        # 3. Test order of lock verification: if lock check fails, no mutation/archival happens
+        # Recreate a legacy file
+        with open(best_manifest_path, "w") as f:
+            json.dump(legacy_data, f)
+
+        ctx = RunContext()
+        ctx.allow_no_holdout = False
+
+        # Mock verify_experiment_lock to fail
+        with mock.patch("rsi_loop.BEST_MANIFEST_PATH", best_manifest_path), \
+             mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch("rsi_loop.HISTORY_DIR", history_dir), \
+             mock.patch("rsi_loop.verify_experiment_lock", side_effect=ExperimentInvalidError("Lock check failed")):
+
+            with self.assertRaises(ExperimentInvalidError) as ctx_err:
+                _main_exec(ctx)
+            # The exception raised must be from the lock verification failure, not archival
+            self.assertEqual(str(ctx_err.exception), "Lock check failed")
+            # And the legacy manifest file MUST NOT have been archived/moved yet!
+            self.assertTrue(os.path.exists(best_manifest_path))
 
     # ── Test 38: Lock bound holdout mode verification and disagreement ──
 

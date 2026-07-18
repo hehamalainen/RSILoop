@@ -508,14 +508,15 @@ def verify_existing_best_manifest_startup() -> None:
             target_manifest = json.load(f)
 
         status = target_manifest.get("status")
-        if status not in ["no_headroom", "completed_no_improvement", "completed_promoted", "invalid"]:
+        if status not in ["no_headroom", "completed_no_improvement", "completed_promoted"]:
             raise RuntimeError(f"Invalid target manifest status: {status}")
 
     except Exception as e:
         import shutil
-        timestamp = int(time.time())
-        backup_name = f"best_manifest.json.archive_{timestamp}.backup"
-        backup_path = os.path.join(BASE_DIR, backup_name)
+        legacy_dir = os.path.join(HISTORY_DIR, "legacy")
+        os.makedirs(legacy_dir, exist_ok=True)
+        backup_name = f"best_manifest.json.archive_{uuid.uuid4().hex}.backup"
+        backup_path = os.path.join(legacy_dir, backup_name)
         try:
             shutil.move(BEST_MANIFEST_PATH, backup_path)
             sys.stdout.write(f"Archived legacy/invalid manifest to: {backup_path}\n")
@@ -524,7 +525,7 @@ def verify_existing_best_manifest_startup() -> None:
             raise ExperimentInvalidError(f"Existing best_manifest.json is invalid ({e}), and failed to archive: {move_err}")
 
         raise ExperimentInvalidError(
-            f"Existing best_manifest.json was invalid/legacy ({e}). It has been archived to {backup_name}. "
+            f"Existing best_manifest.json was invalid/legacy ({e}). It has been archived to history/legacy/{backup_name}. "
             "The run is aborted to prevent running on top of unverifiable state."
         )
 
@@ -786,8 +787,8 @@ def run_smoke_and_canary(ctx: RunContext) -> tuple:
 
 def _main_exec(ctx: RunContext) -> None:
     ctx.current_stage = "preflight_verifications"
-    verify_existing_best_manifest_startup()
     approved_sha = verify_experiment_lock(ctx)
+    verify_existing_best_manifest_startup()
     verify_preflight_hashes()
 
     # Verify holdout if no-holdout mode is not authorized
@@ -877,6 +878,8 @@ def _main_exec(ctx: RunContext) -> None:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         _write_once_fsynced_manifest(no_headroom_manifest_path, no_headroom_manifest)
+        if not os.path.exists(BEST_MANIFEST_PATH):
+            update_best_manifest_pointer(no_headroom_manifest_path)
         return
 
     # Trial Execution
