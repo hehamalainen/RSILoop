@@ -11,6 +11,7 @@ import hashlib
 import subprocess
 import gc
 import warnings
+import stat
 from unittest import mock
 
 # Treat warnings as errors
@@ -39,6 +40,8 @@ from rsi_loop import (
     is_contained,
     verify_preflight_hashes,
     verify_experiment_lock,
+    normalize_and_truncate_stream,
+    get_stderr_summary,
     main,
 )
 
@@ -57,6 +60,12 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             errors = [f"{type(x.exc_value).__name__}: {x.exc_value}" for x in unraisable_exceptions]
             unraisable_exceptions.clear()
             self.fail(f"ResourceWarning or unraisable exception detected: {errors}")
+
+    def _assert_terminal_metadata(self, manifest):
+        for key in ("sw_vers", "python_version", "codex_cli_version"):
+            self.assertIn(key, manifest)
+            self.assertIsInstance(manifest[key], str)
+            self.assertTrue(manifest[key])
 
     # ── Test 21: standard parse ───────────────────────────────────────────────
 
@@ -172,9 +181,9 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         ctx.consumed_tokens = 2
         ctx.codex_model = "codex-mini-latest"
 
-        with mock.patch("rsi_loop._build_codex_temp_home", return_value=tempfile.mkdtemp()), \
+        with mock.patch("rsi_loop._build_codex_run_scoped_home", return_value=tempfile.mkdtemp()), \
              mock.patch("rsi_loop._build_generator_sb", return_value="/dev/null"), \
-             mock.patch("rsi_loop._cleanup_temp_home"), \
+             mock.patch("rsi_loop._cleanup_codex_run_scoped_home"), \
              mock.patch("subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(
                 returncode=0,
@@ -212,9 +221,9 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             ctx.consumed_tokens = 0
             ctx.codex_model = "codex-mini-latest"
 
-            with mock.patch("rsi_loop._build_codex_temp_home", return_value=tempfile.mkdtemp()), \
+            with mock.patch("rsi_loop._build_codex_run_scoped_home", return_value=tempfile.mkdtemp()), \
                  mock.patch("rsi_loop._build_generator_sb", return_value="/dev/null"), \
-                 mock.patch("rsi_loop._cleanup_temp_home"), \
+                 mock.patch("rsi_loop._cleanup_codex_run_scoped_home"), \
                  mock.patch("subprocess.run") as mock_run:
                 mock_run.return_value = mock.Mock(
                     returncode=0,
@@ -351,7 +360,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         commit_sha = res.stdout.strip()
 
         lock_path = os.path.join(git_dir, "experiment.lock")
-        lock_data = {"approved_commit_sha": commit_sha}
+        lock_data = {"approved_commit_sha": commit_sha, "model": "gpt-5.6-sol"}
         with open(lock_path, "w") as f:
             json.dump(lock_data, f)
 
@@ -393,6 +402,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
              mock.patch("rsi_loop.BASE_DIR", os.path.realpath(self.tmp_dir)), \
              mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.join(self.tmp_dir, "best_manifest.json")), \
              mock.patch("rsi_loop.BASELINE_PROMPT_PATH", os.path.join(self.tmp_dir, "baseline.txt")), \
+             mock.patch.dict(os.environ, {"ALLOW_NO_HOLDOUT": "1"}), \
              self.assertRaises(SystemExit) as sy_exit:
             os.makedirs(os.path.join(self.tmp_dir, "prompt_templates"), exist_ok=True)
             with open(os.path.join(self.tmp_dir, "baseline.txt"), "w") as f:
@@ -405,6 +415,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         manifest_path = os.path.join(self.tmp_dir, runs[0], "run_manifest.json")
         with open(manifest_path) as f:
             manifest_data = json.load(f)
+        self._assert_terminal_metadata(manifest_data)
         self.assertEqual(manifest_data["status"], "no_headroom")
 
         best_manifest_path = os.path.join(self.tmp_dir, "best_manifest.json")
@@ -432,6 +443,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
              mock.patch("rsi_loop.BASE_DIR", os.path.realpath(self.tmp_dir)), \
              mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.join(self.tmp_dir, "best_manifest.json")), \
              mock.patch("rsi_loop.BASELINE_PROMPT_PATH", os.path.join(self.tmp_dir, "baseline.txt")), \
+             mock.patch.dict(os.environ, {"ALLOW_NO_HOLDOUT": "1"}), \
              self.assertRaises(SystemExit) as sy_exit:
             main()
         self.assertEqual(sy_exit.exception.code, 0)
@@ -440,6 +452,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         manifest_path = os.path.join(self.tmp_dir, runs[0], "run_manifest.json")
         with open(manifest_path) as f:
             manifest_data = json.load(f)
+        self._assert_terminal_metadata(manifest_data)
         self.assertEqual(manifest_data["status"], "completed_no_improvement")
 
         shutil.rmtree(self.tmp_dir)
@@ -455,6 +468,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
              mock.patch("rsi_loop.BASE_DIR", os.path.realpath(self.tmp_dir)), \
              mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.join(self.tmp_dir, "best_manifest.json")), \
              mock.patch("rsi_loop.BASELINE_PROMPT_PATH", os.path.join(self.tmp_dir, "baseline.txt")), \
+             mock.patch.dict(os.environ, {"ALLOW_NO_HOLDOUT": "1"}), \
              self.assertRaises(SystemExit) as sy_exit:
             main()
         self.assertEqual(sy_exit.exception.code, 1)
@@ -463,6 +477,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         invalid_manifest_path = os.path.join(self.tmp_dir, runs[0], "invalid_manifest.json")
         with open(invalid_manifest_path) as f:
             invalid_data = json.load(f)
+        self._assert_terminal_metadata(invalid_data)
         self.assertEqual(invalid_data["status"], "invalid")
         self.assertIn("API failure", invalid_data["error_message"])
 
@@ -551,6 +566,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         run_manifest_path = os.path.join(self.tmp_dir, runs[0], "run_manifest.json")
         with open(run_manifest_path) as f:
             run_manifest = json.load(f)
+        self._assert_terminal_metadata(run_manifest)
         self.assertEqual(run_manifest["status"], "completed_promoted")
         self.assertTrue(run_manifest["promotion_gate_passed"])
 
@@ -777,7 +793,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         lock_path = os.path.join(test_dir, "experiment.lock")
 
         # Case 1: Environment ALLOW_NO_HOLDOUT is 1, but lock file allow_no_holdout is False (or missing) -> Disagreement -> Fails!
-        lock_data = {"approved_commit_sha": commit_sha}
+        lock_data = {"approved_commit_sha": commit_sha, "model": "gpt-5.6-sol"}
         with open(lock_path, "w") as f:
             json.dump(lock_data, f)
 
@@ -790,7 +806,11 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             self.assertIn("disagrees with experiment.lock", str(r_ctx.exception))
 
         # Case 2: Environment ALLOW_NO_HOLDOUT is 0/empty, but lock file allow_no_holdout is True -> Disagreement -> Fails!
-        lock_data = {"approved_commit_sha": commit_sha, "allow_no_holdout": True}
+        lock_data = {
+            "approved_commit_sha": commit_sha,
+            "allow_no_holdout": True,
+            "model": "gpt-5.6-sol",
+        }
         with open(lock_path, "w") as f:
             json.dump(lock_data, f)
 
@@ -812,7 +832,11 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             self.assertTrue(ctx.allow_no_holdout)
 
         # Case 4: Both agree to require holdout (env omitted, lock=False) -> Success!
-        lock_data = {"approved_commit_sha": commit_sha, "allow_no_holdout": False}
+        lock_data = {
+            "approved_commit_sha": commit_sha,
+            "allow_no_holdout": False,
+            "model": "gpt-5.6-sol",
+        }
         with open(lock_path, "w") as f:
             json.dump(lock_data, f)
 
@@ -876,6 +900,408 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
                 _main_exec(ctx)
             # Confirms we passed holdout checks and hit the mock smoke check!
             self.assertEqual(str(r_ctx.exception), "Stopped before paid execution")
+
+    # ── Approved defect-fix regressions ──────────────────────────────────────
+
+    def test_lock_model_validation(self):
+        cases = [
+            ({}, False),
+            ({"model": None}, False),
+            ({"model": 7}, False),
+            ({"model": ""}, False),
+            ({"model": "   "}, False),
+            ({"model": " gpt-5.6-sol "}, True),
+        ]
+        approved_sha = "a" * 40
+
+        def fake_git_run(command, **kwargs):
+            if command[:2] == ["git", "status"]:
+                return mock.Mock(stdout="", stderr="", returncode=0)
+            return mock.Mock(stdout=approved_sha + "\n", stderr="", returncode=0)
+
+        for index, (model_data, valid) in enumerate(cases):
+            with self.subTest(model=model_data.get("model", "missing")):
+                case_dir = os.path.join(self.tmp_dir, f"model_case_{index}")
+                os.mkdir(case_dir)
+                lock_data = {
+                    "approved_commit_sha": approved_sha,
+                    "allow_no_holdout": False,
+                    **model_data,
+                }
+                with open(os.path.join(case_dir, "experiment.lock"), "w") as handle:
+                    json.dump(lock_data, handle)
+                ctx = RunContext()
+                with mock.patch("rsi_loop.BASE_DIR", case_dir), \
+                     mock.patch("rsi_loop.subprocess.run", side_effect=fake_git_run), \
+                     mock.patch.dict(os.environ, {"ALLOW_NO_HOLDOUT": "0"}):
+                    if valid:
+                        self.assertEqual(verify_experiment_lock(ctx), approved_sha)
+                        self.assertEqual(ctx.codex_model, "gpt-5.6-sol")
+                    else:
+                        with self.assertRaises(ExperimentInvalidError):
+                            verify_experiment_lock(ctx)
+
+    def test_command_model_flag_propagation(self):
+        from rsi_loop import _build_canary_command, call_codex_sandboxed
+
+        ctx = RunContext()
+        ctx.run_id = "model_flag_test"
+        ctx.codex_model = "gpt-5.6-sol"
+        canary_command = _build_canary_command("/exact/generator.sb", ctx)
+        self.assertEqual(canary_command.count("--model"), 1)
+        self.assertEqual(
+            canary_command[canary_command.index("--model") + 1],
+            ctx.codex_model,
+        )
+
+        fake_stdout = "\n".join([
+            '{"type":"item.completed","item":{"type":"agent_message","text":"code"}}',
+            '{"type":"turn.completed","usage":{"output_tokens":1}}',
+        ])
+        captured_commands = []
+
+        def fake_run(command, **kwargs):
+            captured_commands.append(command)
+            return mock.Mock(returncode=0, stdout=fake_stdout, stderr="")
+
+        with mock.patch(
+            "rsi_loop._build_codex_run_scoped_home",
+            return_value=tempfile.mkdtemp(),
+        ), mock.patch(
+            "rsi_loop._build_generator_sb",
+            return_value="/exact/generator.sb",
+        ), mock.patch(
+            "rsi_loop._cleanup_codex_run_scoped_home",
+        ), mock.patch(
+            "rsi_loop.subprocess.run",
+            side_effect=fake_run,
+        ):
+            call_codex_sandboxed("prompt", "system", self.tmp_dir, ctx)
+
+        self.assertEqual(len(captured_commands), 1)
+        command = captured_commands[0]
+        self.assertEqual(command.count("--model"), 1)
+        self.assertEqual(command[command.index("--model") + 1], ctx.codex_model)
+
+    def test_subprocess_stdout_stderr_truncation(self):
+        from rsi_loop import _run_codex_canary
+
+        for stream in (None, "plain", b"plain", b"bad-utf8-\xff"):
+            with self.subTest(stream=stream):
+                value = normalize_and_truncate_stream(stream, max_bytes=32)
+                self.assertIsInstance(value, str)
+                self.assertLessEqual(len(value.encode("utf-8")), 32)
+
+        truncated = normalize_and_truncate_stream("é" * 100000)
+        self.assertTrue(truncated.endswith("\n[TRUNCATED]"))
+        self.assertLessEqual(len(truncated.encode("utf-8")), 65536)
+
+        scenarios = [
+            subprocess.TimeoutExpired(
+                ["codex"], 1, output=b"o" * 70000, stderr=b"e" * 70000
+            ),
+            subprocess.CalledProcessError(
+                1, ["codex"], output=b"out", stderr=b"err"
+            ),
+            OSError("launch failed"),
+        ]
+        for error in scenarios:
+            with self.subTest(error=type(error).__name__):
+                ctx = RunContext()
+                ctx.codex_model = "gpt-5.6-sol"
+                with mock.patch("rsi_loop.subprocess.run", side_effect=error):
+                    with self.assertRaises(ExperimentInvalidError) as raised:
+                        _run_codex_canary("/exact/generator.sb", {}, ctx)
+                self.assertTrue(ctx.unknown_token_state)
+                self.assertLessEqual(
+                    len(raised.exception.stdout.encode("utf-8")), 65536
+                )
+                self.assertLessEqual(
+                    len(raised.exception.stderr.encode("utf-8")), 65536
+                )
+
+        ctx = RunContext()
+        ctx.codex_model = "gpt-5.6-sol"
+        result = mock.Mock(returncode=2, stdout=b"partial", stderr=b"fatal")
+        with mock.patch("rsi_loop.subprocess.run", return_value=result):
+            with self.assertRaises(ExperimentInvalidError) as raised:
+                _run_codex_canary("/exact/generator.sb", {}, ctx)
+        self.assertEqual(raised.exception.stdout, "partial")
+        self.assertEqual(raised.exception.stderr, "fatal")
+
+    def test_stderr_summary_recovery(self):
+        self.assertEqual(get_stderr_summary(None), "")
+        self.assertEqual(get_stderr_summary("\n\n"), "")
+        self.assertEqual(
+            get_stderr_summary("WARNING first\nWARNING second\n"),
+            "WARNING second",
+        )
+        self.assertEqual(
+            get_stderr_summary("fatal one\nWARNING later\nfatal final\n"),
+            "fatal final",
+        )
+        self.assertEqual(
+            get_stderr_summary("fatal one\nWARNING later\n"),
+            "fatal one",
+        )
+
+    def test_credential_isolation_outside_readable_roots(self):
+        from rsi_loop import (
+            _build_codex_run_scoped_home,
+            _cleanup_codex_run_scoped_home,
+        )
+
+        base_dir = os.path.join(self.tmp_dir, "repo")
+        os.mkdir(base_dir)
+        auth_source = os.path.join(self.tmp_dir, "source_auth.json")
+        auth_fd = os.open(auth_source, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.write(auth_fd, b'{"auth_mode":"apikey","OPENAI_API_KEY":"dummy"}')
+        os.close(auth_fd)
+
+        ctx = RunContext()
+        with mock.patch("rsi_loop.BASE_DIR", base_dir):
+            home = _build_codex_run_scoped_home(ctx, "credential_test", auth_source)
+            self.assertEqual(ctx.created_codex_home, home)
+            self.assertFalse(is_contained(home, base_dir))
+            self.assertFalse(
+                is_contained(home, os.path.join(self.tmp_dir, "rsi_loop_private"))
+            )
+            self.assertEqual(stat.S_IMODE(os.lstat(home).st_mode), 0o700)
+            self.assertEqual(
+                stat.S_IMODE(os.lstat(os.path.join(home, ".codex")).st_mode),
+                0o700,
+            )
+            self.assertEqual(
+                stat.S_IMODE(os.lstat(os.path.join(home, "tmp")).st_mode),
+                0o700,
+            )
+            destination = os.path.join(home, ".codex", "auth.json")
+            self.assertFalse(os.path.islink(destination))
+            self.assertEqual(stat.S_IMODE(os.lstat(destination).st_mode), 0o600)
+            _cleanup_codex_run_scoped_home(ctx, home)
+            self.assertIsNone(ctx.created_codex_home)
+            self.assertFalse(os.path.lexists(home))
+
+            with self.assertRaises(ExperimentInvalidError):
+                _build_codex_run_scoped_home(ctx, "../escape", auth_source)
+
+            preexisting = os.path.join(self.tmp_dir, "codex_home_preexisting")
+            os.mkdir(preexisting, 0o700)
+            with self.assertRaises(ExperimentInvalidError):
+                _build_codex_run_scoped_home(ctx, "preexisting", auth_source)
+            self.assertTrue(os.path.isdir(preexisting))
+
+            source_link = os.path.join(self.tmp_dir, "source_link.json")
+            os.symlink(auth_source, source_link)
+            with self.assertRaises(ExperimentInvalidError):
+                _build_codex_run_scoped_home(ctx, "source_symlink", source_link)
+            self.assertFalse(
+                os.path.lexists(os.path.join(self.tmp_dir, "codex_home_source_symlink"))
+            )
+            self.assertIsNone(ctx.created_codex_home)
+
+            from rsi_loop import _assert_components_without_symlinks
+            call_count = 0
+
+            def fail_second_component_check(path, parent):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 2:
+                    raise ExperimentInvalidError("injected post-check failure")
+                return _assert_components_without_symlinks(path, parent)
+
+            with mock.patch(
+                "rsi_loop._assert_components_without_symlinks",
+                side_effect=fail_second_component_check,
+            ):
+                with self.assertRaises(ExperimentInvalidError):
+                    _build_codex_run_scoped_home(ctx, "postcheck_failure", auth_source)
+            self.assertFalse(
+                os.path.lexists(os.path.join(self.tmp_dir, "codex_home_postcheck_failure"))
+            )
+            self.assertIsNone(ctx.created_codex_home)
+
+    def test_bootstrap_warning_regression(self):
+        from rsi_loop import _codex_environment, _run_codex_canary
+
+        home = os.path.join(self.tmp_dir, "codex_home_bootstrap")
+        env = _codex_environment(home)
+        self.assertEqual(env["HOME"], home)
+        self.assertEqual(env["TMPDIR"], os.path.join(home, "tmp"))
+        self.assertNotEqual(env["HOME"], env["TMPDIR"])
+
+        warning = (
+            "WARNING: proceeding, even though we could not create PATH aliases: "
+            "Refusing to create helper binaries under temporary dir"
+        )
+        ctx = RunContext()
+        ctx.codex_model = "gpt-5.6-sol"
+        with mock.patch(
+            "rsi_loop.subprocess.run",
+            return_value=mock.Mock(returncode=1, stdout="", stderr=warning),
+        ):
+            with self.assertRaises(ExperimentInvalidError) as raised:
+                _run_codex_canary("/exact/generator.sb", env, ctx)
+        self.assertIn("Refusing to create helper binaries", raised.exception.stderr)
+
+    def test_host_boundary_cli_bootstrap(self):
+        import rsi_loop
+        from rsi_loop import (
+            _build_canary_command,
+            _build_codex_run_scoped_home,
+            _build_generator_sb,
+            _cleanup_codex_run_scoped_home,
+            _codex_environment,
+        )
+
+        self.assertEqual(sys.platform, "darwin")
+        self.assertTrue(os.path.exists("/usr/bin/sandbox-exec"))
+        dummy_source = os.path.join(self.tmp_dir, "dummy_auth.json")
+        dummy_fd = os.open(
+            dummy_source,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        os.write(
+            dummy_fd,
+            json.dumps({
+                "auth_mode": "apikey",
+                "OPENAI_API_KEY": "sk-dummy-invalid-for-boundary-test",
+            }).encode("utf-8"),
+        )
+        os.fsync(dummy_fd)
+        os.close(dummy_fd)
+
+        ctx = RunContext()
+        ctx.run_id = f"host_boundary_{os.getpid()}_{id(self)}"
+        ctx.codex_model = "gpt-5.6-sol"
+        home = _build_codex_run_scoped_home(ctx, ctx.run_id, dummy_source)
+        try:
+            sb_path = _build_generator_sb(home, rsi_loop.BASE_DIR)
+            self.assertEqual(sb_path, os.path.join(home, "generator.sb"))
+            command = _build_canary_command(sb_path, ctx)
+            result = subprocess.run(
+                command,
+                input="Reply with exactly one word: ready",
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=_codex_environment(home),
+                cwd=rsi_loop.BASE_DIR,
+            )
+            self.assertEqual(result.returncode, 1)
+            forbidden = [
+                "Refusing to create helper binaries",
+                "sandbox_apply",
+                "Operation not permitted",
+                "Permission denied",
+                "No such file or directory",
+                "configuration error",
+                "failed to spawn",
+            ]
+            combined = result.stdout + "\n" + result.stderr
+            for text_value in forbidden:
+                self.assertNotIn(text_value, combined)
+            events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+            self.assertTrue(events)
+            terminal = events[-1]
+            self.assertEqual(terminal.get("type"), "turn.failed")
+            self.assertIsInstance(terminal.get("error"), dict)
+            message = terminal["error"].get("message")
+            self.assertIsInstance(message, str)
+            for exact_classification in (
+                "unexpected status 401 Unauthorized",
+                "auth error: 401",
+                "auth error code: invalid_api_key",
+            ):
+                self.assertIn(exact_classification, message)
+            sys.stdout.write(
+                "[host-boundary-evidence] profile=generator.sb rc=1 "
+                "terminal=turn.failed auth_error_code=invalid_api_key\n"
+            )
+        finally:
+            _cleanup_codex_run_scoped_home(ctx, home)
+        self.assertIsNone(ctx.created_codex_home)
+        self.assertFalse(os.path.lexists(home))
+
+    def test_cleanup_lifecycles(self):
+        import rsi_loop
+        from rsi_loop import call_codex_sandboxed
+
+        base_dir = os.path.join(self.tmp_dir, "cleanup_repo")
+        os.mkdir(base_dir)
+        shutil.copy(
+            os.path.join(BASE_DIR, "generator.sb.template"),
+            os.path.join(base_dir, "generator.sb.template"),
+        )
+        auth_source = os.path.join(self.tmp_dir, "cleanup_auth.json")
+        auth_fd = os.open(auth_source, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.write(auth_fd, b'{"auth_mode":"apikey","OPENAI_API_KEY":"dummy"}')
+        os.close(auth_fd)
+        success_stdout = "\n".join([
+            '{"type":"item.completed","item":{"type":"agent_message","text":"code"}}',
+            '{"type":"turn.completed","usage":{"output_tokens":1}}',
+        ])
+        scenarios = [
+            mock.Mock(returncode=0, stdout=success_stdout, stderr=""),
+            mock.Mock(returncode=1, stdout="partial", stderr="failed"),
+            subprocess.TimeoutExpired(["codex"], 1, output="partial", stderr="timed out"),
+        ]
+
+        real_expanduser = os.path.expanduser
+        for index, outcome in enumerate(scenarios):
+            with self.subTest(index=index):
+                ctx = RunContext()
+                ctx.run_id = f"cleanup_{index}"
+                ctx.codex_model = "gpt-5.6-sol"
+
+                def expanduser(path):
+                    if path == "~/.codex/auth.json":
+                        return auth_source
+                    return real_expanduser(path)
+
+                run_patch = (
+                    mock.patch("rsi_loop.subprocess.run", side_effect=outcome)
+                    if isinstance(outcome, BaseException)
+                    else mock.patch("rsi_loop.subprocess.run", return_value=outcome)
+                )
+                with mock.patch("rsi_loop.BASE_DIR", base_dir), \
+                     mock.patch("rsi_loop.os.path.expanduser", side_effect=expanduser), \
+                     run_patch:
+                    if index == 0:
+                        self.assertEqual(
+                            call_codex_sandboxed("prompt", "system", base_dir, ctx),
+                            ("code", 1),
+                        )
+                    else:
+                        with self.assertRaises(ExperimentInvalidError):
+                            call_codex_sandboxed("prompt", "system", base_dir, ctx)
+                expected_home = os.path.join(self.tmp_dir, f"codex_home_cleanup_{index}")
+                self.assertIsNone(ctx.created_codex_home)
+                self.assertFalse(os.path.lexists(expected_home))
+
+    def test_environment_metadata_terminal_manifests(self):
+        from rsi_loop import _terminal_environment_metadata
+
+        ctx = RunContext()
+        ctx.sw_vers = "ProductName: macOS"
+        ctx.python_version = "3.test"
+        ctx.codex_cli_version = "codex-cli test"
+        metadata = _terminal_environment_metadata(ctx)
+        self.assertEqual(
+            set(metadata),
+            {"sw_vers", "python_version", "codex_cli_version"},
+        )
+        for value in metadata.values():
+            self.assertIsInstance(value, str)
+            self.assertTrue(value)
+
+        ctx.codex_cli_version = "unavailable"
+        ctx.codex_version = None
+        self.assertEqual(
+            _terminal_environment_metadata(ctx)["codex_cli_version"],
+            "unavailable",
+        )
 
 if __name__ == "__main__":
     unittest.main()

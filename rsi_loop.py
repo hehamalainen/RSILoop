@@ -32,7 +32,17 @@ os.makedirs(PROMPTS_DIR, exist_ok=True)
 
 class ExperimentInvalidError(Exception):
     """Raised when the experiment is invalidated due to infrastructure failures."""
-    pass
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stdout: str | bytes | None = None,
+        stderr: str | bytes | None = None,
+    ):
+        super().__init__(message)
+        self.stdout = normalize_and_truncate_stream(stdout)
+        self.stderr = normalize_and_truncate_stream(stderr)
 
 class RunContext:
     def __init__(self):
@@ -41,11 +51,48 @@ class RunContext:
         self.approved_commit_sha = None
         self.lock_file_hash = None
         self.codex_version = None
-        self.codex_model = "codex-mini-latest"
+        self.codex_cli_version = "unavailable"
+        self.codex_model = None
+        self.sw_vers = "unavailable"
+        self.python_version = sys.version
+        self.created_codex_home = None
         self.consumed_tokens = 0
         self.unknown_token_state = False
         self.current_stage = "pre-init"
         self.allow_no_holdout = os.environ.get("ALLOW_NO_HOLDOUT") == "1"
+
+
+def normalize_and_truncate_stream(
+    stream: str | bytes | None,
+    max_bytes: int = 65536,
+) -> str:
+    """Return bounded UTF-8 text, including the truncation marker in the bound."""
+    if max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
+    if stream is None:
+        return ""
+    value = (
+        stream.decode("utf-8", errors="replace")
+        if isinstance(stream, bytes)
+        else str(stream)
+    )
+    encoded = value.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return value
+    marker = b"\n[TRUNCATED]"
+    if max_bytes <= len(marker):
+        return marker[:max_bytes].decode("utf-8", errors="ignore")
+    prefix = encoded[: max_bytes - len(marker)].decode("utf-8", errors="ignore")
+    return prefix + marker.decode("ascii")
+
+
+def get_stderr_summary(stderr: str | bytes | None) -> str:
+    normalized = normalize_and_truncate_stream(stderr)
+    lines = [line for line in normalized.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    non_warnings = [line for line in lines if not line.startswith("WARNING")]
+    return (non_warnings or lines)[-1]
 
 # ── Containment Helpers ───────────────────────────────────────────────────────
 
@@ -119,30 +166,240 @@ def extract_code(raw_output: str) -> str:
 
 # ── Credential isolation ──────────────────────────────────────────────────────
 
+_SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+
+
+def _mode_bits(st_result: os.stat_result) -> int:
+    return stat.S_IMODE(st_result.st_mode)
+
+
+def _assert_owned_directory(path: str, mode: int) -> None:
+    st_result = os.lstat(path)
+    if stat.S_ISLNK(st_result.st_mode) or not stat.S_ISDIR(st_result.st_mode):
+        raise ExperimentInvalidError(f"Expected real directory at {path}")
+    if st_result.st_uid != os.getuid():
+        raise ExperimentInvalidError(f"Directory is not owned by current uid: {path}")
+    if _mode_bits(st_result) != mode:
+        raise ExperimentInvalidError(
+            f"Directory mode mismatch for {path}: expected {oct(mode)}, got {oct(_mode_bits(st_result))}"
+        )
+
+
+def _assert_components_without_symlinks(path: str, parent_dir: str) -> None:
+    absolute_path = os.path.abspath(path)
+    absolute_parent = os.path.abspath(parent_dir)
+    if os.path.commonpath([absolute_path, absolute_parent]) != absolute_parent:
+        raise ExperimentInvalidError(f"Path escapes credential parent: {path}")
+    current = absolute_parent
+    if os.path.lexists(current) and stat.S_ISLNK(os.lstat(current).st_mode):
+        raise ExperimentInvalidError(f"Symlink detected in credential path: {current}")
+    relative = os.path.relpath(absolute_path, absolute_parent)
+    if relative == ".":
+        return
+    for component in relative.split(os.sep):
+        current = os.path.join(current, component)
+        if not os.path.lexists(current):
+            continue
+        st_result = os.lstat(current)
+        if stat.S_ISLNK(st_result.st_mode):
+            raise ExperimentInvalidError(f"Symlink detected in credential path: {current}")
+        if current != absolute_path and not stat.S_ISDIR(st_result.st_mode):
+            raise ExperimentInvalidError(f"Non-directory credential path component: {current}")
+
+
+def _remove_owned_codex_home(codex_home: str, parent_dir: str) -> None:
+    lexical_parent = os.path.abspath(parent_dir)
+    lexical_home = os.path.abspath(codex_home)
+    expected_parent = os.path.realpath(parent_dir)
+    if os.path.dirname(lexical_home) == lexical_parent:
+        component_parent = lexical_parent
+    elif os.path.dirname(lexical_home) == expected_parent:
+        component_parent = expected_parent
+    else:
+        raise ExperimentInvalidError(f"Refusing cleanup outside credential parent: {codex_home}")
+    _assert_components_without_symlinks(lexical_home, component_parent)
+    absolute_home = os.path.realpath(lexical_home)
+    if os.path.dirname(absolute_home) != expected_parent:
+        raise ExperimentInvalidError(f"Refusing cleanup outside credential parent: {codex_home}")
+    if not os.path.basename(absolute_home).startswith("codex_home_"):
+        raise ExperimentInvalidError(f"Refusing cleanup of unexpected path: {codex_home}")
+    if os.path.realpath(absolute_home) != os.path.join(
+        expected_parent, os.path.basename(absolute_home)
+    ):
+        raise ExperimentInvalidError(f"Refusing cleanup of resolved path mismatch: {codex_home}")
+    _assert_owned_directory(absolute_home, 0o700)
+    shutil.rmtree(absolute_home)
+
+
+def _build_codex_run_scoped_home(
+    ctx: RunContext,
+    run_id: str,
+    auth_source_path: str | None = None,
+) -> str:
+    if not isinstance(run_id, str) or not _SAFE_RUN_ID_RE.fullmatch(run_id):
+        raise ExperimentInvalidError(f"Unsafe credential run id: {run_id!r}")
+    if ctx.created_codex_home is not None:
+        raise ExperimentInvalidError("Run context already owns a Codex home")
+
+    parent_dir = os.path.dirname(os.path.abspath(BASE_DIR))
+    codex_home = os.path.join(parent_dir, f"codex_home_{run_id}")
+    absolute_parent = os.path.abspath(parent_dir)
+    absolute_home = os.path.abspath(codex_home)
+    private_root = os.path.abspath(
+        os.path.join(os.path.dirname(BASE_DIR), "rsi_loop_private")
+    )
+    if os.path.commonpath([absolute_home, absolute_parent]) != absolute_parent:
+        raise ExperimentInvalidError("Credential home escapes its parent")
+    if is_contained(absolute_home, os.path.abspath(BASE_DIR)):
+        raise ExperimentInvalidError("Credential home must be outside BASE_DIR")
+    if is_contained(absolute_home, private_root):
+        raise ExperimentInvalidError("Credential home must be outside the private holdout")
+    _assert_components_without_symlinks(absolute_home, absolute_parent)
+
+    created_by_this_call = False
+    try:
+        os.mkdir(absolute_home, mode=0o700)
+        created_by_this_call = True
+
+        real_parent = os.path.realpath(absolute_parent)
+        real_home = os.path.realpath(absolute_home)
+        if os.path.commonpath([real_home, real_parent]) != real_parent:
+            raise ExperimentInvalidError("Resolved credential home escapes its parent")
+        if is_contained(real_home, os.path.realpath(BASE_DIR)):
+            raise ExperimentInvalidError("Resolved credential home is inside BASE_DIR")
+        if is_contained(real_home, os.path.realpath(private_root)):
+            raise ExperimentInvalidError("Resolved credential home is inside private holdout")
+        _assert_components_without_symlinks(real_home, real_parent)
+        _assert_owned_directory(real_home, 0o700)
+
+        codex_dir = os.path.join(real_home, ".codex")
+        tmp_dir = os.path.join(real_home, "tmp")
+        os.mkdir(codex_dir, mode=0o700)
+        os.mkdir(tmp_dir, mode=0o700)
+        _assert_owned_directory(codex_dir, 0o700)
+        _assert_owned_directory(tmp_dir, 0o700)
+
+        source_path = auth_source_path or os.path.expanduser("~/.codex/auth.json")
+        source_fd = None
+        dest_fd = None
+        dest_auth = os.path.join(codex_dir, "auth.json")
+        try:
+            source_fd = os.open(
+                source_path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+            source_stat = os.fstat(source_fd)
+            if not stat.S_ISREG(source_stat.st_mode):
+                raise ExperimentInvalidError("Codex auth source is not a regular file")
+            if source_stat.st_uid != os.getuid():
+                raise ExperimentInvalidError("Codex auth source has unexpected owner")
+            if _mode_bits(source_stat) & 0o077:
+                raise ExperimentInvalidError("Codex auth source is accessible by group or others")
+
+            dest_fd = os.open(
+                dest_auth,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            while True:
+                chunk = os.read(source_fd, 65536)
+                if not chunk:
+                    break
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(dest_fd, view)
+                    if written <= 0:
+                        raise ExperimentInvalidError("Short write while copying Codex auth")
+                    view = view[written:]
+            os.fsync(dest_fd)
+            dest_stat = os.fstat(dest_fd)
+            if not stat.S_ISREG(dest_stat.st_mode):
+                raise ExperimentInvalidError("Codex auth destination is not regular")
+            if dest_stat.st_uid != os.getuid() or dest_stat.st_nlink != 1:
+                raise ExperimentInvalidError("Codex auth destination ownership/link check failed")
+            if _mode_bits(dest_stat) != 0o600:
+                raise ExperimentInvalidError("Codex auth destination mode is not 0600")
+        finally:
+            if dest_fd is not None:
+                os.close(dest_fd)
+            if source_fd is not None:
+                os.close(source_fd)
+
+        final_stat = os.lstat(dest_auth)
+        if (
+            stat.S_ISLNK(final_stat.st_mode)
+            or not stat.S_ISREG(final_stat.st_mode)
+            or final_stat.st_uid != os.getuid()
+            or final_stat.st_nlink != 1
+            or _mode_bits(final_stat) != 0o600
+        ):
+            raise ExperimentInvalidError("Codex auth destination post-check failed")
+
+        ctx.created_codex_home = real_home
+        created_by_this_call = False
+        return real_home
+    except Exception as error:
+        if created_by_this_call:
+            try:
+                _remove_owned_codex_home(absolute_home, absolute_parent)
+            except Exception as cleanup_error:
+                sys.stderr.write(
+                    f"WARNING: failed to clean partially created Codex home {absolute_home!r}: {cleanup_error}\n"
+                )
+                sys.stderr.flush()
+            finally:
+                created_by_this_call = False
+        ctx.created_codex_home = None
+        if isinstance(error, ExperimentInvalidError):
+            raise
+        raise ExperimentInvalidError(
+            f"Failed to build run-scoped Codex home: {type(error).__name__}: {error}"
+        ) from error
+
+
+def _cleanup_codex_run_scoped_home(ctx: RunContext, expected_home: str) -> None:
+    owned_home = ctx.created_codex_home
+    try:
+        if owned_home is None:
+            return
+        if os.path.abspath(owned_home) != os.path.abspath(expected_home):
+            raise ExperimentInvalidError("Codex home cleanup sentinel mismatch")
+        _remove_owned_codex_home(owned_home, os.path.dirname(os.path.abspath(BASE_DIR)))
+    except Exception as cleanup_error:
+        sys.stderr.write(
+            f"WARNING: Codex home cleanup failed for {owned_home!r}: {cleanup_error}\n"
+        )
+        sys.stderr.flush()
+    finally:
+        ctx.created_codex_home = None
+
+
+# Compatibility for the existing generator startup regression. Production
+# callers use the context-aware API above; these wrappers retain ownership so
+# the legacy test still receives the same safe lifecycle.
+_LEGACY_CODEX_HOME_CONTEXTS: dict[str, RunContext] = {}
+
+
 def _build_codex_temp_home() -> str:
-    real_codex_auth = os.path.expanduser("~/.codex/auth.json")
-    if not os.path.exists(real_codex_auth):
-        raise ExperimentInvalidError("Codex auth.json not found at ~/.codex/auth.json — cannot proceed")
+    legacy_ctx = RunContext()
+    run_id = f"legacy_{uuid.uuid4().hex}"
+    home = _build_codex_run_scoped_home(legacy_ctx, run_id)
+    _LEGACY_CODEX_HOME_CONTEXTS[home] = legacy_ctx
+    return home
 
-    temp_home = tempfile.mkdtemp(prefix="codex_home_")
-    os.chmod(temp_home, 0o700)
-    real_temp_home = os.path.realpath(temp_home)
-
-    codex_dir = os.path.join(real_temp_home, ".codex")
-    os.makedirs(codex_dir, mode=0o700, exist_ok=True)
-
-    dest_auth = os.path.join(codex_dir, "auth.json")
-    shutil.copy2(real_codex_auth, dest_auth)
-    os.chmod(dest_auth, 0o600)
-
-    return real_temp_home
 
 def _cleanup_temp_home(real_temp_home: str) -> None:
-    try:
-        shutil.rmtree(real_temp_home)
-    except Exception as e:
-        sys.stderr.write(f"WARNING: temp home cleanup failed for {real_temp_home!r}: {e}\n")
+    legacy_ctx = _LEGACY_CODEX_HOME_CONTEXTS.pop(real_temp_home, None)
+    if legacy_ctx is None:
+        sys.stderr.write(
+            f"WARNING: no ownership context for legacy Codex home {real_temp_home!r}\n"
+        )
         sys.stderr.flush()
+        return
+    _cleanup_codex_run_scoped_home(legacy_ctx, real_temp_home)
 
 # ── Codex sandbox runner ──────────────────────────────────────────────────────
 
@@ -183,16 +440,64 @@ def _get_codex_bin_path() -> str:
             return path
     return "/opt/homebrew/bin/codex"
 
+
+def _codex_environment(codex_home: str) -> dict:
+    return {
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
+        "LANG": "en_US.UTF-8",
+        "HOME": codex_home,
+        "USER": os.environ.get("USER", "codex"),
+        "LOGNAME": os.environ.get("LOGNAME", "codex"),
+        "TMPDIR": os.path.join(codex_home, "tmp"),
+    }
+
+
+def _build_canary_command(sb_path: str, ctx: RunContext) -> list[str]:
+    return [
+        "sandbox-exec", "-f", sb_path,
+        _get_codex_bin_path(), "exec", "-",
+        "--ephemeral",
+        "--json",
+        "--model", ctx.codex_model,
+    ]
+
+
+def _raise_launch_failure(label: str, error: BaseException) -> None:
+    stdout = getattr(error, "stdout", None)
+    stderr = getattr(error, "stderr", None)
+    summary = get_stderr_summary(stderr) or str(error)
+    raise ExperimentInvalidError(
+        f"{label} process execution failed: {summary}",
+        stdout=stdout,
+        stderr=stderr,
+    ) from error
+
+
 def _run_codex_version_smoke_test(sb_path: str, env: dict) -> str:
     codex_bin = _get_codex_bin_path()
     cmd = ["sandbox-exec", "-f", sb_path, codex_bin, "--version"]
-    res = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=env)
+    try:
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+            cwd=BASE_DIR,
+        )
+    except (subprocess.SubprocessError, OSError) as error:
+        _raise_launch_failure("Codex smoke test", error)
+    stdout = normalize_and_truncate_stream(res.stdout)
+    stderr = normalize_and_truncate_stream(res.stderr)
     if res.returncode != 0:
+        summary = get_stderr_summary(stderr)
         raise ExperimentInvalidError(
             f"Codex smoke test failed (codex --version returned {res.returncode}):\n"
-            f"stderr: {res.stderr[:500]}"
+            f"stderr: {summary}",
+            stdout=stdout,
+            stderr=stderr,
         )
-    version = res.stdout.strip()
+    version = stdout.strip()
     sys.stderr.write(f"[smoke] codex --version OK: {version}\n")
     sys.stderr.flush()
     return version
@@ -200,15 +505,8 @@ def _run_codex_version_smoke_test(sb_path: str, env: dict) -> str:
 def _run_codex_canary(
     sb_path: str, env: dict, ctx: RunContext
 ) -> int:
-    codex_bin = _get_codex_bin_path()
     canary_prompt = "Reply with exactly one word: ready"
-    cmd = [
-        "sandbox-exec", "-f", sb_path,
-        codex_bin, "exec", "-",
-        "--ephemeral",
-        "--json",
-        "--model", ctx.codex_model,
-    ]
+    cmd = _build_canary_command(sb_path, ctx)
     try:
         res = subprocess.run(
             cmd,
@@ -217,19 +515,26 @@ def _run_codex_canary(
             text=True,
             timeout=60,
             env=env,
+            cwd=BASE_DIR,
         )
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as error:
         ctx.unknown_token_state = True
-        raise ExperimentInvalidError(f"Canary process execution failed: {e}")
+        _raise_launch_failure("Canary", error)
+
+    stdout = normalize_and_truncate_stream(res.stdout)
+    stderr = normalize_and_truncate_stream(res.stderr)
 
     if res.returncode != 0:
         ctx.unknown_token_state = True
         raise ExperimentInvalidError(
-            f"Codex canary call failed (rc={res.returncode}):\nstderr: {res.stderr[:500]}"
+            f"Codex canary call failed (rc={res.returncode}): "
+            f"{get_stderr_summary(stderr)}",
+            stdout=stdout,
+            stderr=stderr,
         )
 
     try:
-        _, usage = parse_codex_jsonl_output(res.stdout.splitlines())
+        _, usage = parse_codex_jsonl_output(stdout.splitlines())
         tokens_val = usage.get("output_tokens")
         if tokens_val is None:
             raise ValueError("Codex canary call returned no output_tokens")
@@ -238,7 +543,11 @@ def _run_codex_canary(
             raise ValueError(f"Negative token count: {tokens}")
     except Exception as e:
         ctx.unknown_token_state = True
-        raise ExperimentInvalidError(f"Canary token parsing failed: {e}")
+        raise ExperimentInvalidError(
+            f"Canary token parsing failed: {e}",
+            stdout=stdout,
+            stderr=stderr,
+        ) from e
 
     ctx.consumed_tokens += tokens
     if ctx.consumed_tokens > TOKEN_CEILING:
@@ -261,20 +570,14 @@ def call_codex_sandboxed(
         full_prompt += f"System Instruction:\n{system_instruction}\n\nTask Instruction:\n"
     full_prompt += prompt
 
-    real_temp_home = _build_codex_temp_home()
+    call_run_id = ctx.run_id or f"adhoc_{uuid.uuid4().hex}"
+    real_temp_home = _build_codex_run_scoped_home(ctx, call_run_id)
     real_candidate_input_dir = os.path.realpath(candidate_dir)
 
     try:
         sb_path = _build_generator_sb(real_temp_home, real_candidate_input_dir)
 
-        allowed_env = {
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
-            "LANG": "en_US.UTF-8",
-            "HOME": real_temp_home,
-            "USER": os.environ.get("USER", "codex"),
-            "LOGNAME": os.environ.get("LOGNAME", "codex"),
-            "TMPDIR": real_temp_home,
-        }
+        allowed_env = _codex_environment(real_temp_home)
 
         codex_bin = _get_codex_bin_path()
         cmd = [
@@ -295,17 +598,26 @@ def call_codex_sandboxed(
                 text=True,
                 timeout=120,
                 env=allowed_env,
+                cwd=BASE_DIR,
             )
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError) as error:
             ctx.unknown_token_state = True
-            raise ExperimentInvalidError(f"Codex process execution failed: {e}")
+            _raise_launch_failure("Codex", error)
+
+        stdout = normalize_and_truncate_stream(res.stdout)
+        stderr = normalize_and_truncate_stream(res.stderr)
 
         if res.returncode != 0:
             ctx.unknown_token_state = True
-            raise ExperimentInvalidError(f"Codex returned non-zero exit code {res.returncode}. Stderr: {res.stderr[:500]}")
+            raise ExperimentInvalidError(
+                f"Codex returned non-zero exit code {res.returncode}. "
+                f"Stderr: {get_stderr_summary(stderr)}",
+                stdout=stdout,
+                stderr=stderr,
+            )
 
         try:
-            raw_msg, usage = parse_codex_jsonl_output(res.stdout.splitlines())
+            raw_msg, usage = parse_codex_jsonl_output(stdout.splitlines())
             tokens_val = usage.get("output_tokens")
             if tokens_val is None:
                 raise ValueError("Codex call returned no output_tokens")
@@ -314,7 +626,11 @@ def call_codex_sandboxed(
                 raise ValueError(f"Negative token count: {tokens}")
         except Exception as e:
             ctx.unknown_token_state = True
-            raise ExperimentInvalidError(f"Codex call token parsing failed: {e}")
+            raise ExperimentInvalidError(
+                f"Codex call token parsing failed: {e}",
+                stdout=stdout,
+                stderr=stderr,
+            ) from e
 
         ctx.consumed_tokens += tokens
         if ctx.consumed_tokens > TOKEN_CEILING:
@@ -328,7 +644,7 @@ def call_codex_sandboxed(
             return raw_msg, tokens
 
     finally:
-        _cleanup_temp_home(real_temp_home)
+        _cleanup_codex_run_scoped_home(ctx, real_temp_home)
 
 # ── Evaluation helpers ────────────────────────────────────────────────────────
 
@@ -586,6 +902,13 @@ def verify_experiment_lock(ctx: RunContext) -> str:
     if not approved_sha:
         raise ExperimentInvalidError("approved_commit_sha missing from experiment.lock")
 
+    model = lock_data.get("model")
+    if not isinstance(model, str) or not model.strip():
+        raise ExperimentInvalidError(
+            "model missing, empty, or not a string in experiment.lock"
+        )
+    ctx.codex_model = model.strip()
+
     lock_allow_no_holdout = lock_data.get("allow_no_holdout", False)
     if not isinstance(lock_allow_no_holdout, bool):
         raise ExperimentInvalidError(f"allow_no_holdout in experiment.lock must be a boolean, got: {type(lock_allow_no_holdout).__name__}")
@@ -778,23 +1101,19 @@ def run_holdout_evaluation(
 # ── Smoke + canary pre-flight ─────────────────────────────────────────────────
 
 def run_smoke_and_canary(ctx: RunContext) -> tuple:
-    real_temp_home = _build_codex_temp_home()
+    call_run_id = ctx.run_id or f"adhoc_{uuid.uuid4().hex}"
+    real_temp_home = _build_codex_run_scoped_home(ctx, call_run_id)
     try:
         real_candidate_input_dir = BASE_DIR
         sb_path = _build_generator_sb(real_temp_home, real_candidate_input_dir)
-        allowed_env = {
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
-            "LANG": "en_US.UTF-8",
-            "HOME": real_temp_home,
-            "USER": os.environ.get("USER", "codex"),
-            "TMPDIR": real_temp_home,
-        }
+        allowed_env = _codex_environment(real_temp_home)
         version = _run_codex_version_smoke_test(sb_path, allowed_env)
         ctx.codex_version = version
+        ctx.codex_cli_version = version
         canary_tokens = _run_codex_canary(sb_path, allowed_env, ctx)
         return version, canary_tokens
     finally:
-        _cleanup_temp_home(real_temp_home)
+        _cleanup_codex_run_scoped_home(ctx, real_temp_home)
 
 # ── Main execution entry point ────────────────────────────────────────────────
 
@@ -876,6 +1195,7 @@ def _main_exec(ctx: RunContext) -> None:
         no_headroom_manifest = {
             "schema_version": "2",
             "run_id": ctx.run_id,
+            **_terminal_environment_metadata(ctx),
             "approved_commit_sha": approved_sha,
             "lock_file_hash": ctx.lock_file_hash,
             "status": "no_headroom",
@@ -1063,6 +1383,7 @@ def _main_exec(ctx: RunContext) -> None:
         no_improvement_manifest = {
             "schema_version": "2",
             "run_id": ctx.run_id,
+            **_terminal_environment_metadata(ctx),
             "approved_commit_sha": approved_sha,
             "lock_file_hash": ctx.lock_file_hash,
             "status": "completed_no_improvement",
@@ -1111,6 +1432,7 @@ def _main_exec(ctx: RunContext) -> None:
     promoted_manifest = {
         "schema_version": "2",
         "run_id": ctx.run_id,
+        **_terminal_environment_metadata(ctx),
         "approved_commit_sha": approved_sha,
         "lock_file_hash": ctx.lock_file_hash,
         "status": "completed_promoted",
@@ -1161,8 +1483,43 @@ def preflight_hashes_global() -> dict:
             return json.load(f)
     return {}
 
+
+def _capture_environment_metadata(ctx: RunContext) -> None:
+    ctx.python_version = sys.version
+    try:
+        result = subprocess.run(
+            ["/usr/bin/sw_vers"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=BASE_DIR,
+        )
+        stdout = normalize_and_truncate_stream(result.stdout)
+        stderr = normalize_and_truncate_stream(result.stderr)
+        if result.returncode == 0 and stdout.strip():
+            ctx.sw_vers = stdout.strip()
+        else:
+            ctx.sw_vers = f"unavailable: {get_stderr_summary(stderr) or 'sw_vers failed'}"
+    except (subprocess.SubprocessError, OSError) as error:
+        ctx.sw_vers = f"unavailable: {type(error).__name__}"
+
+
+def _terminal_environment_metadata(ctx: RunContext) -> dict:
+    codex_cli_version = (
+        ctx.codex_cli_version
+        if ctx.codex_cli_version != "unavailable"
+        else (ctx.codex_version or "unavailable")
+    )
+    return {
+        "sw_vers": ctx.sw_vers,
+        "python_version": ctx.python_version,
+        "codex_cli_version": codex_cli_version,
+    }
+
+
 def main() -> None:
     ctx = RunContext()
+    _capture_environment_metadata(ctx)
     ctx.run_id = f"run_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     ctx.run_dir = os.path.realpath(os.path.join(HISTORY_DIR, ctx.run_id))
     try:
@@ -1181,11 +1538,14 @@ def main() -> None:
             "schema_version": "2",
             "run_id": ctx.run_id,
             "status": "invalid",
+            **_terminal_environment_metadata(ctx),
             "approved_commit_sha": ctx.approved_commit_sha,
             "lock_file_hash": ctx.lock_file_hash,
             "codex_version": ctx.codex_version,
             "model_name": ctx.codex_model,
             "error_message": f"{type(e).__name__}: {e}",
+            "error_stdout": normalize_and_truncate_stream(getattr(e, "stdout", None)),
+            "error_stderr": normalize_and_truncate_stream(getattr(e, "stderr", None)),
             "tokens_consumed": ctx.consumed_tokens,
             "unknown_token_state": ctx.unknown_token_state,
             "current_stage": ctx.current_stage,
