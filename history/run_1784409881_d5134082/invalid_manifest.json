@@ -1,0 +1,14 @@
+{
+  "schema_version": "2",
+  "run_id": "run_1784409881_d5134082",
+  "status": "invalid",
+  "approved_commit_sha": "fb39da7250a7eaeeb306529f9e40c3b96c81332e",
+  "lock_file_hash": "f34b3ebd58a079875b226d263cf37da1a13be5ff46537c1488b421ec018dbbbf",
+  "codex_version": "codex-cli 0.144.5",
+  "model_name": "codex-mini-latest",
+  "error_message": "ExperimentInvalidError: Codex canary call failed (rc=1):\nstderr: WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/private/var/folders/9g/w9nv94356h7dt9n298tpn4dr0000gn/T/codex_home_ac7_chfc\" (codex_home: AbsolutePathBuf(\"/private/var/folders/9g/w9nv94356h7dt9n298tpn4dr0000gn/T/codex_home_ac7_chfc/.codex\"))\n",
+  "tokens_consumed": 0,
+  "unknown_token_state": true,
+  "current_stage": "smoke_and_canary",
+  "timestamp": "2026-07-18T21:24:46.683309+00:00"
+}
