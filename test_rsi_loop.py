@@ -257,9 +257,10 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             os.makedirs(target_dir)
 
             run_manifest = os.path.join(target_dir, "run_manifest.json")
-            data = {"pointer_schema_version": "2", "status": "completed_promoted"}
+            data = {"schema_version": "2", "status": "completed_promoted"}
 
             with mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.join(run_dir, "best_manifest.json")), \
+                 mock.patch("rsi_loop.BASE_DIR", run_dir), \
                  mock.patch("rsi_loop.HISTORY_DIR", history_dir):
                 with open(run_manifest, "w") as f:
                     json.dump(data, f)
@@ -382,9 +383,14 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         eval_success = {"success": True, "log": "Ran 5 tests\nOK"}
         eval_fail = {"success": False, "log": "Ran 5 tests\nFAIL"}
 
+        real_base_dir = os.path.dirname(os.path.abspath(__file__))
+        shutil.copy(os.path.join(real_base_dir, "candidate.sb.template"), self.tmp_dir)
+        shutil.copy(os.path.join(real_base_dir, "generator.sb.template"), self.tmp_dir)
+
         with mock.patch("rsi_loop.call_codex_sandboxed", return_value=("mock_code", 10)), \
              mock.patch("rsi_loop.run_evaluation_on_candidate", return_value=eval_success), \
              mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.BASE_DIR", os.path.realpath(self.tmp_dir)), \
              mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.join(self.tmp_dir, "best_manifest.json")), \
              mock.patch("rsi_loop.BASELINE_PROMPT_PATH", os.path.join(self.tmp_dir, "baseline.txt")), \
              self.assertRaises(SystemExit) as sy_exit:
@@ -401,8 +407,20 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             manifest_data = json.load(f)
         self.assertEqual(manifest_data["status"], "no_headroom")
 
+        best_manifest_path = os.path.join(self.tmp_dir, "best_manifest.json")
+        self.assertTrue(os.path.exists(best_manifest_path))
+        with open(best_manifest_path) as f:
+            pointer = json.load(f)
+        self.assertEqual(pointer["pointer_schema_version"], "2")
+        self.assertEqual(pointer["run_manifest_path"], os.path.relpath(manifest_path, self.tmp_dir))
+        with open(manifest_path, "rb") as f:
+            expected_hash = hashlib.sha256(f.read()).hexdigest()
+        self.assertEqual(pointer["run_manifest_sha256"], expected_hash)
+
         shutil.rmtree(self.tmp_dir)
         self.tmp_dir = tempfile.mkdtemp()
+        shutil.copy(os.path.join(real_base_dir, "candidate.sb.template"), self.tmp_dir)
+        shutil.copy(os.path.join(real_base_dir, "generator.sb.template"), self.tmp_dir)
         os.makedirs(os.path.join(self.tmp_dir, "prompt_templates"), exist_ok=True)
         with open(os.path.join(self.tmp_dir, "baseline.txt"), "w") as f:
             f.write("baseline prompt")
@@ -411,6 +429,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
              mock.patch("rsi_loop.run_evaluation_on_candidate", return_value=eval_fail), \
              mock.patch("rsi_loop.evaluate_prompt_on_tasks", return_value=(0.5, {}, 10)), \
              mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.BASE_DIR", os.path.realpath(self.tmp_dir)), \
              mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.join(self.tmp_dir, "best_manifest.json")), \
              mock.patch("rsi_loop.BASELINE_PROMPT_PATH", os.path.join(self.tmp_dir, "baseline.txt")), \
              self.assertRaises(SystemExit) as sy_exit:
@@ -425,12 +444,15 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
 
         shutil.rmtree(self.tmp_dir)
         self.tmp_dir = tempfile.mkdtemp()
+        shutil.copy(os.path.join(real_base_dir, "candidate.sb.template"), self.tmp_dir)
+        shutil.copy(os.path.join(real_base_dir, "generator.sb.template"), self.tmp_dir)
         os.makedirs(os.path.join(self.tmp_dir, "prompt_templates"), exist_ok=True)
         with open(os.path.join(self.tmp_dir, "baseline.txt"), "w") as f:
             f.write("baseline prompt")
 
         with mock.patch("rsi_loop.call_codex_sandboxed", side_effect=RuntimeError("API failure")), \
              mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.BASE_DIR", os.path.realpath(self.tmp_dir)), \
              mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.join(self.tmp_dir, "best_manifest.json")), \
              mock.patch("rsi_loop.BASELINE_PROMPT_PATH", os.path.join(self.tmp_dir, "baseline.txt")), \
              self.assertRaises(SystemExit) as sy_exit:
@@ -447,13 +469,11 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         # Test case 4: completed_promoted (with holdout)
         shutil.rmtree(self.tmp_dir)
         self.tmp_dir = tempfile.mkdtemp()
+        shutil.copy(os.path.join(real_base_dir, "candidate.sb.template"), self.tmp_dir)
+        shutil.copy(os.path.join(real_base_dir, "generator.sb.template"), self.tmp_dir)
         os.makedirs(os.path.join(self.tmp_dir, "prompt_templates"), exist_ok=True)
         with open(os.path.join(self.tmp_dir, "baseline.txt"), "w") as f:
             f.write("baseline prompt")
-
-        real_base_dir = os.path.dirname(os.path.abspath(__file__))
-        shutil.copy(os.path.join(real_base_dir, "candidate.sb.template"), self.tmp_dir)
-        shutil.copy(os.path.join(real_base_dir, "generator.sb.template"), self.tmp_dir)
 
         # Set up a fake private holdout directory
         private_dir = os.path.join(self.tmp_dir, "private", "benchmarks")
@@ -598,7 +618,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         os.makedirs(target_dir)
         run_manifest_path = os.path.join(target_dir, "run_manifest.json")
         with open(run_manifest_path, "w") as f:
-            json.dump({"pointer_schema_version": "2", "status": "invalid"}, f)
+            json.dump({"schema_version": "2", "status": "invalid"}, f)
 
         # Calculate expected hash of run manifest
         import hashlib
@@ -629,7 +649,36 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             self.assertTrue(files[0].startswith("best_manifest.json.archive_"))
             self.assertTrue(files[0].endswith(".backup"))
 
-        # 2. Test collision safety (multiple archival calls produce separate files)
+        # 2. Test schema_version mismatch in target manifest is rejected
+        # Recreate a pointer pointing to a manifest with invalid schema_version (missing or wrong)
+        with open(run_manifest_path, "w") as f:
+            json.dump({"schema_version": "1", "status": "completed_promoted"}, f)
+
+        with open(run_manifest_path, "rb") as f:
+            manifest_hash = hashlib.sha256(f.read()).hexdigest()
+
+        pointer_data["run_manifest_sha256"] = manifest_hash
+        with open(best_manifest_path, "w") as f:
+            json.dump(pointer_data, f)
+
+        # Re-create empty legacy directory to reset count
+        shutil.rmtree(legacy_dir)
+        os.makedirs(legacy_dir)
+
+        with mock.patch("rsi_loop.BEST_MANIFEST_PATH", best_manifest_path), \
+             mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch("rsi_loop.HISTORY_DIR", history_dir):
+
+            with self.assertRaises(ExperimentInvalidError) as ctx:
+                verify_existing_best_manifest_startup()
+            self.assertIn("Invalid target manifest schema version", str(ctx.exception))
+
+            # The manifest pointer is recoverably archived to history/legacy/
+            self.assertFalse(os.path.exists(best_manifest_path))
+            files = os.listdir(legacy_dir)
+            self.assertEqual(len(files), 1)
+
+        # 3. Test collision safety (multiple archival calls produce separate files)
         # Recreate a legacy file
         legacy_data = {"status": "success", "some_data": 123}
         with open(best_manifest_path, "w") as f:
@@ -649,8 +698,35 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             self.assertEqual(len(files), 2)
             self.assertNotEqual(files[0], files[1])
 
-        # 3. Test order of lock verification: if lock check fails, no mutation/archival happens
-        # Recreate a legacy file
+        # 4. Test symlink rejection: if history/legacy is a symlink, archival fails closed (file NOT moved)
+        # Recreate a legacy best_manifest.json
+        with open(best_manifest_path, "w") as f:
+            json.dump(legacy_data, f)
+
+        # Remove the legacy directory and replace with a symlink to an external directory
+        shutil.rmtree(legacy_dir)
+        external_dir = os.path.join(self.tmp_dir, "external_dir")
+        os.makedirs(external_dir)
+        os.symlink(external_dir, legacy_dir)
+
+        with mock.patch("rsi_loop.BEST_MANIFEST_PATH", best_manifest_path), \
+             mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch("rsi_loop.HISTORY_DIR", history_dir):
+
+            # Archiving must fail because of the symlink
+            with self.assertRaises(ExperimentInvalidError) as ctx:
+                verify_existing_best_manifest_startup()
+            self.assertIn("Symlink detected in archive path component", str(ctx.exception))
+
+            # Crucially, best_manifest.json must NOT have been moved/archived (fail closed)
+            self.assertTrue(os.path.exists(best_manifest_path))
+            # External dir must be empty
+            self.assertEqual(len(os.listdir(external_dir)), 0)
+
+        # 5. Test order of lock verification: if lock check fails, no mutation/archival happens
+        # Remove symlink and recreate legacy dir
+        os.remove(legacy_dir)
+        os.makedirs(legacy_dir)
         with open(best_manifest_path, "w") as f:
             json.dump(legacy_data, f)
 

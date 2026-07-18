@@ -449,30 +449,52 @@ def _write_once_fsynced_manifest(path: str, data: dict) -> None:
 
     os.chmod(path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)  # 0o444
 
+def validate_manifest_pointer_and_target(pointer_data: dict) -> dict:
+    """
+    Validates a pointer dict and its target manifest.
+    Raises RuntimeError/ExperimentInvalidError if validation fails.
+    Returns the loaded target manifest dict.
+    """
+    if pointer_data.get("pointer_schema_version") != "2":
+        raise RuntimeError(f"Unknown or legacy pointer schema version: {pointer_data.get('pointer_schema_version')}")
+
+    target_path = pointer_data.get("run_manifest_path")
+    if not target_path:
+        raise RuntimeError("run_manifest_path missing from pointer")
+
+    full_path = os.path.realpath(os.path.join(BASE_DIR, target_path))
+    if not is_contained(full_path, os.path.realpath(HISTORY_DIR)):
+        raise RuntimeError(f"Pointer target {full_path} is not contained within HISTORY_DIR")
+    if os.path.basename(full_path) != "run_manifest.json":
+        raise RuntimeError(f"Pointer target filename {os.path.basename(full_path)} is not run_manifest.json")
+
+    if not os.path.exists(full_path):
+        raise RuntimeError(f"Target run manifest missing: {full_path}")
+
+    expected_hash = pointer_data.get("run_manifest_sha256")
+    actual_hash = _sha256_file(full_path)
+    if actual_hash != expected_hash:
+        raise RuntimeError(f"Manifest hash mismatch: expected {expected_hash}, got {actual_hash}")
+
+    with open(full_path) as f:
+        target_manifest = json.load(f)
+
+    if target_manifest.get("schema_version") != "2":
+        raise RuntimeError(f"Invalid target manifest schema version: {target_manifest.get('schema_version')}")
+
+    status = target_manifest.get("status")
+    if status not in ["no_headroom", "completed_no_improvement", "completed_promoted"]:
+        raise RuntimeError(f"Invalid target manifest status: {status}")
+
+    return target_manifest
+
 def load_and_verify_best_manifest() -> dict | None:
     if not os.path.exists(BEST_MANIFEST_PATH):
         return None
     try:
         with open(BEST_MANIFEST_PATH) as f:
             ptr = json.load(f)
-        if ptr.get("pointer_schema_version") != "2":
-            raise RuntimeError(f"Unknown or legacy pointer schema version: {ptr.get('pointer_schema_version')}")
-        path = os.path.realpath(os.path.join(BASE_DIR, ptr["run_manifest_path"]))
-        expected_hash = ptr["run_manifest_sha256"]
-
-        # Validate pointer target resolves beneath history/ and filename is run_manifest.json
-        if not is_contained(path, os.path.realpath(HISTORY_DIR)):
-            raise RuntimeError(f"Pointer target {path} is not contained within HISTORY_DIR")
-        if os.path.basename(path) != "run_manifest.json":
-            raise RuntimeError(f"Pointer target filename {os.path.basename(path)} is not run_manifest.json")
-
-        if not os.path.exists(path):
-            raise RuntimeError(f"Manifest file missing: {path}")
-        actual_hash = _sha256_file(path)
-        if actual_hash != expected_hash:
-            raise RuntimeError(f"Manifest hash mismatch: expected {expected_hash}, got {actual_hash}")
-        with open(path) as f:
-            return json.load(f)
+        return validate_manifest_pointer_and_target(ptr)
     except Exception as e:
         sys.stderr.write(f"WARNING: load_and_verify_best_manifest error: {e}\n")
         return None
@@ -483,40 +505,31 @@ def verify_existing_best_manifest_startup() -> None:
     try:
         with open(BEST_MANIFEST_PATH) as f:
             ptr = json.load(f)
-        if ptr.get("pointer_schema_version") != "2":
-            raise RuntimeError(f"Unknown or legacy pointer schema version: {ptr.get('pointer_schema_version')}")
-
-        target_path = ptr.get("run_manifest_path")
-        if not target_path:
-            raise RuntimeError("run_manifest_path missing from pointer")
-
-        full_path = os.path.realpath(os.path.join(BASE_DIR, target_path))
-        if not is_contained(full_path, os.path.realpath(HISTORY_DIR)):
-            raise RuntimeError(f"Pointer target {full_path} is not contained within HISTORY_DIR")
-        if os.path.basename(full_path) != "run_manifest.json":
-            raise RuntimeError(f"Pointer target filename {os.path.basename(full_path)} is not run_manifest.json")
-
-        if not os.path.exists(full_path):
-            raise RuntimeError(f"Target run manifest missing: {full_path}")
-
-        expected_hash = ptr.get("run_manifest_sha256")
-        actual_hash = _sha256_file(full_path)
-        if actual_hash != expected_hash:
-            raise RuntimeError(f"Manifest hash mismatch: expected {expected_hash}, got {actual_hash}")
-
-        with open(full_path) as f:
-            target_manifest = json.load(f)
-
-        status = target_manifest.get("status")
-        if status not in ["no_headroom", "completed_no_improvement", "completed_promoted"]:
-            raise RuntimeError(f"Invalid target manifest status: {status}")
-
+        validate_manifest_pointer_and_target(ptr)
     except Exception as e:
         import shutil
         legacy_dir = os.path.join(HISTORY_DIR, "legacy")
-        os.makedirs(legacy_dir, exist_ok=True)
         backup_name = f"best_manifest.json.archive_{uuid.uuid4().hex}.backup"
         backup_path = os.path.join(legacy_dir, backup_name)
+
+        # Check unresolved path components of the destination for symlinks
+        curr = backup_path
+        real_base = os.path.realpath(BASE_DIR)
+        while curr:
+            if curr == BASE_DIR or os.path.realpath(curr) == real_base:
+                break
+            if os.path.islink(curr):
+                raise ExperimentInvalidError(f"Symlink detected in archive path component: {curr}")
+            parent = os.path.dirname(curr)
+            if parent == curr:
+                break
+            curr = parent
+
+        # Check containment beneath HISTORY_DIR before moving
+        if not is_contained(backup_path, HISTORY_DIR):
+            raise ExperimentInvalidError(f"Archive destination {backup_path} is not contained within HISTORY_DIR")
+
+        os.makedirs(legacy_dir, exist_ok=True)
         try:
             shutil.move(BEST_MANIFEST_PATH, backup_path)
             sys.stdout.write(f"Archived legacy/invalid manifest to: {backup_path}\n")
