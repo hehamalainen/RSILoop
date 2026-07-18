@@ -9,7 +9,7 @@ def check_env_file():
     if not os.path.exists(env_path):
         print(f"[-] ~/.env file not found at {env_path}")
         return False
-    
+
     print(f"[+] Found ~/.env file")
     keys_to_check = ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
     for key in keys_to_check:
@@ -57,7 +57,7 @@ def check_python_packages():
             print(f"[+] Package '{pkg}' is installed")
         except ImportError:
             print(f"[-] Package '{pkg}' is NOT installed")
-    
+
     # Try importing google-genai or google-generativeai
     try:
         from google import genai

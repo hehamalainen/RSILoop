@@ -8,6 +8,9 @@ history/
 best_manifest.json
 best_manifest.json.tmp
 best_manifest.json.invalid_old
+best_manifest.json.previous
+preflight_huffman.json
+experiment.lock
 *.sb
 tmp/
 /tmp/

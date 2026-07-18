@@ -15,7 +15,7 @@ flowchart TD
         ORCH -->|3. Writes solution.py| SOL[solution.py]
         ORCH -->|4. Launches| EV[evaluator.py]
     end
-    
+
     subgraph Sandbox [Sandboxed Subprocess / Inner Loop]
         EV -->|5. Spawns Worker| WRK[sandbox_worker.py]
         WRK -->|6. Sets resource limits| WRK
@@ -23,7 +23,7 @@ flowchart TD
         EV -->|8. Maps Proxies| TEST[test_harness.py]
         TEST -->|9. Runs assertions| EV
     end
-    
+
     EV -->|10. Outputs Result| ORCH
 ```
 

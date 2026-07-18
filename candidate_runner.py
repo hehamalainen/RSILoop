@@ -2,8 +2,8 @@
 candidate_runner.py — Untrusted candidate execution environment.
 
 This process runs under candidate.sb sandbox and is supervised by evaluator.py (the host parent).
-It receives framed JSON commands from sandbox_worker.py via stdin, executes them against the
-candidate solution module, and returns framed JSON responses via stdout.
+It receives framed JSON commands from stdin, executes them against the candidate
+solution module, and returns framed JSON responses via stdout.
 
 CRITICAL: stdout is the control channel. The candidate must not write to stdout.
 """
@@ -11,8 +11,6 @@ import os
 import sys
 
 # --- 0. Redirect candidate-visible stdout to /dev/null immediately ---
-# The real stdout file descriptor (fd 1) is the control channel to the worker.
-# We give the candidate process a /dev/null stdout so print() calls go nowhere.
 _control_fd = os.dup(1)  # Save the control channel fd
 try:
     _devnull_fd = os.open('/dev/null', os.O_WRONLY)
@@ -30,34 +28,77 @@ import json
 import resource
 import traceback
 import uuid
+import math
+import types
 
 # --- 1. Control channel I/O using the saved fd ---
-_control_write = os.fdopen(_control_fd, 'w', buffering=1)
+_control_write = os.fdopen(_control_fd, 'wb', buffering=0)
 
 def send_response(data: dict) -> None:
-    """Write a length-prefixed JSON frame to the control channel."""
-    payload = json.dumps(data)
-    _control_write.write(f'{len(payload)}\n{payload}\n')
-    _control_write.flush()
+    """Write a length-prefixed JSON frame to the control channel with 2MB bounds."""
+    try:
+        payload = json.dumps(data)
+        encoded = payload.encode('utf-8')
+        if len(encoded) > 2 * 1024 * 1024:
+            err_data = {
+                'status': 'error',
+                'message': 'Response payload exceeds 2 MB limit',
+                'uuid': data.get('uuid')
+            }
+            payload = json.dumps(err_data)
+            encoded = payload.encode('utf-8')
+
+        _control_write.write(f'{len(encoded)}\n'.encode('utf-8'))
+        _control_write.write(encoded)
+        _control_write.write(b'\n')
+    except Exception as e:
+        try:
+            fallback = json.dumps({'status': 'error', 'message': f'Internal serialization error: {e}'}).encode('utf-8')
+            _control_write.write(f'{len(fallback)}\n'.encode('utf-8') + fallback + b'\n')
+        except Exception:
+            pass
 
 def read_request() -> dict | None:
-    """Read a length-prefixed JSON frame from stdin."""
-    length_line = sys.stdin.readline()
+    """Read a length-prefixed JSON frame from stdin with 2MB bounds."""
+    length_line = sys.stdin.buffer.readline()
     if not length_line:
         return None  # EOF — clean shutdown
     try:
         length = int(length_line.strip())
     except ValueError:
         raise ValueError(f'Malformed length line: {length_line!r}')
-    if length > 1 * 1024 * 1024:  # 1 MB cap
-        raise ValueError(f'Oversized payload: {length}')
-    data = sys.stdin.read(length)
+    if length > 2 * 1024 * 1024:  # 2 MB cap
+        raise ValueError(f'Request payload exceeds 2 MB limit: {length}')
+    data = sys.stdin.buffer.read(length)
     if len(data) != length:
         raise ValueError(f'Truncated payload: expected {length}, got {len(data)}')
-    sys.stdin.readline()  # consume trailing newline
-    return json.loads(data)
+    sys.stdin.buffer.readline()  # consume trailing newline
+    return json.loads(data.decode('utf-8'))
 
-# --- 2. Set irreversible resource limits BEFORE importing solution ---
+# --- 2. Handshake Verification ---
+_session_id = None
+try:
+    first_req = read_request()
+    if first_req is None:
+        sys.exit(1)
+    if first_req.get('action') != 'handshake':
+        os.write(_control_fd, b'FATAL: Expected handshake action first\n')
+        sys.exit(1)
+    _session_id = first_req.get('session_id')
+    if not _session_id:
+        os.write(_control_fd, b'FATAL: Missing session_id in handshake\n')
+        sys.exit(1)
+    # Send ready response
+    req_uuid = first_req.get('uuid')
+    send_response({'status': 'ready', 'uuid': req_uuid})
+except Exception as e:
+    try:
+        os.write(_control_fd, f'FATAL: Handshake failed: {e}\n'.encode())
+    except Exception:
+        pass
+    sys.exit(1)
+
+# --- 3. Set irreversible resource limits ---
 def _set_limits() -> None:
     limits = {
         resource.RLIMIT_CPU:    (30, 30),
@@ -74,7 +115,7 @@ def _set_limits() -> None:
 
 _set_limits()
 
-# --- 3. Load candidate solution ---
+# --- 4. Load candidate solution ---
 _solution = None
 _import_error = None
 
@@ -84,13 +125,174 @@ try:
 except Exception as e:
     _import_error = f'{type(e).__name__}: {e}'
 
-# --- 4. Object store for instance handles ---
-_objects: dict = {}
-_next_obj_id: int = 1
+# --- 5. Bounded Serialization Codec ---
+_objects = {}
+_next_obj_id = 1
+_exported_class_types = set()
 
-# --- 5. Main request loop ---
-def _handle(req: dict) -> None:
+def to_envelope(val, depth=0, stats=None) -> dict:
     global _next_obj_id
+    if stats is None:
+        stats = {"nodes": 0, "string_bytes": 0}
+    stats["nodes"] += 1
+    if stats["nodes"] > 1000:
+        raise ValueError("Payload exceeds maximum node limit of 1000")
+    if depth > 16:
+        raise ValueError("Payload depth exceeds maximum limit of 16")
+
+    if val is None or isinstance(val, bool):
+        return {"type": "primitive", "value": val}
+
+    if isinstance(val, int):
+        if len(str(val)) > 100:
+            raise ValueError("Integer length exceeds 100 digits")
+        return {"type": "primitive", "value": val}
+
+    if isinstance(val, float):
+        if math.isnan(val) or math.isinf(val):
+            raise ValueError("NaN and Infinity are not allowed")
+        return {"type": "primitive", "value": val}
+
+    if isinstance(val, str):
+        utf8_size = len(val.encode('utf-8'))
+        stats["string_bytes"] += utf8_size
+        if stats["string_bytes"] > 2 * 1024 * 1024:
+            raise ValueError("Cumulative decoded payload size exceeds 2 MB")
+        if utf8_size > 1 * 1024 * 1024:
+            raise ValueError("String size exceeds 1 MB limit")
+        return {"type": "primitive", "value": val}
+
+    if isinstance(val, bytes):
+        if len(val) > 1 * 1024 * 1024:
+            raise ValueError("Bytes size exceeds 1 MB limit")
+        stats["string_bytes"] += len(val)
+        if stats["string_bytes"] > 2 * 1024 * 1024:
+            raise ValueError("Cumulative decoded payload size exceeds 2 MB")
+        return {"type": "bytes", "hex": val.hex()}
+
+    if isinstance(val, list):
+        return {"type": "list", "value": [to_envelope(x, depth + 1, stats) for x in val]}
+
+    if isinstance(val, tuple):
+        return {"type": "tuple", "value": [to_envelope(x, depth + 1, stats) for x in val]}
+
+    if isinstance(val, dict):
+        items = []
+        for k, v in val.items():
+            items.append([to_envelope(k, depth + 1, stats), to_envelope(v, depth + 1, stats)])
+        return {"type": "dict", "value": items}
+
+    if val is NotImplemented:
+        return {"type": "not_implemented"}
+
+    # Check if object is an instance of an exported candidate class
+    cls = type(val)
+    if cls in _exported_class_types:
+        if len(_objects) >= 1000:
+            raise RuntimeError("Runner object store limit of 1000 exceeded")
+        for existing_id, obj in _objects.items():
+            if obj is val:
+                return {
+                    "type": "object_ref",
+                    "module": cls.__module__,
+                    "qualname": cls.__qualname__,
+                    "obj_id": existing_id
+                }
+        obj_id = _next_obj_id
+        _next_obj_id += 1
+        _objects[obj_id] = val
+        return {
+            "type": "object_ref",
+            "module": cls.__module__,
+            "qualname": cls.__qualname__,
+            "obj_id": obj_id
+        }
+
+    raise TypeError(f"Unserializable return type: {cls.__name__}")
+
+def from_envelope(envelope):
+    if not isinstance(envelope, dict):
+        raise ValueError("Invalid envelope: not a dictionary")
+    t = envelope.get("type")
+    if t is None:
+        raise ValueError("Invalid envelope: missing type tag")
+
+    if t == "primitive":
+        if set(envelope.keys()) != {"type", "value"}:
+            raise ValueError("Invalid envelope fields for primitive")
+        val = envelope["value"]
+        if isinstance(val, float):
+            if math.isnan(val) or math.isinf(val):
+                raise ValueError("NaN and Infinity are not allowed")
+        elif isinstance(val, int):
+            if len(str(val)) > 100:
+                raise ValueError("Integer length exceeds 100 digits")
+        elif isinstance(val, str):
+            if len(val.encode('utf-8')) > 1 * 1024 * 1024:
+                raise ValueError("String size exceeds 1 MB limit")
+        elif val is not None and not isinstance(val, bool):
+            raise ValueError(f"Invalid primitive value type: {type(val)}")
+        return val
+
+    if t == "bytes":
+        if set(envelope.keys()) != {"type", "hex"}:
+            raise ValueError("Invalid envelope fields for bytes")
+        hex_val = envelope["hex"]
+        if not isinstance(hex_val, str) or len(hex_val) > 2 * 1024 * 1024:
+            raise ValueError("Invalid bytes hex length")
+        return bytes.fromhex(hex_val)
+
+    if t == "tuple":
+        if set(envelope.keys()) != {"type", "value"}:
+            raise ValueError("Invalid envelope fields for tuple")
+        items = envelope["value"]
+        if not isinstance(items, list):
+            raise ValueError("Tuple envelope value must be a list of envelopes")
+        return tuple(from_envelope(x) for x in items)
+
+    if t == "list":
+        if set(envelope.keys()) != {"type", "value"}:
+            raise ValueError("Invalid envelope fields for list")
+        items = envelope["value"]
+        if not isinstance(items, list):
+            raise ValueError("List envelope value must be a list of envelopes")
+        return [from_envelope(x) for x in items]
+
+    if t == "dict":
+        if set(envelope.keys()) != {"type", "value"}:
+            raise ValueError("Invalid envelope fields for dict")
+        items = envelope["value"]
+        if not isinstance(items, list):
+            raise ValueError("Dict envelope value must be a list of envelope pairs")
+        res = {}
+        for pair in items:
+            if not isinstance(pair, list) or len(pair) != 2:
+                raise ValueError("Dict envelope items must be key-value envelope pairs")
+            res[from_envelope(pair[0])] = from_envelope(pair[1])
+        return res
+
+    if t == "not_implemented":
+        if set(envelope.keys()) != {"type"}:
+            raise ValueError("Invalid envelope fields for not_implemented")
+        return NotImplemented
+
+    if t == "object_ref":
+        if set(envelope.keys()) != {"type", "module", "qualname", "obj_id"}:
+            raise ValueError("Invalid envelope fields for object_ref")
+        obj_id = envelope["obj_id"]
+        if not isinstance(obj_id, int):
+            raise ValueError("Invalid object ID type")
+        if obj_id not in _objects:
+            raise ValueError(f"Unknown object ID: {obj_id}")
+        obj = _objects[obj_id]
+        if type(obj).__module__ != envelope["module"] or type(obj).__qualname__ != envelope["qualname"]:
+            raise ValueError("Object class identity mismatch")
+        return obj
+
+    raise ValueError(f"Unknown envelope type: {t}")
+
+# --- 6. Main request loop ---
+def _handle(req: dict) -> None:
     action = req.get('action')
     req_uuid = req.get('uuid')
     if not req_uuid:
@@ -116,6 +318,7 @@ def _handle(req: dict) -> None:
                 if getattr(attr, '__module__', None) != _solution.__name__:
                     continue
                 if isinstance(attr, type):
+                    _exported_class_types.add(attr)
                     is_exc = issubclass(attr, BaseException)
                     mro_data = [
                         {'qualname': cls.__qualname__, 'module': cls.__module__}
@@ -126,6 +329,19 @@ def _handle(req: dict) -> None:
                         for b in attr.__bases__
                         if b is not object
                     ]
+
+                    allowed_magics = [
+                        "__add__", "__radd__", "__sub__", "__rsub__", "__mul__", "__rmul__",
+                        "__truediv__", "__rtruediv__", "__eq__", "__len__", "__str__", "__repr__"
+                    ]
+                    methods_implemented = []
+                    for cls in attr.__mro__:
+                        if cls in (object, BaseException, Exception):
+                            continue
+                        for mname in allowed_magics:
+                            if mname in cls.__dict__ and mname not in methods_implemented:
+                                methods_implemented.append(mname)
+
                     exports.append({
                         'name': name,
                         'qualname': attr.__qualname__,
@@ -134,6 +350,7 @@ def _handle(req: dict) -> None:
                         'is_exception': is_exc,
                         'bases': bases_data,
                         'mro': mro_data,
+                        'magic_methods': methods_implemented
                     })
                 elif callable(attr):
                     exports.append({'name': name, 'type': 'function'})
@@ -147,8 +364,8 @@ def _handle(req: dict) -> None:
 
         elif action == 'call_func':
             func_name = req.get('func_name')
-            args = req.get('args', [])
-            kwargs = req.get('kwargs', {})
+            args = [from_envelope(x) for x in req.get('args', [])]
+            kwargs = {k: from_envelope(v) for k, v in req.get('kwargs', {}).items()}
             if _solution is None:
                 send_response({'status': 'error', 'message': 'Module failed to import', 'uuid': req_uuid})
                 return
@@ -157,12 +374,12 @@ def _handle(req: dict) -> None:
                 send_response({'status': 'error', 'message': f'Function {func_name} not found', 'uuid': req_uuid})
                 return
             result = func(*args, **kwargs)
-            send_response({'status': 'success', 'result': result, 'uuid': req_uuid})
+            send_response({'status': 'success', 'result': to_envelope(result), 'uuid': req_uuid})
 
         elif action == 'init_class':
             class_name = req.get('class_name')
-            args = req.get('args', [])
-            kwargs = req.get('kwargs', {})
+            args = [from_envelope(x) for x in req.get('args', [])]
+            kwargs = {k: from_envelope(v) for k, v in req.get('kwargs', {}).items()}
             if _solution is None:
                 send_response({'status': 'error', 'message': 'Module failed to import', 'uuid': req_uuid})
                 return
@@ -171,6 +388,9 @@ def _handle(req: dict) -> None:
                 send_response({'status': 'error', 'message': f'Class {class_name} not found', 'uuid': req_uuid})
                 return
             obj = cls(*args, **kwargs)
+            if len(_objects) >= 1000:
+                raise RuntimeError("Runner object store limit of 1000 exceeded")
+            global _next_obj_id
             obj_id = _next_obj_id
             _next_obj_id += 1
             _objects[obj_id] = obj
@@ -179,8 +399,8 @@ def _handle(req: dict) -> None:
         elif action == 'call_method':
             obj_id = req.get('obj_id')
             method_name = req.get('method_name')
-            args = req.get('args', [])
-            kwargs = req.get('kwargs', {})
+            args = [from_envelope(x) for x in req.get('args', [])]
+            kwargs = {k: from_envelope(v) for k, v in req.get('kwargs', {}).items()}
             obj = _objects.get(obj_id)
             if obj is None:
                 send_response({'status': 'error', 'message': 'Object not found', 'uuid': req_uuid})
@@ -190,14 +410,59 @@ def _handle(req: dict) -> None:
                 send_response({'status': 'error', 'message': f'Method {method_name} not found', 'uuid': req_uuid})
                 return
             result = method(*args, **kwargs)
-            send_response({'status': 'success', 'result': result, 'uuid': req_uuid})
+
+            # Check type of returned value from specific special methods
+            if method_name == "__len__":
+                if not isinstance(result, int) or result < 0:
+                    raise TypeError(f"__len__ must return non-negative int, got {result}")
+            elif method_name in ("__str__", "__repr__"):
+                if not isinstance(result, str):
+                    raise TypeError(f"{method_name} must return str, got {type(result)}")
+
+            send_response({'status': 'success', 'result': to_envelope(result), 'uuid': req_uuid})
+
+        elif action == 'get_attr':
+            obj_id = req.get('obj_id')
+            name = req.get('name')
+            obj = _objects.get(obj_id)
+            if obj is None:
+                send_response({'status': 'error', 'message': 'Object not found', 'uuid': req_uuid})
+                return
+
+            if name.startswith('_'):
+                send_response({'status': 'error', 'message': 'PermissionError: Private attribute access denied', 'uuid': req_uuid})
+                return
+
+            try:
+                attr = getattr(obj, name)
+            except AttributeError as ae:
+                send_response({'status': 'error', 'message': f'AttributeError: {ae}', 'uuid': req_uuid})
+                return
+
+            if callable(attr):
+                if isinstance(attr, (types.MethodType, types.FunctionType, types.BuiltinMethodType, types.BuiltinFunctionType)):
+                    send_response({
+                        'status': 'success',
+                        'result': {'type': 'callable_ref', 'obj_id': obj_id, 'name': name},
+                        'uuid': req_uuid
+                    })
+                else:
+                    send_response({
+                        'status': 'error',
+                        'message': 'TypeError: Accessing arbitrary callable objects is restricted',
+                        'uuid': req_uuid
+                    })
+            else:
+                send_response({
+                    'status': 'success',
+                    'result': to_envelope(attr),
+                    'uuid': req_uuid
+                })
 
         elif action == 'shutdown':
-            # Write confirmation, close the control channel write end, exit cleanly.
             send_response({'status': 'shutdown_ok', 'uuid': req_uuid})
             _control_write.flush()
             _control_write.close()
-            # Close stdin to signal EOF upstream
             sys.stdin.close()
             sys.exit(0)
 
@@ -205,7 +470,7 @@ def _handle(req: dict) -> None:
             send_response({'status': 'error', 'message': f'Unknown action: {action}', 'uuid': req_uuid})
 
     except SystemExit:
-        raise  # Let sys.exit(0) from shutdown propagate
+        raise
     except Exception as e:
         tb_str = traceback.format_exc()
         send_response({
@@ -218,6 +483,8 @@ def _handle(req: dict) -> None:
             'uuid': req_uuid,
         })
 
+
+
 def main():
     while True:
         try:
@@ -227,6 +494,9 @@ def main():
             sys.exit(1)
         if req is None:
             break  # EOF
+        if req.get('session_id') != _session_id:
+            send_response({'status': 'error', 'message': 'Invalid session ID', 'uuid': req.get('uuid')})
+            continue
         _handle(req)
 
 if __name__ == '__main__':

@@ -11,7 +11,7 @@ class TestRLE(unittest.TestCase):
             from solution import rle_encode
         except ImportError as e:
             self.fail(f"Could not import rle_encode from solution.py: {e}")
-        
+
         self.assertEqual(rle_encode("AABBBCCCC"), "2A3B4C")
         self.assertEqual(rle_encode("A"), "1A")
         self.assertEqual(rle_encode(""), "")
