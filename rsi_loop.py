@@ -168,8 +168,14 @@ def _build_generator_sb(real_temp_home: str, real_candidate_input_dir: str) -> s
         f.write(sb_content)
     return sb_path
 
+def _get_codex_bin_path() -> str:
+    for path in ("/opt/homebrew/bin/codex", "/usr/local/bin/codex"):
+        if os.path.exists(path):
+            return path
+    return "/opt/homebrew/bin/codex"
+
 def _run_codex_version_smoke_test(sb_path: str, env: dict) -> str:
-    codex_bin = "/opt/homebrew/bin/codex"
+    codex_bin = _get_codex_bin_path()
     cmd = ["sandbox-exec", "-f", sb_path, codex_bin, "--version"]
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=env)
     if res.returncode != 0:
@@ -185,7 +191,7 @@ def _run_codex_version_smoke_test(sb_path: str, env: dict) -> str:
 def _run_codex_canary(
     sb_path: str, env: dict, ctx: RunContext
 ) -> int:
-    codex_bin = "/opt/homebrew/bin/codex"
+    codex_bin = _get_codex_bin_path()
     canary_prompt = "Reply with exactly one word: ready"
     cmd = [
         "sandbox-exec", "-f", sb_path,
@@ -215,21 +221,21 @@ def _run_codex_canary(
 
     try:
         _, usage = parse_codex_jsonl_output(res.stdout.splitlines())
+        tokens_val = usage.get("output_tokens")
+        if tokens_val is None:
+            raise ValueError("Codex canary call returned no output_tokens")
+        tokens = int(tokens_val)
+        if tokens < 0:
+            raise ValueError(f"Negative token count: {tokens}")
     except Exception as e:
         ctx.unknown_token_state = True
-        raise e
+        raise ExperimentInvalidError(f"Canary token parsing failed: {e}")
 
-    tokens = usage.get("output_tokens")
-    if tokens is None:
-        ctx.unknown_token_state = True
-        raise ExperimentInvalidError("Codex canary call returned no output_tokens — fail closed")
-    tokens = int(tokens)
-
-    if ctx.consumed_tokens + tokens > TOKEN_CEILING:
-        raise ExperimentInvalidError(
-            f"Token ceiling breached during canary: {ctx.consumed_tokens} + {tokens} > {TOKEN_CEILING}"
-        )
     ctx.consumed_tokens += tokens
+    if ctx.consumed_tokens > TOKEN_CEILING:
+        raise ExperimentInvalidError(
+            f"Token ceiling breached during canary: {ctx.consumed_tokens} > {TOKEN_CEILING}"
+        )
     sys.stderr.write(f"[canary] API access verified. Canary output tokens: {tokens}\n")
     sys.stderr.flush()
     return tokens
@@ -291,23 +297,21 @@ def call_codex_sandboxed(
 
         try:
             raw_msg, usage = parse_codex_jsonl_output(res.stdout.splitlines())
+            tokens_val = usage.get("output_tokens")
+            if tokens_val is None:
+                raise ValueError("Codex call returned no output_tokens")
+            tokens = int(tokens_val)
+            if tokens < 0:
+                raise ValueError(f"Negative token count: {tokens}")
         except Exception as e:
             ctx.unknown_token_state = True
-            raise e
-
-        tokens = usage.get("output_tokens")
-        if tokens is None:
-            ctx.unknown_token_state = True
-            raise ExperimentInvalidError("Codex call returned no output_tokens — fail closed")
-        tokens = int(tokens)
-
-        if ctx.consumed_tokens + tokens > TOKEN_CEILING:
-            raise ExperimentInvalidError(
-                f"Token ceiling breached: {ctx.consumed_tokens} + {tokens} = "
-                f"{ctx.consumed_tokens + tokens} > {TOKEN_CEILING}"
-            )
+            raise ExperimentInvalidError(f"Codex call token parsing failed: {e}")
 
         ctx.consumed_tokens += tokens
+        if ctx.consumed_tokens > TOKEN_CEILING:
+            raise ExperimentInvalidError(
+                f"Token ceiling breached: {ctx.consumed_tokens} > {TOKEN_CEILING}"
+            )
 
         if expect_json_code:
             return extract_code(raw_msg), tokens
@@ -582,8 +586,6 @@ def verify_holdout_hashes(private_dir: str):
         raise ExperimentInvalidError(f"Failed to read holdout_hashes.json: {e}")
 
     expected_holdout_keys = {
-        "operator_holdout/problem.txt",
-        "operator_holdout/test_holdout.py",
         "simple_regex_matcher/problem.txt",
         "simple_regex_matcher/test_harness.py",
         "simple_regex_matcher/test_holdout.py"
@@ -623,8 +625,8 @@ def run_holdout_evaluation(
     run_dir: str,
     ctx: RunContext,
 ) -> tuple:
-    problem_file = os.path.join(PRIVATE_DIR, "operator_holdout", "problem.txt")
-    harness_file = os.path.join(PRIVATE_DIR, "operator_holdout", "test_holdout.py")
+    problem_file = os.path.join(PRIVATE_DIR, "simple_regex_matcher", "problem.txt")
+    harness_file = os.path.join(PRIVATE_DIR, "simple_regex_matcher", "test_holdout.py")
 
     if not os.path.exists(PRIVATE_DIR):
         return None, 0
@@ -632,7 +634,7 @@ def run_holdout_evaluation(
     verify_holdout_hashes(PRIVATE_DIR)
 
     if not os.path.exists(problem_file) or not os.path.exists(harness_file):
-        sys.stdout.write("Operator holdout files not found. Skipping.\n")
+        sys.stdout.write("Holdout simple_regex_matcher files not found. Skipping.\n")
         return None, 0
 
     problem_hash = _sha256_file(problem_file)
@@ -822,6 +824,8 @@ def _main_exec(ctx: RunContext) -> None:
         best_trial_score = baseline_score
         best_trial_prompt = baseline_prompt
         current_prompt = baseline_prompt
+        current_results = baseline_results
+        current_source_subdir = f"{trial_id}/baseline"
         mutations_history = []
 
         for mut_idx in range(3):
@@ -829,10 +833,10 @@ def _main_exec(ctx: RunContext) -> None:
                 break
 
             failures = []
-            for task, res in baseline_results.items():
+            for task, res in current_results.items():
                 if not res["success"]:
                     task_file = os.path.join(BENCHMARKS_DIR, task, "problem.txt")
-                    sol_path = os.path.realpath(os.path.join(ctx.run_dir, f"{trial_id}/baseline", task, "solution.py"))
+                    sol_path = os.path.realpath(os.path.join(ctx.run_dir, current_source_subdir, task, "solution.py"))
                     with open(task_file) as f:
                         desc = f.read()
                     code = ""
@@ -873,7 +877,8 @@ def _main_exec(ctx: RunContext) -> None:
             if mut_score > best_trial_score:
                 best_trial_score = mut_score
                 best_trial_prompt = new_prompt
-                baseline_results = mut_results
+                current_results = mut_results
+                current_source_subdir = f"{trial_id}/mut_{mut_idx + 1}"
                 current_prompt = new_prompt
             else:
                 current_prompt = best_trial_prompt
@@ -904,6 +909,7 @@ def _main_exec(ctx: RunContext) -> None:
     # Evaluate candidates validation
     candidate_val_scores = []
     candidate_val_results_list = []
+    candidate_val_tokens_list = []
     for t in trial_results:
         score, val_res, vtokens = evaluate_prompt_on_tasks(
             t["candidate_prompt"], ctx.run_dir, f"validation_{t['trial']}",
@@ -911,6 +917,7 @@ def _main_exec(ctx: RunContext) -> None:
         )
         candidate_val_scores.append(score)
         candidate_val_results_list.append(val_res)
+        candidate_val_tokens_list.append(vtokens)
 
     eligible = []
     for i, t in enumerate(trial_results):
@@ -937,7 +944,7 @@ def _main_exec(ctx: RunContext) -> None:
             t["trial"]: {
                 "score": candidate_val_scores[idx],
                 "benchmarks": candidate_val_results_list[idx],
-                "tokens_consumed": ctx.consumed_tokens  # accumulated up to this point
+                "tokens_consumed": candidate_val_tokens_list[idx]
             }
             for idx, t in enumerate(trial_results)
         }

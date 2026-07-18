@@ -333,15 +333,24 @@ def _handle(req: dict) -> None:
             if _solution is None:
                 send_response({'status': 'error', 'message': 'Module failed to import', 'uuid': req_uuid})
                 return
+
+            # Pass 1: Register all exported class types
+            for name in dir(_solution):
+                if name.startswith('__'):
+                    continue
+                attr = getattr(_solution, name)
+                if isinstance(attr, type) and getattr(attr, '__module__', None) == _solution.__name__:
+                    _exported_class_types.add(attr)
+
+            # Pass 2: Build exports metadata and envelope variables
             exports = []
             for name in dir(_solution):
                 if name.startswith('__'):
                     continue
                 attr = getattr(_solution, name)
-                if getattr(attr, '__module__', None) != _solution.__name__:
-                    continue
                 if isinstance(attr, type):
-                    _exported_class_types.add(attr)
+                    if getattr(attr, '__module__', None) != _solution.__name__:
+                        continue
                     is_exc = issubclass(attr, BaseException)
                     mro_data = [
                         {'qualname': cls.__qualname__, 'module': cls.__module__}
@@ -376,6 +385,8 @@ def _handle(req: dict) -> None:
                         'magic_methods': methods_implemented
                     })
                 elif callable(attr):
+                    if getattr(attr, '__module__', None) != _solution.__name__:
+                        continue
                     exports.append({'name': name, 'type': 'function'})
                 else:
                     try:

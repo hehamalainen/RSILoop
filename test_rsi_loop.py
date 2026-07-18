@@ -399,6 +399,113 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         self.assertEqual(invalid_data["status"], "invalid")
         self.assertIn("API failure", invalid_data["error_message"])
 
+        # Test case 4: completed_promoted (with holdout)
+        shutil.rmtree(self.tmp_dir)
+        self.tmp_dir = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.tmp_dir, "prompt_templates"), exist_ok=True)
+        with open(os.path.join(self.tmp_dir, "baseline.txt"), "w") as f:
+            f.write("baseline prompt")
+
+        real_base_dir = os.path.dirname(os.path.abspath(__file__))
+        shutil.copy(os.path.join(real_base_dir, "candidate.sb.template"), self.tmp_dir)
+        shutil.copy(os.path.join(real_base_dir, "generator.sb.template"), self.tmp_dir)
+
+        # Set up a fake private holdout directory
+        private_dir = os.path.join(self.tmp_dir, "private", "benchmarks")
+        regex_dir = os.path.join(private_dir, "simple_regex_matcher")
+        os.makedirs(regex_dir, exist_ok=True)
+
+        problem_file = os.path.join(regex_dir, "problem.txt")
+        with open(problem_file, "w") as f:
+            f.write("regex problem")
+        harness_file = os.path.join(regex_dir, "test_holdout.py")
+        with open(harness_file, "w") as f:
+            f.write("regex harness")
+
+        prob_hash = hashlib.sha256(b"regex problem").hexdigest()
+        harn_hash = hashlib.sha256(b"regex harness").hexdigest()
+
+        # Calculate holdout_hashes.json
+        dummy_hash = hashlib.sha256(b"dummy").hexdigest()
+        holdout_hashes = {
+            "simple_regex_matcher/problem.txt": prob_hash,
+            "simple_regex_matcher/test_harness.py": dummy_hash,
+            "simple_regex_matcher/test_holdout.py": harn_hash
+        }
+        # Create a dummy test_harness.py so expected keys check passes
+        with open(os.path.join(regex_dir, "test_harness.py"), "w") as f:
+            f.write("dummy")
+
+        with open(os.path.join(private_dir, "holdout_hashes.json"), "w") as f:
+            json.dump(holdout_hashes, f)
+
+        # Mock prompt evaluations to trigger promotion gate
+        def fake_eval_prompt(prompt, run_dir, subdir, task_dir, tasks, tokens, ctx):
+            results = {t: {"success": True, "error": None} for t in tasks}
+            if "baseline" in subdir:
+                # Baseline scores
+                if "validation" in subdir:
+                    return 0.4, results, 10
+                else:
+                    if tasks:
+                        results[tasks[0]] = {"success": False, "error": "failed"}
+                    return 0.5, results, 10
+            else:
+                # Mutated / candidate scores (improvement)
+                if "validation" in subdir:
+                    return 0.7, results, 10
+                else:
+                    return 0.8, results, 10
+
+        def fake_run_eval(candidate_dir, harness_path):
+            if "huffman_coding" in harness_path:
+                return {"success": False, "log": "Ran 5 tests\nFAILED (failures=1)"}
+            else:
+                return {"success": True, "log": "Holdout passed"}
+
+        with mock.patch("rsi_loop.evaluate_prompt_on_tasks", side_effect=fake_eval_prompt), \
+             mock.patch("rsi_loop.call_codex_sandboxed", return_value=("mutated solution code", 15)), \
+             mock.patch("rsi_loop.mutate_prompt", return_value=("better prompt", 25)), \
+             mock.patch("rsi_loop.run_evaluation_on_candidate", side_effect=fake_run_eval), \
+             mock.patch("rsi_loop._list_optimization_benchmarks", return_value=["circular_buffer"]), \
+             mock.patch("rsi_loop._list_validation_benchmarks", return_value=["json_parser"]), \
+             mock.patch("rsi_loop.BASE_DIR", os.path.realpath(self.tmp_dir)), \
+             mock.patch("rsi_loop.PROMPTS_DIR", os.path.realpath(os.path.join(self.tmp_dir, "prompt_templates"))), \
+             mock.patch("rsi_loop.PRIVATE_DIR", os.path.realpath(private_dir)), \
+             mock.patch("rsi_loop.HISTORY_DIR", os.path.realpath(self.tmp_dir)), \
+             mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.realpath(os.path.join(self.tmp_dir, "best_manifest.json"))), \
+             mock.patch("rsi_loop.BASELINE_PROMPT_PATH", os.path.realpath(os.path.join(self.tmp_dir, "baseline.txt"))), \
+             self.assertRaises(SystemExit) as sy_exit:
+            main()
+        self.assertEqual(sy_exit.exception.code, 0)
+
+        # Check run manifest and best manifest pointer
+        runs = [d for d in os.listdir(self.tmp_dir) if d.startswith("run_")]
+        self.assertEqual(len(runs), 1)
+
+        run_manifest_path = os.path.join(self.tmp_dir, runs[0], "run_manifest.json")
+        with open(run_manifest_path) as f:
+            run_manifest = json.load(f)
+        self.assertEqual(run_manifest["status"], "completed_promoted")
+        self.assertTrue(run_manifest["promotion_gate_passed"])
+
+        best_manifest_path = os.path.join(self.tmp_dir, "best_manifest.json")
+        with open(best_manifest_path) as f:
+            pointer = json.load(f)
+        self.assertEqual(pointer["pointer_schema_version"], "2")
+
+        # Resolve target run_manifest path relative to the temporary base directory
+        target_path = os.path.join(self.tmp_dir, pointer["run_manifest_path"])
+        with open(target_path) as f:
+            best_manifest = json.load(f)
+        self.assertEqual(best_manifest["status"], "completed_promoted")
+
+        # Verify prompt persistence
+        meta_opt_path = os.path.join(self.tmp_dir, "prompt_templates", "inner_agent_best.txt")
+        with open(meta_opt_path) as f:
+            meta_opt_prompt = f.read()
+        self.assertEqual(meta_opt_prompt, "better prompt")
+
     # ── Test 35: Layout & symlink containment automation ─────────────────────
 
     def test_layout_and_symlink_containment(self):

@@ -747,5 +747,34 @@ if __name__ == "__main__":
         proxy.close()
         self.assertIsNotNone(proxy._proc.poll())
 
+    # ── Test 27: Export order independence and primitive constants ──────────
+
+    def test_export_order_independence(self):
+        _write_solution(self.candidate_dir, """
+class Node:
+    def __init__(self, val):
+        self.val = val
+
+# Alphabetically before class Node
+a_default = Node(42)
+ANSWER = 99
+items = [1, 2, 3]
+""")
+        h_order = _make_harness(self.candidate_dir, """
+import unittest
+class TestOrder(unittest.TestCase):
+    def test_exports(self):
+        from solution import Node, a_default, ANSWER, items
+        self.assertIsInstance(a_default, Node)
+        self.assertEqual(a_default.val, 42)
+        self.assertEqual(ANSWER, 99)
+        self.assertEqual(items, [1, 2, 3])
+if __name__ == "__main__":
+    unittest.main()
+""")
+        from evaluator import run_evaluation
+        res = run_evaluation(self.candidate_dir, h_order)
+        self.assertTrue(res["success"], f"Order-dependent export failed: {res.get('error')}")
+
 if __name__ == "__main__":
     unittest.main()
