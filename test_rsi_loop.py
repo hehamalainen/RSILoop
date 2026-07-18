@@ -581,5 +581,170 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         with mock.patch("os.path.exists", return_value=False):
             self.assertEqual(_get_codex_bin_path(), "/opt/homebrew/bin/codex")
 
+    # ── Test 37: Legacy best manifest startup archival and failure ──
+
+    def test_legacy_best_manifest_startup_archival_and_failure(self):
+        from rsi_loop import verify_existing_best_manifest_startup, load_and_verify_best_manifest, ExperimentInvalidError
+
+        test_dir = os.path.join(self.tmp_dir, "legacy_manifest_test")
+        os.makedirs(test_dir)
+        best_manifest_path = os.path.join(test_dir, "best_manifest.json")
+
+        # 1. Write a legacy manifest
+        legacy_data = {"status": "success", "some_data": 123}
+        with open(best_manifest_path, "w") as f:
+            json.dump(legacy_data, f)
+
+        with mock.patch("rsi_loop.BEST_MANIFEST_PATH", best_manifest_path), \
+             mock.patch("rsi_loop.BASE_DIR", test_dir):
+
+            # Test that loading legacy manifest returns None (raising RuntimeError inside load_and_verify_best_manifest)
+            self.assertIsNone(load_and_verify_best_manifest())
+
+            # Test that startup check raises ExperimentInvalidError
+            with self.assertRaises(ExperimentInvalidError) as ctx:
+                verify_existing_best_manifest_startup()
+            self.assertIn("was invalid/legacy", str(ctx.exception))
+
+            # Test that the legacy file was archived (not silently deleted)
+            self.assertFalse(os.path.exists(best_manifest_path))
+            files = os.listdir(test_dir)
+            archived_files = [f for f in files if f.startswith("best_manifest.json.archive_") and f.endswith(".backup")]
+            self.assertEqual(len(archived_files), 1)
+
+            # Test that loading after archival returns None
+            self.assertIsNone(load_and_verify_best_manifest())
+
+    # ── Test 38: Lock bound holdout mode verification and disagreement ──
+
+    def test_lock_bound_holdout_agreement(self):
+        from rsi_loop import verify_experiment_lock, RunContext, ExperimentInvalidError
+
+        test_dir = os.path.join(self.tmp_dir, "lock_holdout_test")
+        os.makedirs(test_dir)
+
+        # Initialize mock git repository
+        subprocess.run(["git", "init"], cwd=test_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=test_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=test_dir, check=True)
+
+        dummy_file = os.path.join(test_dir, "file.txt")
+        with open(dummy_file, "w") as f:
+            f.write("initial commit")
+        subprocess.run(["git", "add", "file.txt"], cwd=test_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "commit1"], cwd=test_dir, check=True, capture_output=True)
+
+        gitignore_path = os.path.join(test_dir, ".gitignore")
+        with open(gitignore_path, "w") as f:
+            f.write("experiment.lock\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=test_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add gitignore"], cwd=test_dir, check=True, capture_output=True)
+
+        res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=test_dir, capture_output=True, text=True, check=True)
+        commit_sha = res.stdout.strip()
+
+        lock_path = os.path.join(test_dir, "experiment.lock")
+
+        # Case 1: Environment ALLOW_NO_HOLDOUT is 1, but lock file allow_no_holdout is False (or missing) -> Disagreement -> Fails!
+        lock_data = {"approved_commit_sha": commit_sha}
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+
+        ctx = RunContext()
+        ctx.allow_no_holdout = True  # Simulated ALLOW_NO_HOLDOUT=1
+        with mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch.dict(os.environ, {"ALLOW_NO_HOLDOUT": "1"}):
+            with self.assertRaises(ExperimentInvalidError) as r_ctx:
+                verify_experiment_lock(ctx)
+            self.assertIn("disagrees with experiment.lock", str(r_ctx.exception))
+
+        # Case 2: Environment ALLOW_NO_HOLDOUT is 0/empty, but lock file allow_no_holdout is True -> Disagreement -> Fails!
+        lock_data = {"approved_commit_sha": commit_sha, "allow_no_holdout": True}
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+
+        ctx = RunContext()
+        ctx.allow_no_holdout = False  # Simulated ALLOW_NO_HOLDOUT=0
+        with mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch.dict(os.environ, {"ALLOW_NO_HOLDOUT": "0"}):
+            with self.assertRaises(ExperimentInvalidError) as r_ctx:
+                verify_experiment_lock(ctx)
+            self.assertIn("disagrees with experiment.lock", str(r_ctx.exception))
+
+        # Case 3: Both agree to allow no holdout (env="1", lock=True) -> Success!
+        ctx = RunContext()
+        ctx.allow_no_holdout = True
+        with mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch.dict(os.environ, {"ALLOW_NO_HOLDOUT": "1"}):
+            sha = verify_experiment_lock(ctx)
+            self.assertEqual(sha, commit_sha)
+            self.assertTrue(ctx.allow_no_holdout)
+
+        # Case 4: Both agree to require holdout (env omitted, lock=False) -> Success!
+        lock_data = {"approved_commit_sha": commit_sha, "allow_no_holdout": False}
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+
+        ctx = RunContext()
+        ctx.allow_no_holdout = False
+        with mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch.dict(os.environ, {}):
+            sha = verify_experiment_lock(ctx)
+            self.assertEqual(sha, commit_sha)
+            self.assertFalse(ctx.allow_no_holdout)
+
+    # ── Test 39: Holdout validation modes (missing holdout checks) ──
+
+    def test_holdout_validation_modes(self):
+        from rsi_loop import _main_exec, RunContext, ExperimentInvalidError
+
+        test_dir = os.path.join(self.tmp_dir, "holdout_validation_test")
+        os.makedirs(test_dir)
+
+        # Mock preflight hashes to be empty for simplicity
+        preflight_json = os.path.join(test_dir, "preflight_hashes.json")
+        with open(preflight_json, "w") as f:
+            json.dump({}, f)
+
+        # Case 1: allow_no_holdout is False, private holdout directory missing -> Invalid run!
+        ctx = RunContext()
+        ctx.allow_no_holdout = False
+
+        with mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch("rsi_loop.verify_experiment_lock", return_value="mock_sha"), \
+             mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.join(test_dir, "best_manifest.json")), \
+             mock.patch("rsi_loop.PREFLIGHT_HASHES_PATH", preflight_json), \
+             mock.patch("rsi_loop.EXPECTED_PREFLIGHT_KEYS", set()), \
+             mock.patch("rsi_loop.PRIVATE_DIR", os.path.join(test_dir, "rsi_loop_private")), \
+             mock.patch("rsi_loop.BASELINE_PROMPT_PATH", os.path.join(test_dir, "baseline.txt")):
+
+            with open(os.path.join(test_dir, "baseline.txt"), "w") as f:
+                f.write("baseline")
+
+            with self.assertRaises(ExperimentInvalidError) as r_ctx:
+                _main_exec(ctx)
+            self.assertIn("Private holdout directory is missing", str(r_ctx.exception))
+
+        # Case 2: allow_no_holdout is True, private holdout directory missing -> Proceeds past preflight (stops at paid call/smoke check)
+        ctx = RunContext()
+        ctx.allow_no_holdout = True
+
+        with mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch("rsi_loop.verify_experiment_lock", return_value="mock_sha"), \
+             mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.join(test_dir, "best_manifest.json")), \
+             mock.patch("rsi_loop.PREFLIGHT_HASHES_PATH", preflight_json), \
+             mock.patch("rsi_loop.EXPECTED_PREFLIGHT_KEYS", set()), \
+             mock.patch("rsi_loop.PRIVATE_DIR", os.path.join(test_dir, "rsi_loop_private")), \
+             mock.patch("rsi_loop.BASELINE_PROMPT_PATH", os.path.join(test_dir, "baseline.txt")), \
+             mock.patch("rsi_loop.run_smoke_and_canary", side_effect=RuntimeError("Stopped before paid execution")):
+
+            with open(os.path.join(test_dir, "baseline.txt"), "w") as f:
+                f.write("baseline")
+
+            with self.assertRaises(RuntimeError) as r_ctx:
+                _main_exec(ctx)
+            # Confirms we passed holdout checks and hit the mock smoke check!
+            self.assertEqual(str(r_ctx.exception), "Stopped before paid execution")
+
 if __name__ == "__main__":
     unittest.main()

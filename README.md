@@ -132,6 +132,16 @@ If the gate fails, baseline is retained, and pointer is updated only if no manif
 
 ---
 
+## No-Holdout Mode & Research Limitations
+
+For environments where the private holdout test suite (`simple_regex_matcher`) is unavailable (such as local testing or non-production environments), the harness supports a **No-Holdout Mode**.
+
+- **Enabling**: Set `ALLOW_NO_HOLDOUT=1` in the environment, and configure `"allow_no_holdout": true` inside the operator-approved `experiment.lock`. The harness enforces strict agreement between the environment and the lock file; any disagreement will abort the run immediately.
+- **Provenance Flag**: When No-Holdout Mode is active, any promoted manifest will record `"no_holdout_mode_active": true`.
+- **Research Limitations**: Without holdout validation, prompt optimization is susceptible to **overfitting** on the public/validation tasks. Promotion in this mode does not guarantee generalizable improvement and is intended solely for integration verification.
+
+---
+
 ## Credits
 
 Inspired by Weco AI's research on [AIDE²](https://weco.ai/blog): experimental evidence of consistent Level 1 recursive self-improvement in an AI research agent. The framing and bi-level structure draw from that work; this implementation does not reproduce or validate their findings.

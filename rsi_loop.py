@@ -456,7 +456,7 @@ def load_and_verify_best_manifest() -> dict | None:
         with open(BEST_MANIFEST_PATH) as f:
             ptr = json.load(f)
         if ptr.get("pointer_schema_version") != "2":
-            return ptr
+            raise RuntimeError(f"Unknown or legacy pointer schema version: {ptr.get('pointer_schema_version')}")
         path = os.path.realpath(os.path.join(BASE_DIR, ptr["run_manifest_path"]))
         expected_hash = ptr["run_manifest_sha256"]
 
@@ -476,6 +476,57 @@ def load_and_verify_best_manifest() -> dict | None:
     except Exception as e:
         sys.stderr.write(f"WARNING: load_and_verify_best_manifest error: {e}\n")
         return None
+
+def verify_existing_best_manifest_startup() -> None:
+    if not os.path.exists(BEST_MANIFEST_PATH):
+        return
+    try:
+        with open(BEST_MANIFEST_PATH) as f:
+            ptr = json.load(f)
+        if ptr.get("pointer_schema_version") != "2":
+            raise RuntimeError(f"Unknown or legacy pointer schema version: {ptr.get('pointer_schema_version')}")
+
+        target_path = ptr.get("run_manifest_path")
+        if not target_path:
+            raise RuntimeError("run_manifest_path missing from pointer")
+
+        full_path = os.path.realpath(os.path.join(BASE_DIR, target_path))
+        if not is_contained(full_path, os.path.realpath(HISTORY_DIR)):
+            raise RuntimeError(f"Pointer target {full_path} is not contained within HISTORY_DIR")
+        if os.path.basename(full_path) != "run_manifest.json":
+            raise RuntimeError(f"Pointer target filename {os.path.basename(full_path)} is not run_manifest.json")
+
+        if not os.path.exists(full_path):
+            raise RuntimeError(f"Target run manifest missing: {full_path}")
+
+        expected_hash = ptr.get("run_manifest_sha256")
+        actual_hash = _sha256_file(full_path)
+        if actual_hash != expected_hash:
+            raise RuntimeError(f"Manifest hash mismatch: expected {expected_hash}, got {actual_hash}")
+
+        with open(full_path) as f:
+            target_manifest = json.load(f)
+
+        status = target_manifest.get("status")
+        if status not in ["no_headroom", "completed_no_improvement", "completed_promoted", "invalid"]:
+            raise RuntimeError(f"Invalid target manifest status: {status}")
+
+    except Exception as e:
+        import shutil
+        timestamp = int(time.time())
+        backup_name = f"best_manifest.json.archive_{timestamp}.backup"
+        backup_path = os.path.join(BASE_DIR, backup_name)
+        try:
+            shutil.move(BEST_MANIFEST_PATH, backup_path)
+            sys.stdout.write(f"Archived legacy/invalid manifest to: {backup_path}\n")
+            sys.stdout.flush()
+        except Exception as move_err:
+            raise ExperimentInvalidError(f"Existing best_manifest.json is invalid ({e}), and failed to archive: {move_err}")
+
+        raise ExperimentInvalidError(
+            f"Existing best_manifest.json was invalid/legacy ({e}). It has been archived to {backup_name}. "
+            "The run is aborted to prevent running on top of unverifiable state."
+        )
 
 def update_best_manifest_pointer(manifest_path: str) -> None:
     manifest_hash = _sha256_file(manifest_path)
@@ -520,6 +571,18 @@ def verify_experiment_lock(ctx: RunContext) -> str:
     approved_sha = lock_data.get("approved_commit_sha")
     if not approved_sha:
         raise ExperimentInvalidError("approved_commit_sha missing from experiment.lock")
+
+    lock_allow_no_holdout = lock_data.get("allow_no_holdout", False)
+    if not isinstance(lock_allow_no_holdout, bool):
+        raise ExperimentInvalidError(f"allow_no_holdout in experiment.lock must be a boolean, got: {type(lock_allow_no_holdout).__name__}")
+
+    env_allow_no_holdout = os.environ.get("ALLOW_NO_HOLDOUT") == "1"
+    if env_allow_no_holdout != lock_allow_no_holdout:
+        raise ExperimentInvalidError(
+            f"Environment ALLOW_NO_HOLDOUT={os.environ.get('ALLOW_NO_HOLDOUT')} "
+            f"disagrees with experiment.lock allow_no_holdout={lock_allow_no_holdout}"
+        )
+    ctx.allow_no_holdout = lock_allow_no_holdout
 
     try:
         res_head = subprocess.run(
@@ -723,8 +786,19 @@ def run_smoke_and_canary(ctx: RunContext) -> tuple:
 
 def _main_exec(ctx: RunContext) -> None:
     ctx.current_stage = "preflight_verifications"
+    verify_existing_best_manifest_startup()
     approved_sha = verify_experiment_lock(ctx)
     verify_preflight_hashes()
+
+    # Verify holdout if no-holdout mode is not authorized
+    if not ctx.allow_no_holdout:
+        if not os.path.exists(PRIVATE_DIR):
+            raise ExperimentInvalidError("Private holdout directory is missing and no-holdout mode is not authorized")
+        problem_file = os.path.join(PRIVATE_DIR, "simple_regex_matcher", "problem.txt")
+        harness_file = os.path.join(PRIVATE_DIR, "simple_regex_matcher", "test_holdout.py")
+        if not os.path.exists(problem_file) or not os.path.exists(harness_file):
+            raise ExperimentInvalidError("Private holdout files simple_regex_matcher are missing and no-holdout mode is not authorized")
+        verify_holdout_hashes(PRIVATE_DIR)
 
     if not os.path.exists(BASELINE_PROMPT_PATH):
         raise ExperimentInvalidError(f"Baseline prompt not found at {BASELINE_PROMPT_PATH}")

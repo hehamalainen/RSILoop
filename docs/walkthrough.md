@@ -33,7 +33,7 @@ This document details the recent architectural improvements, containment validat
 ## 🧪 Verification Results
 
 The entire regression suite has been verified on the host machine:
-- **Discovered/Executed Tests**: 44 tests
+- **Discovered/Executed Tests**: 47 tests
 - **Skips/Warnings**: 0
 - **Unraisable Exceptions**: 0
-- **Overall Result**: All tests passed cleanly in under 5.0 seconds.
+- **Overall Result**: All tests passed cleanly.

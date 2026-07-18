@@ -63,5 +63,6 @@ flowchart TD
 
 ## 📈 Current Project State
 - All baseline benchmarks pass under the host-contained sandbox framework.
-- Active verification suite contains 44 regression and behavioral resource limit tests.
-- The pipeline supports promotion to `best_manifest.json` once a real experiment run is executed (no experiment has been run yet).
+- Active verification suite contains 47 regression and behavioral resource limit tests.
+- No experiment has run under the current frozen protocol, but a legacy experiment artifact exists.
+- The pipeline supports promotion to `best_manifest.json` once a real experiment run is executed under the approved protocol.
