@@ -1414,7 +1414,43 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             },
         )
 
+    def test_call_codex_sandboxed_cwd(self):
+        import rsi_loop
+        from rsi_loop import call_codex_sandboxed
+        ctx = RunContext()
+        ctx.codex_model = "gpt-5.6-sol"
+        ctx.lock_model = "gpt-5.6-sol"
+        ctx.model_resolved = "unavailable"
+        drift_stdout = "\n".join([
+            '{"type":"item.completed","item":{"type":"agent_message","text":"code"}}',
+            '{"type":"turn.completed","usage":{"output_tokens":1}}',
+        ])
+        captured_kwargs = []
 
+        def fake_run(command, **kwargs):
+            captured_kwargs.append(kwargs)
+            return mock.Mock(returncode=0, stdout=drift_stdout, stderr="")
+
+        candidate_dir = os.path.join(self.tmp_dir, "my_candidate_dir")
+        os.makedirs(candidate_dir, exist_ok=True)
+        real_candidate_dir = os.path.realpath(candidate_dir)
+
+        with mock.patch(
+            "rsi_loop._build_codex_run_scoped_home",
+            return_value=tempfile.mkdtemp(),
+        ), mock.patch(
+            "rsi_loop._build_generator_sb",
+            return_value="/exact/generator.sb",
+        ), mock.patch(
+            "rsi_loop._cleanup_codex_run_scoped_home",
+        ), mock.patch(
+            "rsi_loop.subprocess.run",
+            side_effect=fake_run,
+        ):
+            call_codex_sandboxed("prompt", "system", candidate_dir, ctx)
+
+        self.assertEqual(len(captured_kwargs), 1)
+        self.assertEqual(captured_kwargs[0].get("cwd"), real_candidate_dir)
 
     def test_smoke_version_gate(self):
         from rsi_loop import _run_codex_version_smoke_test

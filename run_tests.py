@@ -30,7 +30,7 @@ def main():
     sys.stdout.write(f"Discovered test cases: {discovered_count}\n")
 
     # Enforce the approved host-boundary regression floor.
-    MIN_TESTS = 61
+    MIN_TESTS = 62
     if discovered_count < MIN_TESTS:
         sys.stderr.write(f"FATAL: Discovered test count {discovered_count} is less than minimum {MIN_TESTS}\n")
         sys.exit(1)

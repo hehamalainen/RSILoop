@@ -709,7 +709,7 @@ def call_codex_sandboxed(
                 text=True,
                 timeout=120,
                 env=allowed_env,
-                cwd=BASE_DIR,
+                cwd=real_candidate_input_dir,
             )
         except (subprocess.SubprocessError, OSError) as error:
             ctx.unknown_token_state = True
