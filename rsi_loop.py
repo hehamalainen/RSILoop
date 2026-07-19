@@ -26,7 +26,6 @@ BEST_MANIFEST_PATH = os.path.join(BASE_DIR, "best_manifest.json")
 PREFLIGHT_HASHES_PATH = os.path.join(BASE_DIR, "preflight_hashes.json")
 
 TOKEN_CEILING = 50_000
-MODEL_RESOLUTION_SENTINEL = "resolve-at-canary"
 _EXPLICIT_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _CODEX_VERSION_RE = re.compile(
     r"^codex-cli\s+\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?$"

@@ -928,12 +928,12 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             ({"model": "gpt-5.6-sol"}, True),
         ]
         approved_sha = "a" * 40
- 
+
         def fake_git_run(command, **kwargs):
             if command[:2] == ["git", "status"]:
                 return mock.Mock(stdout="", stderr="", returncode=0)
             return mock.Mock(stdout=approved_sha + "\n", stderr="", returncode=0)
- 
+
         for index, (model_data, valid) in enumerate(cases):
             with self.subTest(model=model_data.get("model", "missing")):
                 case_dir = os.path.join(self.tmp_dir, f"model_case_{index}")
@@ -956,10 +956,10 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
                     else:
                         with self.assertRaises(ExperimentInvalidError):
                             verify_experiment_lock(ctx)
- 
+
     def test_codex_commands_propagate_model_flag(self):
         from rsi_loop import _build_canary_command, call_codex_sandboxed
- 
+
         ctx = RunContext()
         ctx.run_id = "model_flag_test"
         ctx.codex_model = "gpt-5.6-sol"
@@ -968,17 +968,17 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         self.assertEqual(canary_command.count("--model"), 1)
         idx = canary_command.index("--model")
         self.assertEqual(canary_command[idx + 1], "gpt-5.6-sol")
- 
+
         fake_stdout = "\n".join([
             '{"type":"item.completed","item":{"type":"agent_message","text":"code"}}',
             '{"type":"turn.completed","usage":{"output_tokens":1}}',
         ])
         captured_commands = []
- 
+
         def fake_run(command, **kwargs):
             captured_commands.append(command)
             return mock.Mock(returncode=0, stdout=fake_stdout, stderr="")
- 
+
         with mock.patch(
             "rsi_loop._build_codex_run_scoped_home",
             return_value=tempfile.mkdtemp(),
@@ -992,7 +992,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             side_effect=fake_run,
         ):
             call_codex_sandboxed("prompt", "system", self.tmp_dir, ctx)
- 
+
         self.assertEqual(len(captured_commands), 1)
         command = captured_commands[0]
         self.assertEqual(command.count("--model"), 1)
@@ -1071,7 +1071,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
                     raised.exception.stderr_summary,
                     expected_summary,
                 )
- 
+
     def test_stderr_summary_recovery(self):
         self.assertEqual(get_stderr_summary(None), "stderr was empty")
         self.assertEqual(get_stderr_summary("\n\n"), "stderr was empty")
