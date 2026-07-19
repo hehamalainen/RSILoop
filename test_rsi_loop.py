@@ -66,9 +66,9 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             self.assertIn(key, manifest)
             self.assertIsInstance(manifest[key], str)
             self.assertTrue(manifest[key])
-        self.assertEqual(manifest.get("model_resolved"), "gpt-5.6-sol")
-        self.assertEqual(manifest.get("model_name"), manifest["model_resolved"])
-        self.assertIn("model_requested", manifest)
+        self.assertEqual(manifest.get("model_resolved"), "unavailable")
+        self.assertIn("model_name", manifest)
+        self.assertEqual(manifest.get("model_requested"), manifest["model_name"])
 
     # ── Test 21: standard parse ───────────────────────────────────────────────
 
@@ -183,7 +183,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         ctx = RunContext()
         ctx.consumed_tokens = 2
         ctx.codex_model = "codex-mini-latest"
-        ctx.model_resolved = "gpt-5.6-sol"
+        ctx.model_resolved = "unavailable"
 
         with mock.patch("rsi_loop._build_codex_run_scoped_home", return_value=tempfile.mkdtemp()), \
              mock.patch("rsi_loop._build_generator_sb", return_value="/dev/null"), \
@@ -224,7 +224,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             ctx = RunContext()
             ctx.consumed_tokens = 0
             ctx.codex_model = "codex-mini-latest"
-            ctx.model_resolved = "gpt-5.6-sol"
+            ctx.model_resolved = "unavailable"
 
             with mock.patch("rsi_loop._build_codex_run_scoped_home", return_value=tempfile.mkdtemp()), \
                  mock.patch("rsi_loop._build_generator_sb", return_value="/dev/null"), \
@@ -389,7 +389,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         def fake_smoke(ctx):
             ctx.codex_version = "codex-cli 0.144.5"
             ctx.codex_cli_version = ctx.codex_version
-            ctx.model_resolved = "gpt-5.6-sol"
+            ctx.model_resolved = "unavailable"
             return ctx.codex_version, 50
 
         mock_smoke = mock.patch("rsi_loop.run_smoke_and_canary", side_effect=fake_smoke)
@@ -924,16 +924,16 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             ({"model": " gpt-5.6-sol "}, False),
             ({"model": "gpt 5.6"}, False),
             ({"model": "../gpt"}, False),
-            ({"model": "resolve-at-canary"}, True),
+            ({"model": "resolve-at-canary"}, False),
             ({"model": "gpt-5.6-sol"}, True),
         ]
         approved_sha = "a" * 40
-
+ 
         def fake_git_run(command, **kwargs):
             if command[:2] == ["git", "status"]:
                 return mock.Mock(stdout="", stderr="", returncode=0)
             return mock.Mock(stdout=approved_sha + "\n", stderr="", returncode=0)
-
+ 
         for index, (model_data, valid) in enumerate(cases):
             with self.subTest(model=model_data.get("model", "missing")):
                 case_dir = os.path.join(self.tmp_dir, f"model_case_{index}")
@@ -956,27 +956,29 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
                     else:
                         with self.assertRaises(ExperimentInvalidError):
                             verify_experiment_lock(ctx)
-
-    def test_codex_commands_omit_model_flag(self):
+ 
+    def test_codex_commands_propagate_model_flag(self):
         from rsi_loop import _build_canary_command, call_codex_sandboxed
-
+ 
         ctx = RunContext()
         ctx.run_id = "model_flag_test"
-        ctx.codex_model = "resolve-at-canary"
-        ctx.model_resolved = "gpt-5.6-sol"
+        ctx.codex_model = "gpt-5.6-sol"
+        ctx.lock_model = "gpt-5.6-sol"
         canary_command = _build_canary_command("/exact/generator.sb", ctx)
-        self.assertNotIn("--model", canary_command)
-
+        self.assertEqual(canary_command.count("--model"), 1)
+        idx = canary_command.index("--model")
+        self.assertEqual(canary_command[idx + 1], "gpt-5.6-sol")
+ 
         fake_stdout = "\n".join([
             '{"type":"item.completed","item":{"type":"agent_message","text":"code"}}',
-            '{"type":"turn.completed","model":"gpt-5.6-sol","usage":{"output_tokens":1}}',
+            '{"type":"turn.completed","usage":{"output_tokens":1}}',
         ])
         captured_commands = []
-
+ 
         def fake_run(command, **kwargs):
             captured_commands.append(command)
             return mock.Mock(returncode=0, stdout=fake_stdout, stderr="")
-
+ 
         with mock.patch(
             "rsi_loop._build_codex_run_scoped_home",
             return_value=tempfile.mkdtemp(),
@@ -990,10 +992,12 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             side_effect=fake_run,
         ):
             call_codex_sandboxed("prompt", "system", self.tmp_dir, ctx)
-
+ 
         self.assertEqual(len(captured_commands), 1)
         command = captured_commands[0]
-        self.assertNotIn("--model", command)
+        self.assertEqual(command.count("--model"), 1)
+        idx2 = command.index("--model")
+        self.assertEqual(command[idx2 + 1], "gpt-5.6-sol")
 
     def test_subprocess_stdout_stderr_truncation(self):
         from rsi_loop import _run_codex_canary
@@ -1044,7 +1048,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         long_stderr_cases = [
             (
                 "WARNING " + ("w" * 70000),
-                "stderr contained only WARNING lines",
+                "WARNING " + ("w" * 70000),
             ),
             (
                 "WARNING " + ("w" * 70000) + "\nfatal final line",
@@ -1052,9 +1056,9 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             ),
         ]
         for raw_stderr, expected_summary in long_stderr_cases:
-            with self.subTest(expected_summary=expected_summary):
+            with self.subTest(expected_summary=expected_summary[:30]):
                 ctx = RunContext()
-                ctx.codex_model = "resolve-at-canary"
+                ctx.codex_model = "gpt-5.6-sol"
                 result = mock.Mock(returncode=2, stdout="", stderr=raw_stderr)
                 with mock.patch("rsi_loop.subprocess.run", return_value=result):
                     with self.assertRaises(ExperimentInvalidError) as raised:
@@ -1067,13 +1071,13 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
                     raised.exception.stderr_summary,
                     expected_summary,
                 )
-
+ 
     def test_stderr_summary_recovery(self):
         self.assertEqual(get_stderr_summary(None), "stderr was empty")
         self.assertEqual(get_stderr_summary("\n\n"), "stderr was empty")
         self.assertEqual(
             get_stderr_summary("  WARNING first\nWARNING second\n"),
-            "stderr contained only WARNING lines",
+            "WARNING second",
         )
         self.assertEqual(
             get_stderr_summary("fatal one\nWARNING later\nfatal final\n"),
@@ -1174,7 +1178,8 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             "Refusing to create helper binaries under temporary dir"
         )
         ctx = RunContext()
-        ctx.codex_model = "resolve-at-canary"
+        ctx.codex_model = "gpt-5.6-sol"
+        ctx.lock_model = "gpt-5.6-sol"
         with mock.patch(
             "rsi_loop.subprocess.run",
             return_value=mock.Mock(returncode=1, stdout="", stderr=warning),
@@ -1213,13 +1218,16 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
 
         ctx = RunContext()
         ctx.run_id = f"host_boundary_{os.getpid()}_{id(self)}"
-        ctx.codex_model = "resolve-at-canary"
+        ctx.codex_model = "gpt-5.6-sol"
+        ctx.lock_model = "gpt-5.6-sol"
         home = _build_codex_run_scoped_home(ctx, ctx.run_id, dummy_source)
         try:
             sb_path = _build_generator_sb(home, rsi_loop.BASE_DIR)
             self.assertEqual(sb_path, os.path.join(home, "generator.sb"))
             command = _build_canary_command(sb_path, ctx)
-            self.assertNotIn("--model", command)
+            self.assertEqual(command.count("--model"), 1)
+            idx = command.index("--model")
+            self.assertEqual(command[idx + 1], "gpt-5.6-sol")
             result = subprocess.run(
                 command,
                 input="Reply with exactly one word: ready",
@@ -1293,8 +1301,9 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             with self.subTest(index=index):
                 ctx = RunContext()
                 ctx.run_id = f"cleanup_{index}"
-                ctx.codex_model = "resolve-at-canary"
-                ctx.model_resolved = "gpt-5.6-sol"
+                ctx.codex_model = "gpt-5.6-sol"
+                ctx.lock_model = "gpt-5.6-sol"
+                ctx.model_resolved = "unavailable"
 
                 def expanduser(path):
                     if path == "~/.codex/auth.json":
@@ -1327,116 +1336,52 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             _run_codex_canary,
         )
 
+        # Before lock validation: all model manifest fields must be "unavailable"
+        pre_ctx = RunContext()
+        self.assertEqual(
+            _model_manifest_fields(pre_ctx),
+            {
+                "model_requested": "unavailable",
+                "model_resolved": "unavailable",
+                "model_name": "unavailable",
+            },
+        )
+
         canary_stdout = "\n".join([
-            '{"type":"thread.started","thread_id":"test","model_resolved":"gpt-5.6-sol"}',
+            '{"type":"thread.started","thread_id":"test"}',
             '{"type":"turn.started"}',
             '{"type":"item.completed","item":{"type":"agent_message","text":"ready"}}',
-            '{"type":"turn.completed","model":"gpt-5.6-sol","usage":{"output_tokens":1}}',
+            '{"type":"turn.completed","usage":{"output_tokens":1}}',
         ])
         ctx = RunContext()
-        ctx.codex_model = "resolve-at-canary"
+        ctx.codex_model = "gpt-5.6-sol"
+        ctx.lock_model = "gpt-5.6-sol"
         with mock.patch(
             "rsi_loop.subprocess.run",
             return_value=mock.Mock(returncode=0, stdout=canary_stdout, stderr=""),
         ):
             self.assertEqual(_run_codex_canary("/exact/generator.sb", {}, ctx), 1)
-        self.assertEqual(ctx.model_resolved, "gpt-5.6-sol")
+        self.assertEqual(ctx.model_resolved, "unavailable")
         self.assertEqual(
             _model_manifest_fields(ctx),
             {
-                "model_requested": "resolve-at-canary",
-                "model_resolved": "gpt-5.6-sol",
+                "model_requested": "gpt-5.6-sol",
+                "model_resolved": "unavailable",
                 "model_name": "gpt-5.6-sol",
             },
         )
 
-        missing_model_stdout = (
-            '{"type":"turn.completed","usage":{"output_tokens":1}}'
-        )
-        missing_ctx = RunContext()
-        missing_ctx.codex_model = "resolve-at-canary"
-        with mock.patch(
-            "rsi_loop.subprocess.run",
-            return_value=mock.Mock(
-                returncode=0,
-                stdout=missing_model_stdout,
-                stderr="",
-            ),
-        ):
-            with self.assertRaises(ExperimentInvalidError) as raised:
-                _run_codex_canary("/exact/generator.sb", {}, missing_ctx)
-        self.assertIn("no parseable resolved model", str(raised.exception))
-        self.assertIsNone(missing_ctx.model_resolved)
-        self.assertEqual(missing_ctx.consumed_tokens, 1)
-        self.assertFalse(missing_ctx.unknown_token_state)
-
-        explicit_ctx = RunContext()
-        explicit_ctx.lock_model = "gpt-5.5"
-        explicit_ctx.codex_model = "gpt-5.5"
-        with mock.patch(
-            "rsi_loop.subprocess.run",
-            return_value=mock.Mock(returncode=0, stdout=canary_stdout, stderr=""),
-        ):
-            with self.assertRaises(ExperimentInvalidError) as explicit_error:
-                _run_codex_canary("/exact/generator.sb", {}, explicit_ctx)
-        self.assertIn("expected explicit lock model", str(explicit_error.exception))
-        self.assertEqual(explicit_ctx.consumed_tokens, 1)
-        self.assertEqual(explicit_ctx.model_resolved, "gpt-5.6-sol")
-        self.assertEqual(
-            _model_manifest_fields(explicit_ctx)["model_resolved"],
-            "gpt-5.6-sol",
-        )
-
-        nested_model_ctx = RunContext()
-        nested_model_ctx.codex_model = "resolve-at-canary"
-        nested_model_stdout = (
-            '{"type":"turn.completed","turn":{"model":"gpt-5.6-sol"},'
-            '"usage":{"output_tokens":1}}'
-        )
-        with mock.patch(
-            "rsi_loop.subprocess.run",
-            return_value=mock.Mock(
-                returncode=0,
-                stdout=nested_model_stdout,
-                stderr="",
-            ),
-        ):
-            with self.assertRaises(ExperimentInvalidError) as nested_error:
-                _run_codex_canary("/exact/generator.sb", {}, nested_model_ctx)
-        self.assertIn("no parseable resolved model", str(nested_error.exception))
-        self.assertEqual(nested_model_ctx.consumed_tokens, 1)
-        self.assertFalse(nested_model_ctx.unknown_token_state)
-
-        conflicting_model_ctx = RunContext()
-        conflicting_model_ctx.codex_model = "resolve-at-canary"
-        conflicting_model_stdout = (
-            '{"type":"turn.completed","model":"gpt-5.6-sol",'
-            '"model_resolved":"gpt-5.5","usage":{"output_tokens":1}}'
-        )
-        with mock.patch(
-            "rsi_loop.subprocess.run",
-            return_value=mock.Mock(
-                returncode=0,
-                stdout=conflicting_model_stdout,
-                stderr="",
-            ),
-        ):
-            with self.assertRaises(ExperimentInvalidError) as conflict_error:
-                _run_codex_canary("/exact/generator.sb", {}, conflicting_model_ctx)
-        self.assertIn("conflicting resolved models", str(conflict_error.exception))
-        self.assertEqual(conflicting_model_ctx.consumed_tokens, 1)
-        self.assertFalse(conflicting_model_ctx.unknown_token_state)
-
-    def test_model_drift_invariant(self):
-        from rsi_loop import call_codex_sandboxed
+    def test_model_drift_not_enforced_and_resolved_unavailable(self):
+        from rsi_loop import call_codex_sandboxed, _model_manifest_fields
 
         ctx = RunContext()
         ctx.run_id = "drift_test"
-        ctx.codex_model = "resolve-at-canary"
-        ctx.model_resolved = "gpt-5.6-sol"
+        ctx.codex_model = "gpt-5.6-sol"
+        ctx.lock_model = "gpt-5.6-sol"
+        ctx.model_resolved = "unavailable"
         drift_stdout = "\n".join([
             '{"type":"item.completed","item":{"type":"agent_message","text":"code"}}',
-            '{"type":"turn.completed","model":"gpt-5.5","usage":{"output_tokens":1}}',
+            '{"type":"turn.completed","usage":{"output_tokens":1}}',
         ])
         captured_commands = []
 
@@ -1456,47 +1401,20 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             "rsi_loop.subprocess.run",
             side_effect=fake_run,
         ):
-            with self.assertRaises(ExperimentInvalidError) as raised:
-                call_codex_sandboxed("prompt", "system", self.tmp_dir, ctx)
-        self.assertIn("Model drift detected", str(raised.exception))
-        self.assertFalse(ctx.unknown_token_state)
-        self.assertEqual(ctx.consumed_tokens, 1)
-        self.assertNotIn("--model", captured_commands[0])
+            code, tokens = call_codex_sandboxed("prompt", "system", self.tmp_dir, ctx)
+        self.assertEqual(code, "code")
+        self.assertEqual(tokens, 1)
+        self.assertEqual(ctx.model_resolved, "unavailable")
+        self.assertEqual(
+            _model_manifest_fields(ctx),
+            {
+                "model_requested": "gpt-5.6-sol",
+                "model_resolved": "unavailable",
+                "model_name": "gpt-5.6-sol",
+            },
+        )
 
-        missing_ctx = RunContext()
-        missing_ctx.run_id = "missing_subsequent_model_test"
-        missing_ctx.codex_model = "resolve-at-canary"
-        missing_ctx.model_resolved = "gpt-5.6-sol"
-        missing_stdout = "\n".join([
-            '{"type":"item.completed","item":{"type":"agent_message","text":"code"}}',
-            '{"type":"turn.completed","usage":{"output_tokens":1}}',
-        ])
-        with mock.patch(
-            "rsi_loop._build_codex_run_scoped_home",
-            return_value=tempfile.mkdtemp(),
-        ), mock.patch(
-            "rsi_loop._build_generator_sb",
-            return_value="/exact/generator.sb",
-        ), mock.patch(
-            "rsi_loop._cleanup_codex_run_scoped_home",
-        ), mock.patch(
-            "rsi_loop.subprocess.run",
-            return_value=mock.Mock(
-                returncode=0,
-                stdout=missing_stdout,
-                stderr="",
-            ),
-        ):
-            with self.assertRaises(ExperimentInvalidError) as missing_error:
-                call_codex_sandboxed(
-                    "prompt",
-                    "system",
-                    self.tmp_dir,
-                    missing_ctx,
-                )
-        self.assertIn("model resolution failed", str(missing_error.exception))
-        self.assertEqual(missing_ctx.consumed_tokens, 1)
-        self.assertFalse(missing_ctx.unknown_token_state)
+
 
     def test_smoke_version_gate(self):
         from rsi_loop import _run_codex_version_smoke_test
@@ -1585,7 +1503,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         self.assertIn("injected cleanup failure", manifest["cleanup_error"])
         self.assertEqual(
             manifest["stderr_summary"],
-            "stderr contained only WARNING lines",
+            "WARNING primary diagnostic",
         )
         self.assertEqual(
             manifest["error_stderr"],

@@ -75,7 +75,7 @@ class RunContext:
         self.codex_cli_version = "unavailable"
         self.lock_model = None
         self.codex_model = None
-        self.model_resolved = None
+        self.model_resolved = "unavailable"
         self.sw_vers = "unavailable"
         self.python_version = sys.version
         self.created_codex_home = None
@@ -126,7 +126,7 @@ def get_stderr_summary(stderr: str | bytes | None) -> str:
         line for line in lines if not line.lstrip().startswith("WARNING")
     ]
     if not non_warnings:
-        return "stderr contained only WARNING lines"
+        return lines[-1]
     return non_warnings[-1]
 
 # ── Containment Helpers ───────────────────────────────────────────────────────
@@ -152,31 +152,12 @@ def check_parent_symlinks(path: str):
 
 # ── JSONL parsing ─────────────────────────────────────────────────────────────
 
-def _resolved_model_candidates(event: dict) -> list[str]:
-    if event.get("type") != "turn.completed":
-        return []
-    candidates = []
-    for key in ("model_resolved", "model"):
-        if key not in event:
-            continue
-        value = event[key]
-        if not isinstance(value, str) or not value.strip():
-            raise ExperimentInvalidError(
-                f"Codex turn.completed {key} must be a nonblank string"
-            )
-        candidates.append(value.strip())
-    return candidates
-
-
 def parse_codex_jsonl_output(
     stdout_lines: list,
-    *,
-    require_model: bool = False,
 ) -> tuple:
     code = ""
     usage_data: dict | None = None
     turn_completed_count = 0
-    resolved_models = []
 
     for line in stdout_lines:
         line = line.strip()
@@ -189,8 +170,6 @@ def parse_codex_jsonl_output(
 
         if not isinstance(event, dict):
             raise ExperimentInvalidError("Codex JSONL event must be an object")
-        if require_model:
-            resolved_models.extend(_resolved_model_candidates(event))
 
         etype = event.get("type")
         if etype == "item.completed":
@@ -216,17 +195,6 @@ def parse_codex_jsonl_output(
     if output_tokens < 0:
         raise ExperimentInvalidError(f"output_tokens must be non-negative, got: {output_tokens}")
 
-    if require_model:
-        unique_models = set(resolved_models)
-        if not unique_models:
-            raise ExperimentInvalidError(
-                "Codex JSONL stream has no parseable resolved model"
-            )
-        if len(unique_models) != 1:
-            raise ExperimentInvalidError(
-                f"Codex JSONL stream reports conflicting resolved models: {sorted(unique_models)}"
-            )
-        return code, usage_data, resolved_models[0]
     return code, usage_data
 
 def extract_code(raw_output: str) -> str:
@@ -580,34 +548,8 @@ def _build_canary_command(sb_path: str, ctx: RunContext) -> list[str]:
         _get_codex_bin_path(), "exec", "-",
         "--ephemeral",
         "--json",
+        "--model", ctx.codex_model,
     ]
-
-
-def _validate_canary_model(ctx: RunContext, resolved_model: str) -> None:
-    ctx.model_resolved = resolved_model
-    requested_model = ctx.lock_model or ctx.codex_model
-    if requested_model is None:
-        raise ExperimentInvalidError("Lock model was not validated before canary")
-    if (
-        requested_model != MODEL_RESOLUTION_SENTINEL
-        and resolved_model != requested_model
-    ):
-        raise ExperimentInvalidError(
-            f"Canary resolved model {resolved_model!r}, expected explicit lock model "
-            f"{requested_model!r}"
-        )
-
-
-def _enforce_model_invariant(ctx: RunContext, resolved_model: str) -> None:
-    if not isinstance(ctx.model_resolved, str) or not ctx.model_resolved:
-        raise ExperimentInvalidError(
-            "Canary model_resolved is unavailable before a subsequent Codex call"
-        )
-    if resolved_model != ctx.model_resolved:
-        raise ExperimentInvalidError(
-            f"Model drift detected: canary resolved {ctx.model_resolved!r}, "
-            f"subsequent call resolved {resolved_model!r}"
-        )
 
 
 def _raise_launch_failure(label: str, error: BaseException) -> None:
@@ -715,20 +657,7 @@ def _run_codex_canary(
         ) from e
 
     ctx.consumed_tokens += tokens
-    try:
-        _, _, resolved_model = parse_codex_jsonl_output(
-            stdout.splitlines(),
-            require_model=True,
-        )
-    except ExperimentInvalidError as error:
-        raise ExperimentInvalidError(
-            f"Canary model resolution failed: {error}",
-            stdout=raw_stdout,
-            stderr=raw_stderr,
-            stderr_summary=stderr_summary,
-        ) from error
-
-    ctx.model_resolved = resolved_model
+    ctx.model_resolved = "unavailable"
     if ctx.consumed_tokens > TOKEN_CEILING:
         raise ExperimentInvalidError(
             f"Token ceiling breached during canary: {ctx.consumed_tokens} > {TOKEN_CEILING}",
@@ -736,15 +665,6 @@ def _run_codex_canary(
             stderr=raw_stderr,
             stderr_summary=stderr_summary,
         )
-    try:
-        _validate_canary_model(ctx, resolved_model)
-    except ExperimentInvalidError as error:
-        raise ExperimentInvalidError(
-            str(error),
-            stdout=raw_stdout,
-            stderr=raw_stderr,
-            stderr_summary=stderr_summary,
-        ) from error
     sys.stderr.write(f"[canary] API access verified. Canary output tokens: {tokens}\n")
     sys.stderr.flush()
     return tokens
@@ -778,6 +698,7 @@ def call_codex_sandboxed(
             "-s", "read-only",
             "--ephemeral",
             "--json",
+            "--model", ctx.codex_model,
             "-C", real_candidate_input_dir,
         ]
 
@@ -828,19 +749,6 @@ def call_codex_sandboxed(
             ) from e
 
         ctx.consumed_tokens += tokens
-        try:
-            _, _, resolved_model = parse_codex_jsonl_output(
-                stdout.splitlines(),
-                require_model=True,
-            )
-        except ExperimentInvalidError as error:
-            raise ExperimentInvalidError(
-                f"Codex call model resolution failed: {error}",
-                stdout=raw_stdout,
-                stderr=raw_stderr,
-                stderr_summary=stderr_summary,
-            ) from error
-
         if ctx.consumed_tokens > TOKEN_CEILING:
             raise ExperimentInvalidError(
                 f"Token ceiling breached: {ctx.consumed_tokens} > {TOKEN_CEILING}",
@@ -848,15 +756,6 @@ def call_codex_sandboxed(
                 stderr=raw_stderr,
                 stderr_summary=stderr_summary,
             )
-        try:
-            _enforce_model_invariant(ctx, resolved_model)
-        except ExperimentInvalidError as error:
-            raise ExperimentInvalidError(
-                str(error),
-                stdout=raw_stdout,
-                stderr=raw_stderr,
-                stderr_summary=stderr_summary,
-            ) from error
 
         if expect_json_code:
             return extract_code(raw_msg), tokens
@@ -1130,13 +1029,9 @@ def verify_experiment_lock(ctx: RunContext) -> str:
         raise ExperimentInvalidError("approved_commit_sha missing from experiment.lock")
 
     model = lock_data.get("model")
-    if not isinstance(model, str) or (
-        model != MODEL_RESOLUTION_SENTINEL
-        and not _EXPLICIT_MODEL_RE.fullmatch(model)
-    ):
+    if not isinstance(model, str) or not _EXPLICIT_MODEL_RE.fullmatch(model) or model == "resolve-at-canary":
         raise ExperimentInvalidError(
-            "model in experiment.lock must be exactly 'resolve-at-canary' "
-            "or a valid explicit model name"
+            "model in experiment.lock must be a valid explicit model name"
         )
     ctx.lock_model = model
     ctx.codex_model = model
@@ -1754,10 +1649,11 @@ def _terminal_environment_metadata(ctx: RunContext) -> dict:
 
 
 def _model_manifest_fields(ctx: RunContext) -> dict:
+    model_val = ctx.lock_model or ctx.codex_model or "unavailable"
     return {
-        "model_requested": ctx.lock_model or ctx.codex_model,
-        "model_resolved": ctx.model_resolved,
-        "model_name": ctx.model_resolved,
+        "model_requested": model_val,
+        "model_resolved": "unavailable",
+        "model_name": model_val,
     }
 
 
