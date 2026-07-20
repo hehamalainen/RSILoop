@@ -84,6 +84,13 @@ class RunContext:
         self.unknown_token_state = False
         self.current_stage = "pre-init"
         self.allow_no_holdout = os.environ.get("ALLOW_NO_HOLDOUT") == "1"
+        self.created_canary_dir = None
+        self.canary_candidate_relpath = "unknown"
+        self.lock_remote_url = "unknown"
+        self.configured_origin_url = "unknown"
+        self.local_head_sha = "unknown"
+        self.remote_main_sha = "unknown"
+        self.operator_report = {}
 
 
 def normalize_and_truncate_stream(
@@ -541,14 +548,101 @@ def _codex_environment(codex_home: str) -> dict:
     }
 
 
-def _build_canary_command(sb_path: str, ctx: RunContext) -> list[str]:
+def _build_codex_command(
+    sb_path: str,
+    model: str,
+    candidate_dir: str,
+) -> list[str]:
     return [
         "sandbox-exec", "-f", sb_path,
         _get_codex_bin_path(), "exec", "-",
+        "-s", "read-only",
         "--ephemeral",
         "--json",
-        "--model", ctx.codex_model,
+        "--model", model,
+        "-C", candidate_dir,
     ]
+
+
+def _validate_canary_dir(path: str, expected_parent: str, temp_home: str) -> None:
+    if not expected_parent:
+        raise ExperimentInvalidError("Expected parent directory is not set")
+    if not temp_home:
+        raise ExperimentInvalidError("Credential temp home is not set")
+
+    # 1. lstat checks on path itself (first, before resolving realpath)
+    try:
+        stat_info = os.lstat(path)
+    except OSError as e:
+        raise ExperimentInvalidError(f"Canary candidate directory {path} does not exist: {e}")
+
+    import stat as stat_mod
+    if stat_mod.S_ISLNK(stat_info.st_mode):
+        raise ExperimentInvalidError(f"Canary candidate directory {path} is a symlink")
+    if not stat_mod.S_ISDIR(stat_info.st_mode):
+        raise ExperimentInvalidError(f"Canary candidate directory {path} is not a directory")
+
+    # Owner check on path
+    if stat_info.st_uid != os.getuid():
+        raise ExperimentInvalidError(f"Canary candidate directory {path} st_uid {stat_info.st_uid} does not match current UID {os.getuid()}")
+
+    # Mode check on path (exactly 0o700)
+    if (stat_info.st_mode & 0o777) != 0o700:
+        raise ExperimentInvalidError(f"Canary candidate directory {path} mode {oct(stat_info.st_mode & 0o777)} is not 0o700")
+
+    # 2. lstat checks on expected_parent
+    try:
+        parent_stat = os.lstat(expected_parent)
+    except OSError as e:
+        raise ExperimentInvalidError(f"Expected parent directory {expected_parent} does not exist: {e}")
+
+    if stat_mod.S_ISLNK(parent_stat.st_mode):
+        raise ExperimentInvalidError(f"Expected parent directory {expected_parent} is a symlink")
+    if not stat_mod.S_ISDIR(parent_stat.st_mode):
+        raise ExperimentInvalidError(f"Expected parent directory {expected_parent} is not a directory")
+    if parent_stat.st_uid != os.getuid():
+        raise ExperimentInvalidError(f"Expected parent directory {expected_parent} st_uid {parent_stat.st_uid} does not match current UID {os.getuid()}")
+
+    # 3. Containment check of expected_parent under HISTORY_DIR
+    real_parent = os.path.realpath(expected_parent)
+    real_history = os.path.realpath(HISTORY_DIR)
+    if os.path.commonpath([real_parent, real_history]) != real_history:
+        raise ExperimentInvalidError("Expected parent directory is not under HISTORY_DIR")
+
+    real_path = os.path.realpath(path)
+    real_temp_home = os.path.realpath(temp_home)
+
+    # 4. Exact basename check
+    if os.path.basename(path) != "canary_candidate":
+        raise ExperimentInvalidError(f"Canary candidate directory name is not 'canary_candidate', got: {os.path.basename(path)}")
+
+    # 5. Exact parent check
+    if os.path.dirname(real_path) != real_parent:
+        raise ExperimentInvalidError("Canary candidate directory parent is not expected_parent")
+
+    # 6. Containment checks
+    # Lexical:
+    lex_common = os.path.commonpath([os.path.abspath(path), os.path.abspath(expected_parent)])
+    if lex_common != os.path.abspath(expected_parent):
+        raise ExperimentInvalidError("Canary candidate directory lexical containment check failed")
+    # Resolved:
+    res_common = os.path.commonpath([real_path, real_parent])
+    if res_common != real_parent:
+        raise ExperimentInvalidError("Canary candidate directory resolved containment check failed")
+
+    # 7. Must be outside temp_home
+    home_common = os.path.commonpath([real_path, real_temp_home])
+    if home_common == real_temp_home:
+        raise ExperimentInvalidError("Canary candidate directory must be outside the credential home directory")
+
+    # Emptiness check
+    if os.listdir(real_path) != []:
+        raise ExperimentInvalidError(f"Canary candidate directory {path} is not empty")
+
+
+def _cleanup_canary_dir(path: str, expected_parent: str, temp_home: str) -> None:
+    _validate_canary_dir(path, expected_parent, temp_home)
+    shutil.rmtree(os.path.realpath(path))
 
 
 def _raise_launch_failure(label: str, error: BaseException) -> None:
@@ -566,7 +660,7 @@ def _raise_launch_failure(label: str, error: BaseException) -> None:
     ) from error
 
 
-def _run_codex_version_smoke_test(sb_path: str, env: dict) -> str:
+def _run_codex_version_smoke_test(sb_path: str, env: dict, candidate_dir: str) -> str:
     codex_bin = _get_codex_bin_path()
     cmd = ["sandbox-exec", "-f", sb_path, codex_bin, "--version"]
     try:
@@ -576,7 +670,7 @@ def _run_codex_version_smoke_test(sb_path: str, env: dict) -> str:
             text=True,
             timeout=15,
             env=env,
-            cwd=BASE_DIR,
+            cwd=candidate_dir,
         )
     except (subprocess.SubprocessError, OSError) as error:
         _raise_launch_failure("Codex smoke test", error)
@@ -605,10 +699,10 @@ def _run_codex_version_smoke_test(sb_path: str, env: dict) -> str:
     return version
 
 def _run_codex_canary(
-    sb_path: str, env: dict, ctx: RunContext
+    sb_path: str, env: dict, ctx: RunContext, canary_candidate_dir: str
 ) -> int:
     canary_prompt = "Reply with exactly one word: ready"
-    cmd = _build_canary_command(sb_path, ctx)
+    cmd = _build_codex_command(sb_path, ctx.codex_model, canary_candidate_dir)
     try:
         res = subprocess.run(
             cmd,
@@ -617,7 +711,7 @@ def _run_codex_canary(
             text=True,
             timeout=60,
             env=env,
-            cwd=BASE_DIR,
+            cwd=canary_candidate_dir,
         )
     except (subprocess.SubprocessError, OSError) as error:
         ctx.unknown_token_state = True
@@ -690,16 +784,7 @@ def call_codex_sandboxed(
 
         allowed_env = _codex_environment(real_temp_home)
 
-        codex_bin = _get_codex_bin_path()
-        cmd = [
-            "sandbox-exec", "-f", sb_path,
-            codex_bin, "exec", "-",
-            "-s", "read-only",
-            "--ephemeral",
-            "--json",
-            "--model", ctx.codex_model,
-            "-C", real_candidate_input_dir,
-        ]
+        cmd = _build_codex_command(sb_path, ctx.codex_model, real_candidate_input_dir)
 
         try:
             res = subprocess.run(
@@ -890,6 +975,275 @@ def _write_once_fsynced_manifest(path: str, data: dict) -> None:
 
     os.chmod(path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)  # 0o444
 
+
+def publish_terminal_manifest_and_report(ctx: RunContext, manifest_path: str, manifest_data: dict, promote: bool = True) -> None:
+    manifest_bytes = json.dumps(manifest_data, indent=2).encode('utf-8')
+    manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+
+    ctx.operator_report["status"] = manifest_data["status"]
+    ctx.operator_report["manifest_sha256"] = manifest_sha
+    ctx.operator_report["model_requested"] = manifest_data.get("model_requested", "unknown")
+    ctx.operator_report["model_resolved"] = manifest_data.get("model_resolved", "unknown")
+    ctx.operator_report["tokens"]["cumulative_consumed"] = ctx.consumed_tokens
+
+    common_keys = ["run_id", "approved_commit_sha", "lock_file_hash"]
+    for key in common_keys:
+        val_m = manifest_data.get(key)
+        if key == "approved_commit_sha":
+            val_r = ctx.operator_report["lock_contents"]["approved_commit_sha"]
+        elif key == "lock_file_hash":
+            val_r = ctx.lock_file_hash
+        else:
+            val_r = ctx.operator_report.get(key)
+        if val_m != val_r:
+            raise ExperimentInvalidError(f"Field mismatch between manifest and report for key '{key}': {val_m} vs {val_r}")
+
+    report_path = os.path.join(ctx.run_dir, "operator_report.json")
+    tmp_manifest_path = manifest_path + ".tmp"
+    if os.path.exists(tmp_manifest_path):
+        try:
+            os.remove(tmp_manifest_path)
+        except Exception:
+            pass
+
+    try:
+        m_fd = os.open(tmp_manifest_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(m_fd, 'wb') as mf:
+            mf.write(manifest_bytes)
+            mf.flush()
+            os.fsync(mf.fileno())
+    except Exception as e:
+        if os.path.exists(tmp_manifest_path):
+            try:
+                os.remove(tmp_manifest_path)
+            except Exception:
+                pass
+        raise ExperimentInvalidError(f"Failed to write staging manifest: {e}")
+
+    _write_atomic_report(report_path, ctx.operator_report, seal=False)
+
+    try:
+        os.replace(tmp_manifest_path, manifest_path)
+    except Exception as e:
+        if os.path.exists(tmp_manifest_path):
+            try:
+                os.remove(tmp_manifest_path)
+            except Exception:
+                pass
+        raise ExperimentInvalidError(f"Failed to atomically publish manifest: {e}")
+
+    # fsync on parent dir
+    parent_dir = os.path.dirname(os.path.realpath(manifest_path))
+    dir_fd = None
+    try:
+        dir_fd = os.open(parent_dir, os.O_RDONLY)
+        os.fsync(dir_fd)
+    except Exception:
+        pass
+    finally:
+        if dir_fd is not None:
+            try:
+                os.close(dir_fd)
+            except Exception:
+                pass
+
+    try:
+        os.chmod(manifest_path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        os.chmod(report_path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to seal terminal files: {e}")
+
+    try:
+        with open(manifest_path, 'rb') as mf:
+            read_manifest_bytes = mf.read()
+        with open(report_path, 'r') as rf:
+            read_report_data = json.load(rf)
+
+        read_manifest_sha = hashlib.sha256(read_manifest_bytes).hexdigest()
+        if read_manifest_sha != manifest_sha:
+            raise ExperimentInvalidError("Re-read manifest SHA mismatch")
+
+        if read_report_data.get("manifest_sha256") != manifest_sha:
+            raise ExperimentInvalidError("Re-read report does not contain the correct manifest hash")
+
+        if read_report_data.get("status") != manifest_data["status"]:
+            raise ExperimentInvalidError("Re-read report status mismatch")
+
+        if (os.stat(manifest_path).st_mode & 0o777) != 0o444:
+            raise ExperimentInvalidError("Manifest is not sealed to 0o444")
+        if (os.stat(report_path).st_mode & 0o777) != 0o444:
+            raise ExperimentInvalidError("Report is not sealed to 0o444")
+    except Exception as e:
+        raise ExperimentInvalidError(f"Verification of published terminal pair failed: {e}")
+
+    if promote:
+        update_best_manifest_pointer(manifest_path)
+
+
+def _write_atomic_report(path: str, data: dict, seal: bool = False) -> None:
+    tmp_path = path + ".tmp"
+    if os.path.exists(tmp_path):
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to open temporary report file: {e}")
+
+    try:
+        serialized = json.dumps(data, indent=2)
+        if len(serialized) > 10 * 1024 * 1024:
+            raise ValueError("Operator report serialization size exceeds 10MB limit")
+        with os.fdopen(fd, 'w') as f:
+            f.write(serialized)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        raise ExperimentInvalidError(f"Failed to serialize and write temporary report: {e}")
+
+    try:
+        os.replace(tmp_path, path)
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        raise ExperimentInvalidError(f"Failed to atomically replace operator report: {e}")
+
+    # fsync on parent directory descriptor
+    parent_dir = os.path.dirname(os.path.realpath(path))
+    dir_fd = None
+    try:
+        dir_fd = os.open(parent_dir, os.O_RDONLY)
+        os.fsync(dir_fd)
+    except Exception:
+        pass
+    finally:
+        if dir_fd is not None:
+            try:
+                os.close(dir_fd)
+            except Exception:
+                pass
+
+    if seal:
+        try:
+            os.chmod(path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        except Exception as e:
+            raise ExperimentInvalidError(f"Failed to seal operator report: {e}")
+
+
+def save_operator_report(ctx: RunContext, seal: bool = False) -> None:
+    if not ctx.run_dir:
+        return
+    path = os.path.join(ctx.run_dir, "operator_report.json")
+    _write_atomic_report(path, ctx.operator_report, seal=seal)
+
+
+def log_phase_transition(ctx: RunContext, phase: str, new_state: str, metadata: dict | None = None) -> None:
+    if "phase_records" not in ctx.operator_report:
+        ctx.operator_report["phase_records"] = []
+
+    summaries = ctx.operator_report.setdefault("phase_summaries", {
+        "phase_0_lock_and_git": "not_run",
+        "smoke_and_canary": "not_run",
+        "huffman_preflight": "not_run",
+        "trial_loop": "not_run",
+        "validation_loop": "not_run",
+        "holdout_evaluation": "not_run"
+    })
+
+    previous_state = summaries.get(phase, "not_run")
+    allowed = False
+    if previous_state == "not_run" and new_state in ("running", "failed"):
+        allowed = True
+    elif previous_state == "running" and new_state in ("completed", "failed"):
+        allowed = True
+    elif previous_state == new_state:
+        allowed = True
+
+    if not allowed:
+        raise ExperimentInvalidError(f"Invalid phase transition for {phase}: {previous_state} -> {new_state}")
+
+    seq = len(ctx.operator_report["phase_records"]) + 1
+    record = {
+        "sequence": seq,
+        "phase": phase,
+        "previous_state": previous_state,
+        "new_state": new_state,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "metadata": metadata or {}
+    }
+    ctx.operator_report["phase_records"].append(record)
+    summaries[phase] = new_state
+    save_operator_report(ctx)
+
+
+def init_operator_report(ctx: RunContext) -> None:
+    ctx.operator_report = {
+        "schema_version": "1.0",
+        "run_id": ctx.run_id or "unknown",
+        "status": "running",
+        "invalidation_reason": None,
+        "lock_contents": {
+            "approved_commit_sha": "unknown",
+            "remote_url": "unknown",
+            "model": "unknown",
+            "allow_no_holdout": "unknown"
+        },
+        "environment": {
+            "sw_vers": "unknown",
+            "python_version": sys.version,
+            "codex_cli_version": "unknown"
+        },
+        "phase_summaries": {
+            "phase_0_lock_and_git": "not_run",
+            "smoke_and_canary": "not_run",
+            "huffman_preflight": "not_run",
+            "trial_loop": "not_run",
+            "validation_loop": "not_run",
+            "holdout_evaluation": "not_run"
+        },
+        "phase_records": [],
+        "tokens": {
+            "canary_consumed": "unknown",
+            "cumulative_consumed": 0,
+            "ceiling": 50000
+        },
+        "preflight_huffman": {
+            "score": "unknown",
+            "success": "unknown",
+            "log": "unknown"
+        },
+        "trials": [],
+        "candidates": [],
+        "holdout": {
+            "executed": "unknown",
+            "success": "unknown",
+            "tokens": "unknown"
+        },
+        "model_requested": "unknown",
+        "model_resolved": "unknown",
+        "manifest_sha256": "unknown",
+        "lock_remote_url": "unknown",
+        "configured_origin_url": "unknown",
+        "local_head_sha": "unknown",
+        "remote_main_sha": "unknown"
+    }
+
+
 def validate_manifest_pointer_and_target(pointer_data: dict) -> dict:
     """
     Validates a pointer dict and its target manifest.
@@ -926,6 +1280,22 @@ def validate_manifest_pointer_and_target(pointer_data: dict) -> dict:
     status = target_manifest.get("status")
     if status not in ["no_headroom", "completed_no_improvement", "completed_promoted"]:
         raise RuntimeError(f"Invalid target manifest status: {status}")
+
+    # Check for matching operator report
+    report_path = os.path.join(os.path.dirname(full_path), "operator_report.json")
+    if not os.path.exists(report_path):
+        raise RuntimeError(f"Target operator report missing: {report_path}")
+    try:
+        with open(report_path, "r") as rf:
+            report_data = json.load(rf)
+    except Exception as ree:
+        raise RuntimeError(f"Failed to read operator report: {ree}")
+
+    if report_data.get("manifest_sha256") != actual_hash:
+        raise RuntimeError(f"Operator report manifest hash mismatch: expected {actual_hash}, got {report_data.get('manifest_sha256')}")
+
+    if report_data.get("status") != status:
+        raise RuntimeError(f"Operator report status mismatch: expected {status}, got {report_data.get('status')}")
 
     return target_manifest
 
@@ -1027,6 +1397,11 @@ def verify_experiment_lock(ctx: RunContext) -> str:
     if not approved_sha:
         raise ExperimentInvalidError("approved_commit_sha missing from experiment.lock")
 
+    remote_url = lock_data.get("remote_url")
+    if not remote_url:
+        raise ExperimentInvalidError("remote_url missing from experiment.lock")
+    ctx.lock_remote_url = remote_url
+
     model = lock_data.get("model")
     if not isinstance(model, str) or not _EXPLICIT_MODEL_RE.fullmatch(model) or model == "resolve-at-canary":
         raise ExperimentInvalidError(
@@ -1047,6 +1422,48 @@ def verify_experiment_lock(ctx: RunContext) -> str:
         )
     ctx.allow_no_holdout = lock_allow_no_holdout
 
+    # C3: Local remote URL check (byte-for-byte matching of configured URL vs lock URL)
+    try:
+        res_url = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, cwd=BASE_DIR, check=True
+        )
+        configured_origin = res_url.stdout.strip()
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to get configured git remote URL: {e}")
+    ctx.configured_origin_url = configured_origin
+
+    if configured_origin != remote_url:
+        raise ExperimentInvalidError(
+            f"Git origin URL mismatch: configured remote origin is {configured_origin!r}, "
+            f"but lock file requires {remote_url!r}"
+        )
+
+    # C3: Query git ls-remote directly
+    try:
+        env_git = os.environ.copy()
+        env_git["GIT_TERMINAL_PROMPT"] = "0"
+        res_ls = subprocess.run(
+            ["git", "ls-remote", "--refs", "--exit-code", remote_url, "refs/heads/main"],
+            capture_output=True, text=True, cwd=BASE_DIR, check=True, timeout=15, env=env_git
+        )
+        ls_output = res_ls.stdout
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to verify main branch ref via git ls-remote: {e}")
+
+    ls_lines = [l.strip() for l in ls_output.strip().splitlines() if l.strip()]
+    if len(ls_lines) != 1:
+        raise ExperimentInvalidError(f"git ls-remote returned invalid number of lines: {len(ls_lines)}")
+
+    ls_line = ls_lines[0]
+    import re
+    match = re.match(r"^([0-9a-f]{40})\trefs/heads/main$", ls_line)
+    if not match:
+        raise ExperimentInvalidError(f"git ls-remote output format mismatch: {ls_line!r}")
+
+    remote_sha = match.group(1)
+    ctx.remote_main_sha = remote_sha
+
     try:
         res_head = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -1055,12 +1472,18 @@ def verify_experiment_lock(ctx: RunContext) -> str:
         current_sha = res_head.stdout.strip()
     except Exception as e:
         raise ExperimentInvalidError(f"Failed to get git HEAD: {e}")
+    ctx.local_head_sha = current_sha
 
+    # Strict consistency verification
+    if remote_sha != approved_sha:
+        raise ExperimentInvalidError(
+            f"Remote main SHA mismatch: remote is {remote_sha}, but approved commit SHA is {approved_sha}"
+        )
     if current_sha != approved_sha:
         raise ExperimentInvalidError(
-            f"Git HEAD mismatch: current HEAD is {current_sha}, "
-            f"but approved commit SHA in experiment.lock is {approved_sha}"
+            f"Git HEAD mismatch: local HEAD is {current_sha}, but approved commit SHA is {approved_sha}"
         )
+
     ctx.approved_commit_sha = approved_sha
     return approved_sha
 
@@ -1227,23 +1650,74 @@ def run_holdout_evaluation(
 # ── Smoke + canary pre-flight ─────────────────────────────────────────────────
 
 def run_smoke_and_canary(ctx: RunContext) -> tuple:
+    if not ctx.run_dir:
+        raise ExperimentInvalidError("ctx.run_dir is not set")
+    real_run_dir = os.path.realpath(ctx.run_dir)
+    real_history_dir = os.path.realpath(HISTORY_DIR)
+    if os.path.commonpath([real_run_dir, real_history_dir]) != real_history_dir:
+        raise ExperimentInvalidError("ctx.run_dir is not inside HISTORY_DIR")
+    stat_run = os.lstat(ctx.run_dir)
+    import stat as stat_mod
+    if stat_mod.S_ISLNK(stat_run.st_mode):
+        raise ExperimentInvalidError("ctx.run_dir is a symlink")
+    if not stat_mod.S_ISDIR(stat_run.st_mode):
+        raise ExperimentInvalidError("ctx.run_dir is not a directory")
+    if stat_run.st_uid != os.getuid():
+        raise ExperimentInvalidError("ctx.run_dir is not owned by current user")
+
     call_run_id = ctx.run_id or f"adhoc_{uuid.uuid4().hex}"
     real_temp_home = _build_codex_run_scoped_home(ctx, call_run_id)
+    ctx.created_codex_home = real_temp_home
+
     primary_error = None
+    canary_cleanup_error = None
+    home_cleanup_error = None
+
     try:
-        real_candidate_input_dir = BASE_DIR
-        sb_path = _build_generator_sb(real_temp_home, real_candidate_input_dir)
+        canary_candidate_dir = os.path.realpath(os.path.join(ctx.run_dir, "canary_candidate"))
+        try:
+            os.mkdir(canary_candidate_dir, 0o700)
+        except FileExistsError:
+            raise ExperimentInvalidError(f"Canary candidate directory already exists: {canary_candidate_dir}")
+
+        ctx.created_canary_dir = canary_candidate_dir
+
+        _validate_canary_dir(canary_candidate_dir, ctx.run_dir, real_temp_home)
+        ctx.canary_candidate_relpath = os.path.relpath(canary_candidate_dir, BASE_DIR)
+
+        sb_path = _build_generator_sb(real_temp_home, canary_candidate_dir)
         allowed_env = _codex_environment(real_temp_home)
-        version = _run_codex_version_smoke_test(sb_path, allowed_env)
+        version = _run_codex_version_smoke_test(sb_path, allowed_env, canary_candidate_dir)
         ctx.codex_version = version
         ctx.codex_cli_version = version
-        canary_tokens = _run_codex_canary(sb_path, allowed_env, ctx)
+        canary_tokens = _run_codex_canary(sb_path, allowed_env, ctx, canary_candidate_dir)
         return version, canary_tokens
     except BaseException as error:
         primary_error = error
         raise
     finally:
-        _cleanup_after_call(ctx, real_temp_home, primary_error)
+        if ctx.created_canary_dir and os.path.lexists(ctx.created_canary_dir):
+            try:
+                _cleanup_canary_dir(ctx.created_canary_dir, ctx.run_dir, real_temp_home)
+            except Exception as ce:
+                canary_cleanup_error = ce
+
+        try:
+            _cleanup_after_call(ctx, real_temp_home, primary_error)
+        except Exception as he:
+            home_cleanup_error = he
+
+        if canary_cleanup_error or home_cleanup_error:
+            msgs = []
+            if canary_cleanup_error:
+                msgs.append(f"Canary cleanup failed: {canary_cleanup_error}")
+            if home_cleanup_error:
+                msgs.append(f"Home cleanup failed: {home_cleanup_error}")
+            raise ExperimentInvalidError(
+                f"Cleanup failure: {'; '.join(msgs)}",
+                unresolved_codex_home=getattr(home_cleanup_error, "unresolved_codex_home", real_temp_home),
+                cleanup_error=f"canary_err={canary_cleanup_error}, home_err={getattr(home_cleanup_error, 'cleanup_error', home_cleanup_error)}"
+            ) from (primary_error or canary_cleanup_error or home_cleanup_error)
 
 # ── Main execution entry point ────────────────────────────────────────────────
 
@@ -1271,12 +1745,15 @@ def _main_exec(ctx: RunContext) -> None:
     sys.stdout.write(f"Baseline hash: {baseline_hash}\n")
 
     ctx.current_stage = "smoke_and_canary"
+    log_phase_transition(ctx, "smoke_and_canary", "running")
     sys.stdout.write("Running smoke test and canary...\n")
     sys.stdout.flush()
     codex_version, canary_tokens = run_smoke_and_canary(ctx)
+    log_phase_transition(ctx, "smoke_and_canary", "completed", {"tokens": canary_tokens})
 
     # Isolated Huffman baseline preflight check
     ctx.current_stage = "huffman_preflight"
+    log_phase_transition(ctx, "huffman_preflight", "running")
     sys.stdout.write("Running isolated Huffman preflight check...\n")
     sys.stdout.flush()
     huffman_iter_dir = os.path.realpath(os.path.join(ctx.run_dir, "huffman_preflight"))
@@ -1320,6 +1797,11 @@ def _main_exec(ctx: RunContext) -> None:
     _write_once_fsynced_manifest(preflight_huffman_path, preflight_huffman_data)
 
     if huffman_success:
+        log_phase_transition(ctx, "huffman_preflight", "completed", {
+            "score": 1.0,
+            "success": True,
+            "tokens": huff_tokens
+        })
         sys.stdout.write("Huffman preflight scored 5/5 (no headroom). Trials never invoked.\n")
         no_headroom_manifest_path = os.path.join(ctx.run_dir, "run_manifest.json")
         no_headroom_manifest = {
@@ -1340,13 +1822,21 @@ def _main_exec(ctx: RunContext) -> None:
             "unknown_token_state": ctx.unknown_token_state,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        _write_once_fsynced_manifest(no_headroom_manifest_path, no_headroom_manifest)
-        if not os.path.exists(BEST_MANIFEST_PATH):
-            update_best_manifest_pointer(no_headroom_manifest_path)
+        publish_terminal_manifest_and_report(
+            ctx, no_headroom_manifest_path, no_headroom_manifest,
+            promote=(not os.path.exists(BEST_MANIFEST_PATH))
+        )
         return
+    else:
+        log_phase_transition(ctx, "huffman_preflight", "completed", {
+            "score": 0.0,
+            "success": False,
+            "tokens": huff_tokens
+        })
 
     # Trial Execution
     ctx.current_stage = "trials"
+    log_phase_transition(ctx, "trial_loop", "running")
     optimization_tasks = _list_optimization_benchmarks()
     validation_tasks = _list_validation_benchmarks()
     sys.stdout.write(f"Optimization tasks: {optimization_tasks}\n")
@@ -1451,9 +1941,11 @@ def _main_exec(ctx: RunContext) -> None:
         })
 
     mean_delta = sum(t["delta"] for t in trial_results) / len(trial_results)
+    log_phase_transition(ctx, "trial_loop", "completed", {"trials": len(trial_results), "mean_delta": mean_delta})
 
     # Evaluate baseline validation
     ctx.current_stage = "validation"
+    log_phase_transition(ctx, "validation_loop", "running")
     baseline_val_score, baseline_val_results, val_baseline_tokens = evaluate_prompt_on_tasks(
         baseline_prompt, ctx.run_dir, "validation_baseline",
         VALIDATION_DIR, validation_tasks, ctx.consumed_tokens, ctx
@@ -1504,6 +1996,7 @@ def _main_exec(ctx: RunContext) -> None:
     }
 
     if not gate_passed:
+        log_phase_transition(ctx, "validation_loop", "completed", {"baseline_val_score": baseline_val_score, "candidate_val_scores": candidate_val_scores, "gate_passed": False})
         # State: completed_no_improvement
         retention_reason = (
             f"mean_delta={mean_delta:.4f}, "
@@ -1540,13 +2033,14 @@ def _main_exec(ctx: RunContext) -> None:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "note": "Statistical significance is not established by validation gate sampling."
         }
-        _write_once_fsynced_manifest(run_manifest_path, no_improvement_manifest)
-
-        if not os.path.exists(BEST_MANIFEST_PATH):
-            update_best_manifest_pointer(run_manifest_path)
-
+        publish_terminal_manifest_and_report(
+            ctx, run_manifest_path, no_improvement_manifest,
+            promote=(not os.path.exists(BEST_MANIFEST_PATH))
+        )
         sys.stdout.write("Gate failed. Baseline retained.\n")
         return
+
+    log_phase_transition(ctx, "validation_loop", "completed", {"baseline_val_score": baseline_val_score, "candidate_val_scores": candidate_val_scores, "gate_passed": True})
 
     # Select best candidate
     eligible.sort(key=lambda x: (-x[1], x[0]))
@@ -1555,7 +2049,9 @@ def _main_exec(ctx: RunContext) -> None:
     best_prompt = best_trial["candidate_prompt"]
 
     ctx.current_stage = "holdout"
+    log_phase_transition(ctx, "holdout_evaluation", "running")
     holdout_record, holdout_tokens = run_holdout_evaluation(best_prompt, ctx.run_dir, ctx)
+    log_phase_transition(ctx, "holdout_evaluation", "completed", {"holdout_success": holdout_record["result"]})
 
     # State: completed_promoted
     run_manifest_path = os.path.join(ctx.run_dir, "run_manifest.json")
@@ -1596,15 +2092,10 @@ def _main_exec(ctx: RunContext) -> None:
     if holdout_record:
         promoted_manifest["holdout"] = holdout_record
 
-    _write_once_fsynced_manifest(run_manifest_path, promoted_manifest)
-
-    # Save selected prompt
+    publish_terminal_manifest_and_report(ctx, run_manifest_path, promoted_manifest, promote=True)
     best_prompt_path = os.path.join(PROMPTS_DIR, "inner_agent_best.txt")
     with open(best_prompt_path, "w") as f:
         f.write(best_prompt)
-
-    # Update atomic pointer
-    update_best_manifest_pointer(run_manifest_path)
     sys.stdout.write(f"Promotion gate passed. Manifest promoted to best_manifest.json.\n")
 
 def preflight_hashes_global() -> dict:
@@ -1667,11 +2158,40 @@ def main() -> None:
         sys.stderr.write(f"FATAL: failed to create run directory: {e}\n")
         sys.exit(1)
 
+    init_operator_report(ctx)
+    try:
+        save_operator_report(ctx)
+    except Exception as e:
+        sys.stderr.write(f"FATAL: failed to write initial operator report: {e}\n")
+        sys.exit(1)
+
     try:
         _main_exec(ctx)
         sys.exit(0)
     except Exception as e:
         sys.stderr.write(f"FATAL: Experiment invalidated: {e}\n")
+        
+        ctx.operator_report["status"] = "invalid"
+        ctx.operator_report["invalidation_reason"] = f"{type(e).__name__}: {e}"
+        phase_map = {
+            "preflight_verifications": "phase_0_lock_and_git",
+            "smoke_and_canary": "smoke_and_canary",
+            "huffman_preflight": "huffman_preflight",
+            "trials": "trial_loop",
+            "validation": "validation_loop",
+            "holdout": "holdout_evaluation"
+        }
+        active_phase = phase_map.get(ctx.current_stage)
+        if active_phase:
+            try:
+                log_phase_transition(ctx, active_phase, "failed", {"error": f"{type(e).__name__}: {e}"})
+            except Exception:
+                pass
+        try:
+            save_operator_report(ctx, seal=True)
+        except Exception:
+            pass
+
         invalid_manifest_path = os.path.join(ctx.run_dir, "invalid_manifest.json")
         invalid_data = {
             "schema_version": "2",

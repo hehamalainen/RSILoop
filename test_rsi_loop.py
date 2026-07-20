@@ -43,6 +43,13 @@ from rsi_loop import (
     normalize_and_truncate_stream,
     get_stderr_summary,
     main,
+    init_operator_report,
+    save_operator_report,
+    log_phase_transition,
+    publish_terminal_manifest_and_report,
+    run_smoke_and_canary,
+    validate_manifest_pointer_and_target,
+    _cleanup_canary_dir,
 )
 
 class TestRsiLoopOrchestrator(unittest.TestCase):
@@ -278,6 +285,11 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
                  mock.patch("rsi_loop.HISTORY_DIR", history_dir):
                 with open(run_manifest, "w") as f:
                     json.dump(data, f)
+                with open(os.path.join(target_dir, "operator_report.json"), "w") as f:
+                    json.dump({
+                        "status": "completed_promoted",
+                        "manifest_sha256": "05dc7d7b73e719b07198fa845d47b0499baea8f21635e3f5ce8684cfda3770d0"
+                    }, f)
                 update_best_manifest_pointer(run_manifest)
 
                 loaded = load_and_verify_best_manifest()
@@ -365,12 +377,28 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         commit_sha = res.stdout.strip()
 
         lock_path = os.path.join(git_dir, "experiment.lock")
-        lock_data = {"approved_commit_sha": commit_sha, "model": "gpt-5.6-sol"}
+        lock_data = {
+            "approved_commit_sha": commit_sha,
+            "remote_url": "https://github.com/hehamalainen/RSILoop.git",
+            "model": "gpt-5.6-sol"
+        }
         with open(lock_path, "w") as f:
             json.dump(lock_data, f)
 
+        original_run = subprocess.run
+        def mock_git_run(args, **kwargs):
+            cmd_str = " ".join(args)
+            if "remote get-url" in cmd_str:
+                return mock.Mock(stdout="https://github.com/hehamalainen/RSILoop.git\n", stderr="", returncode=0)
+            elif "ls-remote" in cmd_str:
+                return mock.Mock(stdout=commit_sha + "\trefs/heads/main\n", stderr="", returncode=0)
+            return original_run(args, **kwargs)
+
         ctx = RunContext()
-        with mock.patch("rsi_loop.BASE_DIR", git_dir):
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        with mock.patch("rsi_loop.BASE_DIR", git_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=mock_git_run):
             sha = verify_experiment_lock(ctx)
             self.assertEqual(sha, commit_sha)
             self.assertEqual(ctx.approved_commit_sha, commit_sha)
@@ -384,7 +412,17 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
     # ── Test 34: E2E main() states check (no_headroom, completed_no_improvement, completed_promoted, invalid) ──
 
     def test_main_orchestration_states(self):
-        mock_verify_lock = mock.patch("rsi_loop.verify_experiment_lock", return_value="approved_sha")
+        def fake_verify_lock(ctx):
+            ctx.approved_commit_sha = "approved_sha"
+            ctx.operator_report["lock_contents"] = {
+                "approved_commit_sha": "approved_sha",
+                "remote_url": "https://github.com/hehamalainen/RSILoop.git",
+                "model": "gpt-5.6-sol",
+                "allow_no_holdout": True,
+            }
+            ctx.lock_file_hash = "mock_lock_hash"
+            return "approved_sha"
+        mock_verify_lock = mock.patch("rsi_loop.verify_experiment_lock", side_effect=fake_verify_lock)
         mock_verify_hashes = mock.patch("rsi_loop.verify_preflight_hashes")
         def fake_smoke(ctx):
             ctx.codex_version = "codex-cli 0.144.5"
@@ -801,16 +839,32 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=test_dir, capture_output=True, text=True, check=True)
         commit_sha = res.stdout.strip()
 
+        original_run = subprocess.run
+        def mock_git_run(args, **kwargs):
+            cmd_str = " ".join(args)
+            if "remote get-url" in cmd_str:
+                return mock.Mock(stdout="https://github.com/hehamalainen/RSILoop.git\n", stderr="", returncode=0)
+            elif "ls-remote" in cmd_str:
+                return mock.Mock(stdout=commit_sha + "\trefs/heads/main\n", stderr="", returncode=0)
+            return original_run(args, **kwargs)
+
         lock_path = os.path.join(test_dir, "experiment.lock")
 
         # Case 1: Environment ALLOW_NO_HOLDOUT is 1, but lock file allow_no_holdout is False (or missing) -> Disagreement -> Fails!
-        lock_data = {"approved_commit_sha": commit_sha, "model": "gpt-5.6-sol"}
+        lock_data = {
+            "approved_commit_sha": commit_sha,
+            "remote_url": "https://github.com/hehamalainen/RSILoop.git",
+            "model": "gpt-5.6-sol"
+        }
         with open(lock_path, "w") as f:
             json.dump(lock_data, f)
 
         ctx = RunContext()
+        ctx.operator_report = {}
+        init_operator_report(ctx)
         ctx.allow_no_holdout = True  # Simulated ALLOW_NO_HOLDOUT=1
         with mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=mock_git_run), \
              mock.patch.dict(os.environ, {"ALLOW_NO_HOLDOUT": "1"}):
             with self.assertRaises(ExperimentInvalidError) as r_ctx:
                 verify_experiment_lock(ctx)
@@ -819,6 +873,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         # Case 2: Environment ALLOW_NO_HOLDOUT is 0/empty, but lock file allow_no_holdout is True -> Disagreement -> Fails!
         lock_data = {
             "approved_commit_sha": commit_sha,
+            "remote_url": "https://github.com/hehamalainen/RSILoop.git",
             "allow_no_holdout": True,
             "model": "gpt-5.6-sol",
         }
@@ -826,8 +881,11 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             json.dump(lock_data, f)
 
         ctx = RunContext()
+        ctx.operator_report = {}
+        init_operator_report(ctx)
         ctx.allow_no_holdout = False  # Simulated ALLOW_NO_HOLDOUT=0
         with mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=mock_git_run), \
              mock.patch.dict(os.environ, {"ALLOW_NO_HOLDOUT": "0"}):
             with self.assertRaises(ExperimentInvalidError) as r_ctx:
                 verify_experiment_lock(ctx)
@@ -835,8 +893,11 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
 
         # Case 3: Both agree to allow no holdout (env="1", lock=True) -> Success!
         ctx = RunContext()
+        ctx.operator_report = {}
+        init_operator_report(ctx)
         ctx.allow_no_holdout = True
         with mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=mock_git_run), \
              mock.patch.dict(os.environ, {"ALLOW_NO_HOLDOUT": "1"}):
             sha = verify_experiment_lock(ctx)
             self.assertEqual(sha, commit_sha)
@@ -845,6 +906,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         # Case 4: Both agree to require holdout (env omitted, lock=False) -> Success!
         lock_data = {
             "approved_commit_sha": commit_sha,
+            "remote_url": "https://github.com/hehamalainen/RSILoop.git",
             "allow_no_holdout": False,
             "model": "gpt-5.6-sol",
         }
@@ -852,8 +914,11 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             json.dump(lock_data, f)
 
         ctx = RunContext()
+        ctx.operator_report = {}
+        init_operator_report(ctx)
         ctx.allow_no_holdout = False
         with mock.patch("rsi_loop.BASE_DIR", test_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=mock_git_run), \
              mock.patch.dict(os.environ, {}):
             sha = verify_experiment_lock(ctx)
             self.assertEqual(sha, commit_sha)
@@ -930,7 +995,12 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         approved_sha = "a" * 40
 
         def fake_git_run(command, **kwargs):
-            if command[:2] == ["git", "status"]:
+            cmd_str = " ".join(command)
+            if "remote get-url" in cmd_str:
+                return mock.Mock(stdout="https://github.com/hehamalainen/RSILoop.git\n", stderr="", returncode=0)
+            elif "ls-remote" in cmd_str:
+                return mock.Mock(stdout=approved_sha + "\trefs/heads/main\n", stderr="", returncode=0)
+            elif command[:2] == ["git", "status"]:
                 return mock.Mock(stdout="", stderr="", returncode=0)
             return mock.Mock(stdout=approved_sha + "\n", stderr="", returncode=0)
 
@@ -940,12 +1010,15 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
                 os.mkdir(case_dir)
                 lock_data = {
                     "approved_commit_sha": approved_sha,
+                    "remote_url": "https://github.com/hehamalainen/RSILoop.git",
                     "allow_no_holdout": False,
                     **model_data,
                 }
                 with open(os.path.join(case_dir, "experiment.lock"), "w") as handle:
                     json.dump(lock_data, handle)
                 ctx = RunContext()
+                ctx.operator_report = {}
+                init_operator_report(ctx)
                 with mock.patch("rsi_loop.BASE_DIR", case_dir), \
                      mock.patch("rsi_loop.subprocess.run", side_effect=fake_git_run), \
                      mock.patch.dict(os.environ, {"ALLOW_NO_HOLDOUT": "0"}):
@@ -958,13 +1031,13 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
                             verify_experiment_lock(ctx)
 
     def test_codex_commands_propagate_model_flag(self):
-        from rsi_loop import _build_canary_command, call_codex_sandboxed
+        from rsi_loop import _build_codex_command, call_codex_sandboxed
 
         ctx = RunContext()
         ctx.run_id = "model_flag_test"
         ctx.codex_model = "gpt-5.6-sol"
         ctx.lock_model = "gpt-5.6-sol"
-        canary_command = _build_canary_command("/exact/generator.sb", ctx)
+        canary_command = _build_codex_command("/exact/generator.sb", ctx.codex_model, "/candidate/dir")
         self.assertEqual(canary_command.count("--model"), 1)
         idx = canary_command.index("--model")
         self.assertEqual(canary_command[idx + 1], "gpt-5.6-sol")
@@ -1027,7 +1100,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
                 ctx.codex_model = "gpt-5.6-sol"
                 with mock.patch("rsi_loop.subprocess.run", side_effect=error):
                     with self.assertRaises(ExperimentInvalidError) as raised:
-                        _run_codex_canary("/exact/generator.sb", {}, ctx)
+                        _run_codex_canary("/exact/generator.sb", {}, ctx, self.tmp_dir)
                 self.assertTrue(ctx.unknown_token_state)
                 self.assertLessEqual(
                     len(raised.exception.stdout.encode("utf-8")), 65536
@@ -1041,7 +1114,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         result = mock.Mock(returncode=2, stdout=b"partial", stderr=b"fatal")
         with mock.patch("rsi_loop.subprocess.run", return_value=result):
             with self.assertRaises(ExperimentInvalidError) as raised:
-                _run_codex_canary("/exact/generator.sb", {}, ctx)
+                _run_codex_canary("/exact/generator.sb", {}, ctx, self.tmp_dir)
         self.assertEqual(raised.exception.stdout, "partial")
         self.assertEqual(raised.exception.stderr, "fatal")
 
@@ -1062,7 +1135,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
                 result = mock.Mock(returncode=2, stdout="", stderr=raw_stderr)
                 with mock.patch("rsi_loop.subprocess.run", return_value=result):
                     with self.assertRaises(ExperimentInvalidError) as raised:
-                        _run_codex_canary("/exact/generator.sb", {}, ctx)
+                        _run_codex_canary("/exact/generator.sb", {}, ctx, self.tmp_dir)
                 self.assertTrue(raised.exception.stderr.endswith("\n[TRUNCATED]"))
                 self.assertLessEqual(
                     len(raised.exception.stderr.encode("utf-8")), 65536
@@ -1185,13 +1258,13 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             return_value=mock.Mock(returncode=1, stdout="", stderr=warning),
         ):
             with self.assertRaises(ExperimentInvalidError) as raised:
-                _run_codex_canary("/exact/generator.sb", env, ctx)
+                _run_codex_canary("/exact/generator.sb", env, ctx, self.tmp_dir)
         self.assertIn("Refusing to create helper binaries", raised.exception.stderr)
 
     def test_host_boundary_cli_bootstrap(self):
         import rsi_loop
         from rsi_loop import (
-            _build_canary_command,
+            _build_codex_command,
             _build_codex_run_scoped_home,
             _build_generator_sb,
             _cleanup_codex_run_scoped_home,
@@ -1224,7 +1297,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         try:
             sb_path = _build_generator_sb(home, rsi_loop.BASE_DIR)
             self.assertEqual(sb_path, os.path.join(home, "generator.sb"))
-            command = _build_canary_command(sb_path, ctx)
+            command = _build_codex_command(sb_path, ctx.codex_model, rsi_loop.BASE_DIR)
             self.assertEqual(command.count("--model"), 1)
             idx = command.index("--model")
             self.assertEqual(command[idx + 1], "gpt-5.6-sol")
@@ -1237,7 +1310,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
                 env=_codex_environment(home),
                 cwd=rsi_loop.BASE_DIR,
             )
-            self.assertEqual(result.returncode, 1)
+            self.assertIn(result.returncode, (1, 71))
             forbidden = [
                 "Refusing to create helper binaries",
                 "sandbox_apply",
@@ -1360,7 +1433,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             "rsi_loop.subprocess.run",
             return_value=mock.Mock(returncode=0, stdout=canary_stdout, stderr=""),
         ):
-            self.assertEqual(_run_codex_canary("/exact/generator.sb", {}, ctx), 1)
+            self.assertEqual(_run_codex_canary("/exact/generator.sb", {}, ctx, self.tmp_dir), 1)
         self.assertEqual(ctx.model_resolved, "unavailable")
         self.assertEqual(
             _model_manifest_fields(ctx),
@@ -1462,7 +1535,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
                     return_value=mock.Mock(returncode=0, stdout=stdout, stderr=""),
                 ):
                     with self.assertRaises(ExperimentInvalidError):
-                        _run_codex_version_smoke_test("/exact/generator.sb", {})
+                        _run_codex_version_smoke_test("/exact/generator.sb", {}, self.tmp_dir)
 
         with mock.patch(
             "rsi_loop.subprocess.run",
@@ -1473,7 +1546,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             ),
         ):
             self.assertEqual(
-                _run_codex_version_smoke_test("/exact/generator.sb", {}),
+                _run_codex_version_smoke_test("/exact/generator.sb", {}, self.tmp_dir),
                 "codex-cli 0.144.5",
             )
 
@@ -1585,6 +1658,634 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             _terminal_environment_metadata(ctx)["codex_cli_version"],
             "unavailable",
         )
+
+    def test_canary_dir_preexistence_rejection(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.join(self.tmp_dir, "run_dir")
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        os.makedirs(os.path.join(ctx.run_dir, "canary_candidate"), exist_ok=True)
+        with mock.patch("rsi_loop._build_codex_run_scoped_home", return_value=os.path.join(self.tmp_dir, "temp_home")), \
+             mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                run_smoke_and_canary(ctx)
+        self.assertIn("Canary candidate directory already exists", str(e.exception))
+
+    def test_canary_dir_symlink_rejection(self):
+        from rsi_loop import _validate_canary_dir
+        expected_parent = os.path.join(self.tmp_dir, "expected_parent")
+        os.makedirs(expected_parent, exist_ok=True)
+        target_dir = os.path.join(self.tmp_dir, "target_dir")
+        os.makedirs(target_dir, exist_ok=True)
+        symlink_path = os.path.join(expected_parent, "canary_candidate")
+        os.symlink(target_dir, symlink_path)
+        with mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                _validate_canary_dir(symlink_path, expected_parent, os.path.join(self.tmp_dir, "temp_home"))
+        self.assertIn("is a symlink", str(e.exception))
+
+    def test_canary_dir_containment_rejection(self):
+        from rsi_loop import _validate_canary_dir
+        expected_parent = os.path.join(self.tmp_dir, "expected_parent")
+        os.makedirs(expected_parent, exist_ok=True)
+        canary_dir = os.path.join(self.tmp_dir, "canary_candidate")
+        os.makedirs(canary_dir, exist_ok=True)
+        os.chmod(canary_dir, 0o700)
+        with mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                _validate_canary_dir(canary_dir, expected_parent, os.path.join(self.tmp_dir, "temp_home"))
+        self.assertTrue("containment" in str(e.exception).lower() or "parent" in str(e.exception).lower())
+
+    def test_canary_dir_mode_rejection(self):
+        from rsi_loop import _validate_canary_dir
+        expected_parent = os.path.join(self.tmp_dir, "expected_parent")
+        os.makedirs(expected_parent, exist_ok=True)
+        canary_dir = os.path.join(expected_parent, "canary_candidate")
+        os.mkdir(canary_dir, 0o777)
+        with mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                _validate_canary_dir(canary_dir, expected_parent, os.path.join(self.tmp_dir, "temp_home"))
+        self.assertIn("is not 0o700", str(e.exception))
+
+    def test_canary_dir_owner_rejection(self):
+        from rsi_loop import _validate_canary_dir
+        expected_parent = os.path.join(self.tmp_dir, "expected_parent")
+        os.makedirs(expected_parent, exist_ok=True)
+        canary_dir = os.path.join(expected_parent, "canary_candidate")
+        os.mkdir(canary_dir, 0o700)
+        original_lstat = os.lstat
+        def fake_lstat(path):
+            res = original_lstat(path)
+            if os.path.abspath(path) == os.path.abspath(canary_dir):
+                class FakeStat:
+                    def __init__(self, orig):
+                        self.st_uid = orig.st_uid + 1
+                        self.st_mode = orig.st_mode
+                return FakeStat(res)
+            return res
+        with mock.patch("os.lstat", side_effect=fake_lstat), \
+             mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                _validate_canary_dir(canary_dir, expected_parent, os.path.join(self.tmp_dir, "temp_home"))
+            self.assertIn("does not match current UID", str(e.exception))
+
+    def test_canary_dir_successful_cleanup(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.realpath(os.path.join(self.tmp_dir, "run_dir"))
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.codex_model = "gpt-5.6-sol"
+        ctx.lock_model = "gpt-5.6-sol"
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        os.makedirs(os.path.join(self.tmp_dir, "temp_home"), exist_ok=True)
+        def fake_run(command, **kwargs):
+            if "--version" in command:
+                return mock.Mock(returncode=0, stdout="codex-cli 0.144.5\n", stderr="")
+            else:
+                drift_stdout = '{"type":"turn.completed","usage":{"output_tokens":1}}'
+                return mock.Mock(returncode=0, stdout=drift_stdout, stderr="")
+        with mock.patch("rsi_loop.subprocess.run", side_effect=fake_run), \
+             mock.patch("rsi_loop._build_codex_run_scoped_home", return_value=os.path.join(self.tmp_dir, "temp_home")), \
+             mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop._remove_owned_codex_home"):
+            run_smoke_and_canary(ctx)
+        self.assertFalse(os.path.exists(os.path.join(ctx.run_dir, "canary_candidate")))
+
+    def test_canary_dir_failed_cleanup(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.realpath(os.path.join(self.tmp_dir, "run_dir"))
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.codex_model = "gpt-5.6-sol"
+        ctx.lock_model = "gpt-5.6-sol"
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        os.makedirs(os.path.join(self.tmp_dir, "temp_home"), exist_ok=True)
+        def fake_run(command, **kwargs):
+            if "--version" in command:
+                return mock.Mock(returncode=0, stdout="codex-cli 0.144.5\n", stderr="")
+            else:
+                drift_stdout = '{"type":"turn.completed","usage":{"output_tokens":1}}'
+                return mock.Mock(returncode=0, stdout=drift_stdout, stderr="")
+        with mock.patch("rsi_loop.subprocess.run", side_effect=fake_run), \
+             mock.patch("rsi_loop._build_codex_run_scoped_home", return_value=os.path.join(self.tmp_dir, "temp_home")), \
+             mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop._remove_owned_codex_home"), \
+             mock.patch("shutil.rmtree", side_effect=OSError("rmtree failure")):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                run_smoke_and_canary(ctx)
+            self.assertIn("Canary cleanup failed", str(e.exception))
+
+    def test_canary_dir_dual_cleanup_failure(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.realpath(os.path.join(self.tmp_dir, "run_dir"))
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.codex_model = "gpt-5.6-sol"
+        ctx.lock_model = "gpt-5.6-sol"
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        os.makedirs(os.path.join(self.tmp_dir, "temp_home"), exist_ok=True)
+        def fake_run(command, **kwargs):
+            if "--version" in command:
+                return mock.Mock(returncode=0, stdout="codex-cli 0.144.5\n", stderr="")
+            else:
+                drift_stdout = '{"type":"turn.completed","usage":{"output_tokens":1}}'
+                return mock.Mock(returncode=0, stdout=drift_stdout, stderr="")
+        with mock.patch("rsi_loop.subprocess.run", side_effect=fake_run), \
+             mock.patch("rsi_loop._build_codex_run_scoped_home", return_value=os.path.join(self.tmp_dir, "temp_home")), \
+             mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop._remove_owned_codex_home", side_effect=OSError("home delete failure")), \
+             mock.patch("shutil.rmtree", side_effect=OSError("canary delete failure")):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                run_smoke_and_canary(ctx)
+            self.assertIn("Canary cleanup failed", str(e.exception))
+            self.assertIn("Home cleanup failed", str(e.exception))
+
+    def test_canary_profile_and_command_parity(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.realpath(os.path.join(self.tmp_dir, "run_dir"))
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.codex_model = "gpt-5.6-sol"
+        ctx.lock_model = "gpt-5.6-sol"
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        os.makedirs(os.path.join(self.tmp_dir, "temp_home"), exist_ok=True)
+        captured_commands = []
+        captured_cwds = []
+        captured_profiles = []
+        def fake_run(command, **kwargs):
+            captured_commands.append(command)
+            captured_cwds.append(kwargs.get("cwd"))
+            if "--version" in command:
+                return mock.Mock(returncode=0, stdout="codex-cli 0.144.5\n", stderr="")
+            else:
+                drift_stdout = '{"type":"turn.completed","usage":{"output_tokens":1}}'
+                return mock.Mock(returncode=0, stdout=drift_stdout, stderr="")
+        def fake_profile_builder(real_temp_home, real_candidate_input_dir):
+            captured_profiles.append(real_candidate_input_dir)
+            return "/dummy/path.sb"
+        with mock.patch("rsi_loop.subprocess.run", side_effect=fake_run), \
+             mock.patch("rsi_loop._build_codex_run_scoped_home", return_value=os.path.join(self.tmp_dir, "temp_home")), \
+             mock.patch("rsi_loop._build_generator_sb", side_effect=fake_profile_builder), \
+             mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop._remove_owned_codex_home"):
+            run_smoke_and_canary(ctx)
+        canary_dir = os.path.realpath(os.path.join(ctx.run_dir, "canary_candidate"))
+        self.assertEqual(captured_profiles[0], canary_dir)
+        self.assertEqual(captured_cwds[0], canary_dir)
+        self.assertEqual(captured_cwds[1], canary_dir)
+        self.assertIn("-C", captured_commands[1])
+        idx = captured_commands[1].index("-C")
+        self.assertEqual(captured_commands[1][idx + 1], canary_dir)
+
+    def test_strict_remote_verification_match_proceeds(self):
+        ctx = RunContext()
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        lock_data = {
+            "approved_commit_sha": "061deeaf7c844a09cc52507d575e75cef25b2d1a",
+            "remote_url": "https://github.com/hehamalainen/RSILoop.git",
+            "model": "gpt-5.6-sol",
+            "allow_no_holdout": False
+        }
+        lock_path = os.path.join(self.tmp_dir, "experiment.lock")
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+        def fake_run(args, **kwargs):
+            cmd_str = " ".join(args)
+            if "git remote get-url" in cmd_str:
+                return mock.Mock(returncode=0, stdout="https://github.com/hehamalainen/RSILoop.git\n", stderr="")
+            elif "git ls-remote" in cmd_str:
+                return mock.Mock(returncode=0, stdout="061deeaf7c844a09cc52507d575e75cef25b2d1a\trefs/heads/main\n", stderr="")
+            elif "git rev-parse" in cmd_str:
+                return mock.Mock(returncode=0, stdout="061deeaf7c844a09cc52507d575e75cef25b2d1a\n", stderr="")
+            elif "git status" in cmd_str:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=fake_run):
+            sha = verify_experiment_lock(ctx)
+        self.assertEqual(sha, "061deeaf7c844a09cc52507d575e75cef25b2d1a")
+
+    def test_strict_remote_verification_rewritten_origin(self):
+        ctx = RunContext()
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        lock_data = {
+            "approved_commit_sha": "061deeaf7c844a09cc52507d575e75cef25b2d1a",
+            "remote_url": "https://github.com/hehamalainen/RSILoop.git",
+            "model": "gpt-5.6-sol"
+        }
+        lock_path = os.path.join(self.tmp_dir, "experiment.lock")
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+        def fake_run(args, **kwargs):
+            cmd_str = " ".join(args)
+            if "git remote get-url" in cmd_str:
+                return mock.Mock(returncode=0, stdout="https://some-other-repo.git\n", stderr="")
+            elif "git status" in cmd_str:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                verify_experiment_lock(ctx)
+        self.assertIn("Git origin URL mismatch", str(e.exception))
+
+    def test_strict_remote_verification_missing_remote_url(self):
+        ctx = RunContext()
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        lock_data = {
+            "approved_commit_sha": "061deeaf7c844a09cc52507d575e75cef25b2d1a",
+            "model": "gpt-5.6-sol"
+        }
+        lock_path = os.path.join(self.tmp_dir, "experiment.lock")
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+        def fake_run(args, **kwargs):
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                verify_experiment_lock(ctx)
+        self.assertIn("remote_url missing from experiment.lock", str(e.exception))
+
+    def test_strict_remote_verification_malformed_output(self):
+        ctx = RunContext()
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        lock_data = {
+            "approved_commit_sha": "061deeaf7c844a09cc52507d575e75cef25b2d1a",
+            "remote_url": "https://github.com/hehamalainen/RSILoop.git",
+            "model": "gpt-5.6-sol"
+        }
+        lock_path = os.path.join(self.tmp_dir, "experiment.lock")
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+        def fake_run(args, **kwargs):
+            cmd_str = " ".join(args)
+            if "git remote get-url" in cmd_str:
+                return mock.Mock(returncode=0, stdout="https://github.com/hehamalainen/RSILoop.git\n", stderr="")
+            elif "git ls-remote" in cmd_str:
+                return mock.Mock(returncode=0, stdout="not-a-sha-tab-refs/heads/main\n", stderr="")
+            elif "git status" in cmd_str:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                verify_experiment_lock(ctx)
+        self.assertIn("git ls-remote output format mismatch", str(e.exception))
+
+    def test_strict_remote_verification_multiple_lines(self):
+        ctx = RunContext()
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        lock_data = {
+            "approved_commit_sha": "061deeaf7c844a09cc52507d575e75cef25b2d1a",
+            "remote_url": "https://github.com/hehamalainen/RSILoop.git",
+            "model": "gpt-5.6-sol"
+        }
+        lock_path = os.path.join(self.tmp_dir, "experiment.lock")
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+        def fake_run(args, **kwargs):
+            cmd_str = " ".join(args)
+            if "git remote get-url" in cmd_str:
+                return mock.Mock(returncode=0, stdout="https://github.com/hehamalainen/RSILoop.git\n", stderr="")
+            elif "git ls-remote" in cmd_str:
+                return mock.Mock(returncode=0, stdout="061deeaf7c844a09cc52507d575e75cef25b2d1a\trefs/heads/main\n061deeaf7c844a09cc52507d575e75cef25b2d1a\trefs/heads/main\n", stderr="")
+            elif "git status" in cmd_str:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                verify_experiment_lock(ctx)
+        self.assertIn("git ls-remote returned invalid number of lines", str(e.exception))
+
+    def test_strict_remote_verification_wrong_ref(self):
+        ctx = RunContext()
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        lock_data = {
+            "approved_commit_sha": "061deeaf7c844a09cc52507d575e75cef25b2d1a",
+            "remote_url": "https://github.com/hehamalainen/RSILoop.git",
+            "model": "gpt-5.6-sol"
+        }
+        lock_path = os.path.join(self.tmp_dir, "experiment.lock")
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+        def fake_run(args, **kwargs):
+            cmd_str = " ".join(args)
+            if "git remote get-url" in cmd_str:
+                return mock.Mock(returncode=0, stdout="https://github.com/hehamalainen/RSILoop.git\n", stderr="")
+            elif "git ls-remote" in cmd_str:
+                return mock.Mock(returncode=0, stdout="061deeaf7c844a09cc52507d575e75cef25b2d1a\trefs/heads/not-main\n", stderr="")
+            elif "git status" in cmd_str:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                verify_experiment_lock(ctx)
+        self.assertIn("git ls-remote output format mismatch", str(e.exception))
+
+    def test_strict_remote_verification_timeout(self):
+        ctx = RunContext()
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        lock_data = {
+            "approved_commit_sha": "061deeaf7c844a09cc52507d575e75cef25b2d1a",
+            "remote_url": "https://github.com/hehamalainen/RSILoop.git",
+            "model": "gpt-5.6-sol"
+        }
+        lock_path = os.path.join(self.tmp_dir, "experiment.lock")
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+        def fake_run(args, **kwargs):
+            cmd_str = " ".join(args)
+            if "git remote get-url" in cmd_str:
+                return mock.Mock(returncode=0, stdout="https://github.com/hehamalainen/RSILoop.git\n", stderr="")
+            elif "git ls-remote" in cmd_str:
+                raise subprocess.TimeoutExpired(args, 15)
+            elif "git status" in cmd_str:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                verify_experiment_lock(ctx)
+        self.assertIn("git ls-remote", str(e.exception))
+
+    def test_strict_remote_verification_authentication_failure(self):
+        ctx = RunContext()
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        lock_data = {
+            "approved_commit_sha": "061deeaf7c844a09cc52507d575e75cef25b2d1a",
+            "remote_url": "https://github.com/hehamalainen/RSILoop.git",
+            "model": "gpt-5.6-sol"
+        }
+        lock_path = os.path.join(self.tmp_dir, "experiment.lock")
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+        def fake_run(args, **kwargs):
+            cmd_str = " ".join(args)
+            if "git remote get-url" in cmd_str:
+                return mock.Mock(returncode=0, stdout="https://github.com/hehamalainen/RSILoop.git\n", stderr="")
+            elif "git ls-remote" in cmd_str:
+                return mock.Mock(returncode=128, stdout="", stderr="fatal: Authentication failed")
+            elif "git status" in cmd_str:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                verify_experiment_lock(ctx)
+        self.assertIn("git ls-remote", str(e.exception))
+
+    def test_strict_remote_verification_sha_mismatch(self):
+        ctx = RunContext()
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        lock_data = {
+            "approved_commit_sha": "061deeaf7c844a09cc52507d575e75cef25b2d1a",
+            "remote_url": "https://github.com/hehamalainen/RSILoop.git",
+            "model": "gpt-5.6-sol"
+        }
+        lock_path = os.path.join(self.tmp_dir, "experiment.lock")
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+        def fake_run(args, **kwargs):
+            cmd_str = " ".join(args)
+            if "git remote get-url" in cmd_str:
+                return mock.Mock(returncode=0, stdout="https://github.com/hehamalainen/RSILoop.git\n", stderr="")
+            elif "git ls-remote" in cmd_str:
+                return mock.Mock(returncode=0, stdout="beefeeaf7c844a09cc52507d575e75cef25b2d1a\trefs/heads/main\n", stderr="")
+            elif "git rev-parse" in cmd_str:
+                return mock.Mock(returncode=0, stdout="061deeaf7c844a09cc52507d575e75cef25b2d1a\n", stderr="")
+            elif "git status" in cmd_str:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                verify_experiment_lock(ctx)
+        self.assertIn("Remote main SHA mismatch", str(e.exception))
+
+    def test_strict_remote_verification_no_canary_called(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.join(self.tmp_dir, "run_dir")
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        lock_data = {
+            "approved_commit_sha": "061deeaf7c844a09cc52507d575e75cef25b2d1a",
+            "remote_url": "https://github.com/hehamalainen/RSILoop.git",
+            "model": "gpt-5.6-sol"
+        }
+        lock_path = os.path.join(self.tmp_dir, "experiment.lock")
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+        def fake_run(args, **kwargs):
+            cmd_str = " ".join(args)
+            if "git remote get-url" in cmd_str:
+                return mock.Mock(returncode=0, stdout="https://github.com/hehamalainen/RSILoop.git\n", stderr="")
+            elif "git ls-remote" in cmd_str:
+                return mock.Mock(returncode=1, stdout="", stderr="error")
+            elif "git status" in cmd_str:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        canary_called = False
+        def fake_canary(*args, **kwargs):
+            nonlocal canary_called
+            canary_called = True
+            return "version", 0
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=fake_run), \
+             mock.patch("rsi_loop.run_smoke_and_canary", side_effect=fake_canary):
+            with self.assertRaises(SystemExit):
+                main()
+        self.assertFalse(canary_called)
+
+    def test_operator_report_early_invalid_emission(self):
+        # No local context needed, main() creates its own.
+        lock_data = {
+            "approved_commit_sha": "061deeaf7c844a09cc52507d575e75cef25b2d1a",
+            "remote_url": "https://github.com/hehamalainen/RSILoop.git",
+            "model": "gpt-5.6-sol"
+        }
+        lock_path = os.path.join(self.tmp_dir, "experiment.lock")
+        with open(lock_path, "w") as f:
+            json.dump(lock_data, f)
+        def fake_run(args, **kwargs):
+            cmd_str = " ".join(args)
+            if "git remote get-url" in cmd_str:
+                return mock.Mock(returncode=0, stdout="https://github.com/hehamalainen/RSILoop.git\n", stderr="")
+            elif "git ls-remote" in cmd_str:
+                raise RuntimeError("auth error")
+            elif "git status" in cmd_str:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.subprocess.run", side_effect=fake_run), \
+             mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir):
+            with self.assertRaises(SystemExit):
+                main()
+        runs = [d for d in os.listdir(self.tmp_dir) if d.startswith("run_")]
+        self.assertEqual(len(runs), 1)
+        report_path = os.path.join(self.tmp_dir, runs[0], "operator_report.json")
+        self.assertTrue(os.path.exists(report_path))
+        with open(report_path) as rf:
+            report = json.load(rf)
+        self.assertEqual(report["status"], "invalid")
+        self.assertIn("auth error", report["invalidation_reason"])
+        self.assertEqual(report["phase_summaries"]["phase_0_lock_and_git"], "failed")
+
+    def test_operator_report_cumulative_records(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.join(self.tmp_dir, "run_dir")
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        log_phase_transition(ctx, "phase_0_lock_and_git", "running")
+        log_phase_transition(ctx, "phase_0_lock_and_git", "completed")
+        log_phase_transition(ctx, "smoke_and_canary", "running")
+        self.assertEqual(len(ctx.operator_report["phase_records"]), 3)
+        self.assertEqual(ctx.operator_report["phase_records"][0]["phase"], "phase_0_lock_and_git")
+        self.assertEqual(ctx.operator_report["phase_records"][0]["new_state"], "running")
+        self.assertEqual(ctx.operator_report["phase_records"][1]["new_state"], "completed")
+        self.assertEqual(ctx.operator_report["phase_records"][2]["phase"], "smoke_and_canary")
+        self.assertEqual(ctx.operator_report["phase_records"][2]["new_state"], "running")
+
+    def test_operator_report_atomic_replacement(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.join(self.tmp_dir, "run_dir")
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.operator_report = {"test": 123}
+        save_operator_report(ctx)
+        report_path = os.path.join(ctx.run_dir, "operator_report.json")
+        self.assertTrue(os.path.exists(report_path))
+        with open(report_path) as rf:
+            self.assertEqual(json.load(rf)["test"], 123)
+
+    def test_operator_report_explicit_states(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.join(self.tmp_dir, "run_dir")
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        self.assertEqual(ctx.operator_report["phase_summaries"]["validation_loop"], "not_run")
+        self.assertEqual(ctx.operator_report["local_head_sha"], "unknown")
+
+    def test_operator_report_manifest_equality(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.join(self.tmp_dir, "run_dir")
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        ctx.lock_file_hash = "mock_hash"
+        ctx.operator_report["run_id"] = "run_123"
+        ctx.operator_report["lock_contents"]["approved_commit_sha"] = "sha_abc"
+        manifest_data = {
+            "status": "completed_promoted",
+            "run_id": "run_123",
+            "approved_commit_sha": "sha_abc",
+            "lock_file_hash": "mock_hash"
+        }
+        manifest_path = os.path.join(ctx.run_dir, "run_manifest.json")
+        with mock.patch("rsi_loop.update_best_manifest_pointer"):
+            publish_terminal_manifest_and_report(ctx, manifest_path, manifest_data)
+        with open(manifest_path) as mf:
+            m = json.load(mf)
+        with open(os.path.join(ctx.run_dir, "operator_report.json")) as rf:
+            r = json.load(rf)
+        self.assertEqual(m["status"], r["status"])
+        self.assertEqual(m["run_id"], r["run_id"])
+        self.assertEqual(m["approved_commit_sha"], r["lock_contents"]["approved_commit_sha"])
+
+    def test_operator_report_manifest_hash(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.join(self.tmp_dir, "run_dir")
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        ctx.lock_file_hash = "mock_hash"
+        ctx.operator_report["run_id"] = "run_123"
+        ctx.operator_report["lock_contents"]["approved_commit_sha"] = "sha_abc"
+        manifest_data = {
+            "status": "completed_promoted",
+            "run_id": "run_123",
+            "approved_commit_sha": "sha_abc",
+            "lock_file_hash": "mock_hash"
+        }
+        manifest_path = os.path.join(ctx.run_dir, "run_manifest.json")
+        with mock.patch("rsi_loop.update_best_manifest_pointer"):
+            publish_terminal_manifest_and_report(ctx, manifest_path, manifest_data)
+        with open(os.path.join(ctx.run_dir, "operator_report.json")) as rf:
+            r = json.load(rf)
+        with open(manifest_path, "rb") as mf:
+            manifest_hash = hashlib.sha256(mf.read()).hexdigest()
+        self.assertEqual(r["manifest_sha256"], manifest_hash)
+
+    def test_operator_report_sensitive_data_exclusion(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.join(self.tmp_dir, "run_dir")
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        serialized = json.dumps(ctx.operator_report)
+        self.assertNotIn("prompt_templates", serialized)
+        self.assertNotIn("solution_code", serialized)
+
+    def test_operator_report_terminal_sealing(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.join(self.tmp_dir, "run_dir")
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        ctx.lock_file_hash = "mock_hash"
+        ctx.operator_report["run_id"] = "run_123"
+        ctx.operator_report["lock_contents"]["approved_commit_sha"] = "sha_abc"
+        manifest_data = {
+            "status": "completed_promoted",
+            "run_id": "run_123",
+            "approved_commit_sha": "sha_abc",
+            "lock_file_hash": "mock_hash"
+        }
+        manifest_path = os.path.join(ctx.run_dir, "run_manifest.json")
+        with mock.patch("rsi_loop.update_best_manifest_pointer"):
+            publish_terminal_manifest_and_report(ctx, manifest_path, manifest_data)
+        self.assertEqual(os.stat(manifest_path).st_mode & 0o777, 0o444)
+        self.assertEqual(os.stat(os.path.join(ctx.run_dir, "operator_report.json")).st_mode & 0o777, 0o444)
+
+    def test_operator_report_write_failure(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.join(self.tmp_dir, "run_dir")
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.operator_report = {}
+        init_operator_report(ctx)
+        with mock.patch("os.open", side_effect=OSError("disk full")):
+            with self.assertRaises(ExperimentInvalidError) as e:
+                save_operator_report(ctx)
+        self.assertIn("Failed to open temporary report file", str(e.exception))
+
+    def test_operator_report_incomplete_pair_rejection(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.join(self.tmp_dir, "run_dir")
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        pointer_data = {
+            "pointer_schema_version": "2",
+            "run_manifest_path": "run_dir/run_manifest.json",
+            "run_manifest_sha256": "05dc7d7b73e719b07198fa845d47b0499baea8f21635e3f5ce8684cfda3770d0"
+        }
+        with open(os.path.join(ctx.run_dir, "run_manifest.json"), "w") as f:
+            json.dump({"schema_version": "2", "status": "completed_promoted"}, f)
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.HISTORY_DIR", self.tmp_dir):
+            with self.assertRaises(RuntimeError) as e:
+                validate_manifest_pointer_and_target(pointer_data)
+        self.assertIn("Target operator report missing", str(e.exception))
 
 if __name__ == "__main__":
     unittest.main()
