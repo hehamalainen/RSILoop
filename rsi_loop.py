@@ -64,6 +64,9 @@ class ExperimentInvalidError(Exception):
             else str(cleanup_error)
         )
 
+class PointerCommitIndeterminateError(ExperimentInvalidError):
+    """Raised when the pointer has already been mutated but a post-commit action (such as directory fsync) fails."""
+
 class RunContext:
     def __init__(self):
         self.run_id = None
@@ -83,13 +86,18 @@ class RunContext:
         self.consumed_tokens = 0
         self.unknown_token_state = False
         self.current_stage = "pre-init"
-        self.allow_no_holdout = os.environ.get("ALLOW_NO_HOLDOUT") == "1"
+        self.allow_no_holdout = None
         self.created_canary_dir = None
         self.canary_candidate_relpath = "unknown"
         self.lock_remote_url = "unknown"
         self.configured_origin_url = "unknown"
         self.local_head_sha = "unknown"
         self.remote_main_sha = "unknown"
+        self.canary_tokens_consumed = "unknown"
+        self.preflight_huffman_data = None
+        self.trial_results = None
+        self.holdout_record = None
+        self.terminal_state = "not_started"
         self.operator_report = {}
 
 
@@ -919,7 +927,7 @@ def evaluate_prompt_on_tasks(
         results[benchmark] = {
             "success": eval_res["success"],
             "error": eval_res.get("error"),
-            "tokens_used": tokens,
+            "tokens_consumed": tokens,
             "solution_hash": hashlib.sha256(solution_code.encode()).hexdigest(),
         }
         if eval_res["success"]:
@@ -976,12 +984,20 @@ def _write_once_fsynced_manifest(path: str, data: dict) -> None:
     os.chmod(path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)  # 0o444
 
 
-def publish_terminal_manifest_and_report(ctx: RunContext, manifest_path: str, manifest_data: dict, promote: bool = True) -> None:
+def publish_terminal_manifest_and_report(ctx: RunContext, manifest_path: str, manifest_data: dict, pointer_commit_status: str = "not_applicable") -> None:
+    if ctx.terminal_state != "not_started":
+        raise ExperimentInvalidError("Terminal publication already in progress or completed — competing write blocked")
+
+    sync_context_to_report(ctx)
+    ctx.terminal_state = "staging"
+
     manifest_bytes = json.dumps(manifest_data, indent=2).encode('utf-8')
     manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
 
+    ctx.operator_report["schema_version"] = "2"
     ctx.operator_report["status"] = manifest_data["status"]
     ctx.operator_report["manifest_sha256"] = manifest_sha
+    ctx.operator_report["pointer_commit_status"] = pointer_commit_status
     ctx.operator_report["model_requested"] = manifest_data.get("model_requested", "unknown")
     ctx.operator_report["model_resolved"] = manifest_data.get("model_resolved", "unknown")
     ctx.operator_report["tokens"]["cumulative_consumed"] = ctx.consumed_tokens
@@ -992,7 +1008,7 @@ def publish_terminal_manifest_and_report(ctx: RunContext, manifest_path: str, ma
         if key == "approved_commit_sha":
             val_r = ctx.operator_report["lock_contents"]["approved_commit_sha"]
         elif key == "lock_file_hash":
-            val_r = ctx.lock_file_hash
+            val_r = ctx.lock_file_hash or "unknown"
         else:
             val_r = ctx.operator_report.get(key)
         if val_m != val_r:
@@ -1000,28 +1016,42 @@ def publish_terminal_manifest_and_report(ctx: RunContext, manifest_path: str, ma
 
     report_path = os.path.join(ctx.run_dir, "operator_report.json")
     tmp_manifest_path = manifest_path + ".tmp"
-    if os.path.exists(tmp_manifest_path):
-        try:
-            os.remove(tmp_manifest_path)
-        except Exception:
-            pass
+    tmp_report_path = report_path + ".tmp"
 
+    if os.path.exists(tmp_manifest_path):
+        ctx.terminal_state = "not_started"
+        raise ExperimentInvalidError(f"Staging manifest file already exists: {tmp_manifest_path}")
+    if os.path.exists(tmp_report_path):
+        ctx.terminal_state = "not_started"
+        raise ExperimentInvalidError(f"Staging report file already exists: {tmp_report_path}")
+
+    # Stage manifest, report
     try:
         m_fd = os.open(tmp_manifest_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(m_fd, 'wb') as mf:
             mf.write(manifest_bytes)
             mf.flush()
+            os.fchmod(mf.fileno(), stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
             os.fsync(mf.fileno())
+
+        r_fd = os.open(tmp_report_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(r_fd, 'w') as rf:
+            json.dump(ctx.operator_report, rf, indent=2)
+            rf.flush()
+            os.fchmod(rf.fileno(), stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+            os.fsync(rf.fileno())
+
     except Exception as e:
-        if os.path.exists(tmp_manifest_path):
-            try:
-                os.remove(tmp_manifest_path)
-            except Exception:
-                pass
-        raise ExperimentInvalidError(f"Failed to write staging manifest: {e}")
+        for p in [tmp_manifest_path, tmp_report_path]:
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+        ctx.terminal_state = "not_started"
+        raise ExperimentInvalidError(f"Failed to stage terminal files: {e}")
 
-    _write_atomic_report(report_path, ctx.operator_report, seal=False)
-
+    # atomically publish manifest
     try:
         os.replace(tmp_manifest_path, manifest_path)
     except Exception as e:
@@ -1030,7 +1060,26 @@ def publish_terminal_manifest_and_report(ctx: RunContext, manifest_path: str, ma
                 os.remove(tmp_manifest_path)
             except Exception:
                 pass
+        if os.path.exists(tmp_report_path):
+            try:
+                os.remove(tmp_report_path)
+            except Exception:
+                pass
+        ctx.terminal_state = "not_started"
         raise ExperimentInvalidError(f"Failed to atomically publish manifest: {e}")
+
+    ctx.terminal_state = "manifest_published"
+
+    # atomically publish report
+    try:
+        os.replace(tmp_report_path, report_path)
+    except Exception as e:
+        if os.path.exists(tmp_report_path):
+            try:
+                os.remove(tmp_report_path)
+            except Exception:
+                pass
+        raise ExperimentInvalidError(f"Failed to atomically publish report: {e}")
 
     # fsync on parent dir
     parent_dir = os.path.dirname(os.path.realpath(manifest_path))
@@ -1038,8 +1087,8 @@ def publish_terminal_manifest_and_report(ctx: RunContext, manifest_path: str, ma
     try:
         dir_fd = os.open(parent_dir, os.O_RDONLY)
         os.fsync(dir_fd)
-    except Exception:
-        pass
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to fsync manifest parent directory: {e}")
     finally:
         if dir_fd is not None:
             try:
@@ -1076,8 +1125,116 @@ def publish_terminal_manifest_and_report(ctx: RunContext, manifest_path: str, ma
     except Exception as e:
         raise ExperimentInvalidError(f"Verification of published terminal pair failed: {e}")
 
-    if promote:
-        update_best_manifest_pointer(manifest_path)
+    ctx.terminal_state = "pair_verified"
+
+
+def _update_operator_report_commit_status(ctx: RunContext, status: str, error_msg: str | None = None) -> None:
+    unresolved_report_path = os.path.join(ctx.run_dir, "operator_report.json")
+    try:
+        st = os.lstat(unresolved_report_path)
+        if stat.S_ISLNK(st.st_mode):
+            raise ExperimentInvalidError(f"Symlink detected at operator report path: {unresolved_report_path}")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to lstat operator report path: {e}")
+
+    report_path = os.path.realpath(unresolved_report_path)
+    real_run_dir = os.path.realpath(ctx.run_dir)
+    if not is_contained(report_path, real_run_dir):
+        raise ExperimentInvalidError(f"Operator report path {report_path} is not contained within run directory {real_run_dir}")
+
+    if not os.path.exists(report_path):
+        raise ExperimentInvalidError(f"Operator report missing at {report_path}")
+
+    # 1. Do NOT unseal or modify the existing report in-place.
+    try:
+        with open(report_path, "r") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to read existing operator report: {e}")
+
+    data["pointer_commit_status"] = status
+    if error_msg:
+        data["pointer_commit_error"] = error_msg
+    else:
+        data.pop("pointer_commit_error", None)
+
+    # Keep memory in sync
+    ctx.operator_report = data
+
+    # 2. Exclusive temporary-file creation
+    tmp_path = report_path + ".tmp"
+    if os.path.exists(tmp_path):
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to create exclusive temporary report file: {e}")
+
+    try:
+        serialized = json.dumps(data, indent=2)
+        if len(serialized) > 10 * 1024 * 1024:
+            raise ValueError("Operator report serialization size exceeds 10MB limit")
+        with os.fdopen(fd, 'w') as f:
+            f.write(serialized)
+            f.flush()
+            os.fchmod(f.fileno(), stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+            os.fsync(f.fileno())
+    except Exception as e:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        raise ExperimentInvalidError(f"Failed to serialize and write temporary report: {e}")
+
+    # 4. Atomic replacement
+    try:
+        os.replace(tmp_path, report_path)
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        raise ExperimentInvalidError(f"Failed to atomically replace operator report: {e}")
+
+    # 5. fsync parent directory
+    parent_dir = os.path.dirname(report_path)
+    dir_fd = None
+    try:
+        dir_fd = os.open(parent_dir, os.O_RDONLY)
+        os.fsync(dir_fd)
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to fsync operator report parent directory: {e}")
+    finally:
+        if dir_fd is not None:
+            try:
+                os.close(dir_fd)
+            except Exception:
+                pass
+
+    # 6. Reread and state verification
+    try:
+        with open(report_path, "r") as f:
+            reread_data = json.load(f)
+        if reread_data.get("pointer_commit_status") != status:
+            raise ExperimentInvalidError("Re-read check failed: pointer_commit_status mismatch")
+        if error_msg and reread_data.get("pointer_commit_error") != error_msg:
+            raise ExperimentInvalidError("Re-read check failed: pointer_commit_error mismatch")
+        if not error_msg and "pointer_commit_error" in reread_data:
+            raise ExperimentInvalidError("Re-read check failed: pointer_commit_error should be absent")
+    except Exception as e:
+        raise ExperimentInvalidError(f"Verification of updated operator report failed: {e}")
 
 
 def _write_atomic_report(path: str, data: dict, seal: bool = False) -> None:
@@ -1129,13 +1286,14 @@ def _write_atomic_report(path: str, data: dict, seal: bool = False) -> None:
     try:
         dir_fd = os.open(parent_dir, os.O_RDONLY)
         os.fsync(dir_fd)
-    except Exception:
-        pass
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to fsync operator report parent directory: {e}")
     finally:
         if dir_fd is not None:
             try:
                 os.close(dir_fd)
             except Exception:
+                pass
                 pass
 
     if seal:
@@ -1145,9 +1303,223 @@ def _write_atomic_report(path: str, data: dict, seal: bool = False) -> None:
             raise ExperimentInvalidError(f"Failed to seal operator report: {e}")
 
 
+def _write_atomic_run_prompt(path: str, prompt: str) -> None:
+    tmp_path = path + ".tmp"
+    if os.path.exists(tmp_path):
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to open temporary prompt file: {e}")
+
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(prompt)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        raise ExperimentInvalidError(f"Failed to write temporary prompt file: {e}")
+
+    try:
+        os.replace(tmp_path, path)
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        raise ExperimentInvalidError(f"Failed to atomically replace prompt file: {e}")
+
+    # fsync on parent directory descriptor
+    parent_dir = os.path.dirname(os.path.realpath(path))
+    dir_fd = None
+    try:
+        dir_fd = os.open(parent_dir, os.O_RDONLY)
+        os.fsync(dir_fd)
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to fsync prompt parent directory: {e}")
+    finally:
+        if dir_fd is not None:
+            try:
+                os.close(dir_fd)
+            except Exception:
+                pass
+
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to seal prompt file: {e}")
+
+
+def _filter_benchmarks(benchmarks: dict) -> dict:
+    if not isinstance(benchmarks, dict):
+        return {}
+    res = {}
+    for task_name, task_data in benchmarks.items():
+        if isinstance(task_data, dict):
+            allowed_fields = ["success", "tokens_consumed", "score", "status"]
+            filtered_task = {}
+            for k in allowed_fields:
+                if k in task_data:
+                    filtered_task[k] = task_data[k]
+            res[task_name] = filtered_task
+        else:
+            raise ExperimentInvalidError(f"Unexpected benchmark data shape: expected dict, got {type(task_data).__name__}")
+    return res
+
+
+def sync_context_to_report(ctx: RunContext) -> None:
+    if not ctx.operator_report:
+        ctx.operator_report = {}
+
+    lock_contents = ctx.operator_report.setdefault("lock_contents", {})
+    if ctx.approved_commit_sha is not None:
+        lock_contents["approved_commit_sha"] = ctx.approved_commit_sha
+    elif lock_contents.get("approved_commit_sha") is None:
+        lock_contents["approved_commit_sha"] = "unknown"
+
+    if ctx.lock_remote_url != "unknown":
+        lock_contents["remote_url"] = ctx.lock_remote_url
+    elif lock_contents.get("remote_url") is None:
+        lock_contents["remote_url"] = "unknown"
+
+    if ctx.lock_model is not None:
+        lock_contents["model"] = ctx.lock_model
+    elif lock_contents.get("model") is None:
+        lock_contents["model"] = "unknown"
+
+    if ctx.allow_no_holdout is not None:
+        lock_contents["allow_no_holdout"] = ctx.allow_no_holdout
+    elif lock_contents.get("allow_no_holdout") is None:
+        lock_contents["allow_no_holdout"] = "unknown"
+
+    env = ctx.operator_report.setdefault("environment", {})
+    if ctx.sw_vers != "unavailable":
+        env["sw_vers"] = ctx.sw_vers
+    elif env.get("sw_vers") is None:
+        env["sw_vers"] = "unknown"
+
+    env["python_version"] = sys.version
+
+    if ctx.codex_cli_version != "unavailable":
+        env["codex_cli_version"] = ctx.codex_cli_version
+    elif ctx.codex_version is not None:
+        env["codex_cli_version"] = ctx.codex_version
+    elif env.get("codex_cli_version") is None:
+        env["codex_cli_version"] = "unknown"
+
+    toks = ctx.operator_report.setdefault("tokens", {})
+    toks["canary_consumed"] = ctx.canary_tokens_consumed
+    toks["cumulative_consumed"] = ctx.consumed_tokens
+    toks.setdefault("ceiling", 50000)
+
+    if ctx.preflight_huffman_data is not None:
+        ph = ctx.operator_report.setdefault("preflight_huffman", {})
+        ph["score"] = ctx.preflight_huffman_data.get("huffman_preflight_score", "unknown")
+        ph["success"] = ctx.preflight_huffman_data.get("huffman_preflight_success", "unknown")
+        ph["tests_run"] = 5
+        ph["tokens"] = ctx.preflight_huffman_data.get("tokens_consumed", "unknown")
+        ph["solution_hash"] = ctx.preflight_huffman_data.get("solution_hash", "unknown")
+
+    if ctx.trial_results is not None:
+        filtered_trials = []
+        for t in ctx.trial_results:
+            brun = t.get("baseline_run", {})
+            mutations = t.get("mutations", [])
+
+            filtered_muts = []
+            for m in mutations:
+                meval = m.get("evaluation_run", {})
+                filtered_muts.append({
+                    "mutation_index": m.get("mutation_index"),
+                    "prompt_hash": m.get("prompt_hash"),
+                    "optimizer_tokens_consumed": m.get("optimizer_tokens_consumed"),
+                    "evaluation_run": {
+                        "benchmarks": _filter_benchmarks(meval.get("benchmarks", {})),
+                        "tokens_consumed": meval.get("tokens_consumed")
+                    }
+                })
+
+            filtered_trials.append({
+                "trial": t.get("trial"),
+                "baseline_score": t.get("baseline_score"),
+                "opt_score": t.get("opt_score"),
+                "delta": t.get("delta"),
+                "candidate_prompt_hash": t.get("candidate_prompt_hash"),
+                "baseline_run": {
+                    "benchmarks": _filter_benchmarks(brun.get("benchmarks", {})),
+                    "tokens_consumed": brun.get("tokens_consumed")
+                },
+                "mutations": filtered_muts
+            })
+        ctx.operator_report["trials"] = filtered_trials
+
+        ctx.operator_report["candidates"] = [
+            {
+                "trial": t.get("trial"),
+                "candidate_prompt_hash": t.get("candidate_prompt_hash"),
+                "opt_score": t.get("opt_score"),
+                "baseline_score": t.get("baseline_score"),
+                "delta": t.get("delta")
+            }
+            for t in ctx.trial_results
+        ]
+
+    if ctx.holdout_record is not None:
+        ho = ctx.operator_report.setdefault("holdout", {})
+        ho["executed"] = True
+        ho["success"] = ctx.holdout_record.get("result", "unknown")
+        ho["tokens"] = ctx.holdout_record.get("usage", {}).get("output_tokens", "unknown")
+
+    if ctx.lock_remote_url != "unknown":
+        ctx.operator_report["lock_remote_url"] = ctx.lock_remote_url
+    elif ctx.operator_report.get("lock_remote_url") is None:
+        ctx.operator_report["lock_remote_url"] = "unknown"
+
+    if ctx.configured_origin_url != "unknown":
+        ctx.operator_report["configured_origin_url"] = ctx.configured_origin_url
+    elif ctx.operator_report.get("configured_origin_url") is None:
+        ctx.operator_report["configured_origin_url"] = "unknown"
+
+    if ctx.local_head_sha != "unknown":
+        ctx.operator_report["local_head_sha"] = ctx.local_head_sha
+    elif ctx.operator_report.get("local_head_sha") is None:
+        ctx.operator_report["local_head_sha"] = "unknown"
+
+    if ctx.remote_main_sha != "unknown":
+        ctx.operator_report["remote_main_sha"] = ctx.remote_main_sha
+    elif ctx.operator_report.get("remote_main_sha") is None:
+        ctx.operator_report["remote_main_sha"] = "unknown"
+
+    model_val = ctx.lock_model or ctx.codex_model
+    if model_val is not None:
+        ctx.operator_report["model_requested"] = model_val
+    elif ctx.operator_report.get("model_requested") is None:
+        ctx.operator_report["model_requested"] = "unknown"
+
+    if ctx.model_resolved != "unavailable":
+        ctx.operator_report["model_resolved"] = ctx.model_resolved
+    elif ctx.operator_report.get("model_resolved") is None:
+        ctx.operator_report["model_resolved"] = "unavailable"
+
+
 def save_operator_report(ctx: RunContext, seal: bool = False) -> None:
     if not ctx.run_dir:
         return
+    sync_context_to_report(ctx)
     path = os.path.join(ctx.run_dir, "operator_report.json")
     _write_atomic_report(path, ctx.operator_report, seal=seal)
 
@@ -1193,10 +1565,10 @@ def log_phase_transition(ctx: RunContext, phase: str, new_state: str, metadata: 
 
 def init_operator_report(ctx: RunContext) -> None:
     ctx.operator_report = {
-        "schema_version": "1.0",
+        "schema_version": "2",
         "run_id": ctx.run_id or "unknown",
         "status": "running",
-        "invalidation_reason": None,
+        "invalidation_reason": "none",
         "lock_contents": {
             "approved_commit_sha": "unknown",
             "remote_url": "unknown",
@@ -1244,7 +1616,7 @@ def init_operator_report(ctx: RunContext) -> None:
     }
 
 
-def validate_manifest_pointer_and_target(pointer_data: dict) -> dict:
+def validate_manifest_pointer_and_target(pointer_data: dict, allow_pending: bool = False) -> dict:
     """
     Validates a pointer dict and its target manifest.
     Raises RuntimeError/ExperimentInvalidError if validation fails.
@@ -1285,17 +1657,88 @@ def validate_manifest_pointer_and_target(pointer_data: dict) -> dict:
     report_path = os.path.join(os.path.dirname(full_path), "operator_report.json")
     if not os.path.exists(report_path):
         raise RuntimeError(f"Target operator report missing: {report_path}")
+
+    # Symlink and mode verification
+    try:
+        rst = os.lstat(report_path)
+        if stat.S_ISLNK(rst.st_mode):
+            raise RuntimeError(f"Symlink detected at operator report path: {report_path}")
+        if (rst.st_mode & 0o777) != 0o444:
+            raise RuntimeError(f"Operator report file mode is not 0o444: {oct(rst.st_mode & 0o777)}")
+    except OSError as oe:
+        raise RuntimeError(f"Failed to stat operator report: {oe}")
+
     try:
         with open(report_path, "r") as rf:
             report_data = json.load(rf)
     except Exception as ree:
         raise RuntimeError(f"Failed to read operator report: {ree}")
 
+    if report_data.get("schema_version") != "2":
+        raise RuntimeError(f"Invalid operator report schema version: expected '2', got {report_data.get('schema_version')}")
+
     if report_data.get("manifest_sha256") != actual_hash:
         raise RuntimeError(f"Operator report manifest hash mismatch: expected {actual_hash}, got {report_data.get('manifest_sha256')}")
 
     if report_data.get("status") != status:
         raise RuntimeError(f"Operator report status mismatch: expected {status}, got {report_data.get('status')}")
+
+    commit_status = report_data.get("pointer_commit_status")
+    allowed_statuses = ["committed", "indeterminate", "pending"] if allow_pending else ["committed", "indeterminate"]
+    if commit_status not in allowed_statuses:
+        raise RuntimeError(f"Invalid pointer commit status in operator report: {commit_status}")
+
+    # Validate selected prompt (required for every target manifest of the active pointer)
+    selected_prompt_path = target_manifest.get("selected_prompt_path")
+    selected_prompt_hash = target_manifest.get("selected_prompt_hash")
+
+    if not selected_prompt_path or not selected_prompt_hash:
+        raise RuntimeError("selected_prompt_path or selected_prompt_hash missing from target manifest")
+
+    run_dir = os.path.dirname(full_path)
+
+    # 1. Symlink Rejection (check unresolved components from run_dir down using lstat)
+    parts = []
+    for part in selected_prompt_path.split(os.sep):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            raise RuntimeError("Parent directory traversal (..) is not allowed in selected_prompt_path")
+        parts.append(part)
+
+    current_path = os.path.realpath(run_dir)
+    for part in parts:
+        current_path = os.path.join(current_path, part)
+        try:
+            st = os.lstat(current_path)
+            if stat.S_ISLNK(st.st_mode):
+                raise RuntimeError(f"Symlink detected in selected prompt path: {current_path}")
+        except OSError as oe:
+            if isinstance(oe, FileNotFoundError):
+                raise RuntimeError(f"Selected prompt file missing: {current_path}")
+            raise RuntimeError(f"Failed to stat component {current_path}: {oe}")
+
+    prompt_full_path = os.path.realpath(current_path)
+
+    # 2. Containment validation
+    if not is_contained(prompt_full_path, run_dir):
+        raise RuntimeError(f"Selected prompt path {prompt_full_path} is not contained within run directory {run_dir}")
+
+    # 3. Regular-file type
+    if not os.path.exists(prompt_full_path):
+        raise RuntimeError(f"Selected prompt file missing: {prompt_full_path}")
+    if os.path.islink(prompt_full_path) or not os.path.isfile(prompt_full_path):
+        raise RuntimeError(f"Selected prompt path is not a regular file: {prompt_full_path}")
+
+    # 4. Mode 0o444 validation
+    st = os.stat(prompt_full_path)
+    if (st.st_mode & 0o777) != 0o444:
+        raise RuntimeError(f"Selected prompt file mode is not 0o444: {oct(st.st_mode & 0o777)}")
+
+    # 5. Hash validation
+    actual_prompt_hash = _sha256_file(prompt_full_path)
+    if actual_prompt_hash != selected_prompt_hash:
+        raise RuntimeError(f"Selected prompt hash mismatch: expected {selected_prompt_hash}, got {actual_prompt_hash}")
 
     return target_manifest
 
@@ -1362,9 +1805,58 @@ def update_best_manifest_pointer(manifest_path: str) -> None:
         "run_manifest_sha256": manifest_hash
     }
     tmp = BEST_MANIFEST_PATH + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(pointer_data, f, indent=2)
-    os.replace(tmp, BEST_MANIFEST_PATH)
+    if os.path.exists(tmp):
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to open temporary pointer file: {e}")
+
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(pointer_data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+        raise ExperimentInvalidError(f"Failed to write temporary pointer file: {e}")
+
+    try:
+        os.replace(tmp, BEST_MANIFEST_PATH)
+    except Exception as e:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+        raise ExperimentInvalidError(f"Failed to atomically replace pointer file: {e}")
+
+    # fsync on parent directory descriptor of BEST_MANIFEST_PATH
+    parent_dir = os.path.dirname(os.path.realpath(BEST_MANIFEST_PATH))
+    dir_fd = None
+    try:
+        dir_fd = os.open(parent_dir, os.O_RDONLY)
+        os.fsync(dir_fd)
+    except Exception as e:
+        raise PointerCommitIndeterminateError(f"Failed to fsync pointer parent directory: {e}")
+    finally:
+        if dir_fd is not None:
+            try:
+                os.close(dir_fd)
+            except Exception:
+                pass
 
 # ── Verification Checkers ─────────────────────────────────────────────────────
 
@@ -1396,6 +1888,7 @@ def verify_experiment_lock(ctx: RunContext) -> str:
     approved_sha = lock_data.get("approved_commit_sha")
     if not approved_sha:
         raise ExperimentInvalidError("approved_commit_sha missing from experiment.lock")
+    ctx.approved_commit_sha = approved_sha
 
     remote_url = lock_data.get("remote_url")
     if not remote_url:
@@ -1451,16 +1944,23 @@ def verify_experiment_lock(ctx: RunContext) -> str:
     except Exception as e:
         raise ExperimentInvalidError(f"Failed to verify main branch ref via git ls-remote: {e}")
 
-    ls_lines = [l.strip() for l in ls_output.strip().splitlines() if l.strip()]
-    if len(ls_lines) != 1:
-        raise ExperimentInvalidError(f"git ls-remote returned invalid number of lines: {len(ls_lines)}")
+    ls_lines = ls_output.split('\n')
+    is_valid_lines = (
+        (len(ls_lines) == 2 and ls_lines[1] == "") or
+        (len(ls_lines) == 1 and ls_lines[0] != "")
+    )
+    if not is_valid_lines:
+        raise ExperimentInvalidError("git ls-remote returned invalid number of lines or empty records")
 
     ls_line = ls_lines[0]
-    import re
-    match = re.match(r"^([0-9a-f]{40})\trefs/heads/main$", ls_line)
-    if not match:
-        raise ExperimentInvalidError(f"git ls-remote output format mismatch: {ls_line!r}")
+    if ls_line.endswith('\r'):
+        ls_line = ls_line[:-1]
 
+    import re
+    if not re.match(r"^[0-9a-f]{40}\trefs/heads/main$", ls_line):
+        raise ExperimentInvalidError(f"git ls-remote output format mismatch or invalid whitespace: {ls_output!r}")
+
+    match = re.match(r"^([0-9a-f]{40})\trefs/heads/main$", ls_line)
     remote_sha = match.group(1)
     ctx.remote_main_sha = remote_sha
 
@@ -1723,8 +2223,8 @@ def run_smoke_and_canary(ctx: RunContext) -> tuple:
 
 def _main_exec(ctx: RunContext) -> None:
     ctx.current_stage = "preflight_verifications"
+    log_phase_transition(ctx, "phase_0_lock_and_git", "running")
     approved_sha = verify_experiment_lock(ctx)
-    verify_existing_best_manifest_startup()
     verify_preflight_hashes()
 
     # Verify holdout if no-holdout mode is not authorized
@@ -1737,6 +2237,9 @@ def _main_exec(ctx: RunContext) -> None:
             raise ExperimentInvalidError("Private holdout files simple_regex_matcher are missing and no-holdout mode is not authorized")
         verify_holdout_hashes(PRIVATE_DIR)
 
+    recover_pending_runs()
+    verify_existing_best_manifest_startup()
+
     if not os.path.exists(BASELINE_PROMPT_PATH):
         raise ExperimentInvalidError(f"Baseline prompt not found at {BASELINE_PROMPT_PATH}")
     with open(BASELINE_PROMPT_PATH) as f:
@@ -1744,11 +2247,14 @@ def _main_exec(ctx: RunContext) -> None:
     baseline_hash = hashlib.sha256(baseline_prompt.encode()).hexdigest()
     sys.stdout.write(f"Baseline hash: {baseline_hash}\n")
 
+    log_phase_transition(ctx, "phase_0_lock_and_git", "completed")
+
     ctx.current_stage = "smoke_and_canary"
     log_phase_transition(ctx, "smoke_and_canary", "running")
     sys.stdout.write("Running smoke test and canary...\n")
     sys.stdout.flush()
     codex_version, canary_tokens = run_smoke_and_canary(ctx)
+    ctx.canary_tokens_consumed = canary_tokens
     log_phase_transition(ctx, "smoke_and_canary", "completed", {"tokens": canary_tokens})
 
     # Isolated Huffman baseline preflight check
@@ -1795,6 +2301,7 @@ def _main_exec(ctx: RunContext) -> None:
         "tokens_consumed": huff_tokens,
     }
     _write_once_fsynced_manifest(preflight_huffman_path, preflight_huffman_data)
+    ctx.preflight_huffman_data = preflight_huffman_data
 
     if huffman_success:
         log_phase_transition(ctx, "huffman_preflight", "completed", {
@@ -1822,10 +2329,51 @@ def _main_exec(ctx: RunContext) -> None:
             "unknown_token_state": ctx.unknown_token_state,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        publish_terminal_manifest_and_report(
-            ctx, no_headroom_manifest_path, no_headroom_manifest,
-            promote=(not os.path.exists(BEST_MANIFEST_PATH))
-        )
+        promote = (not os.path.exists(BEST_MANIFEST_PATH))
+        if promote:
+            run_best_prompt_path = os.path.join(ctx.run_dir, "inner_agent_best.txt")
+            _write_atomic_run_prompt(run_best_prompt_path, baseline_prompt)
+            no_headroom_manifest["selected_prompt_path"] = "inner_agent_best.txt"
+            no_headroom_manifest["selected_prompt_hash"] = hashlib.sha256(baseline_prompt.encode('utf-8')).hexdigest()
+
+        publish_terminal_manifest_and_report(ctx, no_headroom_manifest_path, no_headroom_manifest, pointer_commit_status="pending" if promote else "not_applicable")
+
+        if promote:
+            try:
+                update_best_manifest_pointer(no_headroom_manifest_path)
+            except PointerCommitIndeterminateError as pcie:
+                try:
+                    _update_operator_report_commit_status(ctx, "indeterminate", str(pcie))
+                except Exception:
+                    pass
+                raise
+            except Exception as e:
+                deleted_all = True
+                for p in [run_best_prompt_path, no_headroom_manifest_path, os.path.join(ctx.run_dir, "operator_report.json")]:
+                    if os.path.exists(p):
+                        try:
+                            os.chmod(p, 0o600)
+                            os.remove(p)
+                        except Exception as de:
+                            deleted_all = False
+                            sys.stderr.write(f"WARNING: rollback cleanup failed for {p}: {de}\n")
+                if deleted_all:
+                    ctx.terminal_state = "not_started"
+                    raise e
+                else:
+                    raise ExperimentInvalidError(f"Pre-commit failure occurred, and rollback cleanup failed to remove all promotion artifacts: {e}")
+
+            try:
+                _update_operator_report_commit_status(ctx, "committed")
+            except PointerCommitIndeterminateError as pcie:
+                try:
+                    _update_operator_report_commit_status(ctx, "indeterminate", str(pcie))
+                except Exception:
+                    pass
+                raise
+            except Exception as e:
+                sys.stderr.write(f"WARNING: Post-commit report status update failed: {e}\n")
+                raise
         return
     else:
         log_phase_transition(ctx, "huffman_preflight", "completed", {
@@ -1941,6 +2489,7 @@ def _main_exec(ctx: RunContext) -> None:
         })
 
     mean_delta = sum(t["delta"] for t in trial_results) / len(trial_results)
+    ctx.trial_results = trial_results
     log_phase_transition(ctx, "trial_loop", "completed", {"trials": len(trial_results), "mean_delta": mean_delta})
 
     # Evaluate baseline validation
@@ -2033,10 +2582,51 @@ def _main_exec(ctx: RunContext) -> None:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "note": "Statistical significance is not established by validation gate sampling."
         }
-        publish_terminal_manifest_and_report(
-            ctx, run_manifest_path, no_improvement_manifest,
-            promote=(not os.path.exists(BEST_MANIFEST_PATH))
-        )
+        promote = (not os.path.exists(BEST_MANIFEST_PATH))
+        if promote:
+            run_best_prompt_path = os.path.join(ctx.run_dir, "inner_agent_best.txt")
+            _write_atomic_run_prompt(run_best_prompt_path, baseline_prompt)
+            no_improvement_manifest["selected_prompt_path"] = "inner_agent_best.txt"
+            no_improvement_manifest["selected_prompt_hash"] = hashlib.sha256(baseline_prompt.encode('utf-8')).hexdigest()
+
+        publish_terminal_manifest_and_report(ctx, run_manifest_path, no_improvement_manifest, pointer_commit_status="pending" if promote else "not_applicable")
+
+        if promote:
+            try:
+                update_best_manifest_pointer(run_manifest_path)
+            except PointerCommitIndeterminateError as pcie:
+                try:
+                    _update_operator_report_commit_status(ctx, "indeterminate", str(pcie))
+                except Exception:
+                    pass
+                raise
+            except Exception as e:
+                deleted_all = True
+                for p in [run_best_prompt_path, run_manifest_path, os.path.join(ctx.run_dir, "operator_report.json")]:
+                    if os.path.exists(p):
+                        try:
+                            os.chmod(p, 0o600)
+                            os.remove(p)
+                        except Exception as de:
+                            deleted_all = False
+                            sys.stderr.write(f"WARNING: rollback cleanup failed for {p}: {de}\n")
+                if deleted_all:
+                    ctx.terminal_state = "not_started"
+                    raise e
+                else:
+                    raise ExperimentInvalidError(f"Pre-commit failure occurred, and rollback cleanup failed to remove all promotion artifacts: {e}")
+
+            try:
+                _update_operator_report_commit_status(ctx, "committed")
+            except PointerCommitIndeterminateError as pcie:
+                try:
+                    _update_operator_report_commit_status(ctx, "indeterminate", str(pcie))
+                except Exception:
+                    pass
+                raise
+            except Exception as e:
+                sys.stderr.write(f"WARNING: Post-commit report status update failed: {e}\n")
+                raise
         sys.stdout.write("Gate failed. Baseline retained.\n")
         return
 
@@ -2051,6 +2641,7 @@ def _main_exec(ctx: RunContext) -> None:
     ctx.current_stage = "holdout"
     log_phase_transition(ctx, "holdout_evaluation", "running")
     holdout_record, holdout_tokens = run_holdout_evaluation(best_prompt, ctx.run_dir, ctx)
+    ctx.holdout_record = holdout_record
     log_phase_transition(ctx, "holdout_evaluation", "completed", {"holdout_success": holdout_record["result"]})
 
     # State: completed_promoted
@@ -2092,10 +2683,46 @@ def _main_exec(ctx: RunContext) -> None:
     if holdout_record:
         promoted_manifest["holdout"] = holdout_record
 
-    publish_terminal_manifest_and_report(ctx, run_manifest_path, promoted_manifest, promote=True)
-    best_prompt_path = os.path.join(PROMPTS_DIR, "inner_agent_best.txt")
-    with open(best_prompt_path, "w") as f:
-        f.write(best_prompt)
+    run_best_prompt_path = os.path.join(ctx.run_dir, "inner_agent_best.txt")
+    _write_atomic_run_prompt(run_best_prompt_path, best_prompt)
+    promoted_manifest["selected_prompt_path"] = "inner_agent_best.txt"
+
+    publish_terminal_manifest_and_report(ctx, run_manifest_path, promoted_manifest, pointer_commit_status="pending")
+    try:
+        update_best_manifest_pointer(run_manifest_path)
+    except PointerCommitIndeterminateError as pcie:
+        try:
+            _update_operator_report_commit_status(ctx, "indeterminate", str(pcie))
+        except Exception:
+            pass
+        raise
+    except Exception as e:
+        deleted_all = True
+        for p in [run_best_prompt_path, run_manifest_path, os.path.join(ctx.run_dir, "operator_report.json")]:
+            if os.path.exists(p):
+                try:
+                    os.chmod(p, 0o600)
+                    os.remove(p)
+                except Exception as de:
+                    deleted_all = False
+                    sys.stderr.write(f"WARNING: rollback cleanup failed for {p}: {de}\n")
+        if deleted_all:
+            ctx.terminal_state = "not_started"
+            raise e
+        else:
+            raise ExperimentInvalidError(f"Pre-commit failure occurred, and rollback cleanup failed to remove all promotion artifacts: {e}")
+
+    try:
+        _update_operator_report_commit_status(ctx, "committed")
+    except PointerCommitIndeterminateError as pcie:
+        try:
+            _update_operator_report_commit_status(ctx, "indeterminate", str(pcie))
+        except Exception:
+            pass
+        raise
+    except Exception as e:
+        sys.stderr.write(f"WARNING: Post-commit report status update failed: {e}\n")
+        raise
     sys.stdout.write(f"Promotion gate passed. Manifest promoted to best_manifest.json.\n")
 
 def preflight_hashes_global() -> dict:
@@ -2147,6 +2774,362 @@ def _model_manifest_fields(ctx: RunContext) -> dict:
     }
 
 
+def _read_authoritative_pointer() -> dict | None:
+    if not os.path.lexists(BEST_MANIFEST_PATH):
+        return None
+    try:
+        # Check that BEST_MANIFEST_PATH itself is not a symlink (lstat first)
+        st = os.lstat(BEST_MANIFEST_PATH)
+        if stat.S_ISLNK(st.st_mode):
+            raise ExperimentInvalidError(f"Symlink detected at pointer path: {BEST_MANIFEST_PATH}")
+        if not os.path.exists(BEST_MANIFEST_PATH):
+            # If lexists is True but exists is False, it's a dangling symlink, but we just caught it in lstat/S_ISLNK.
+            # In case of any other non-symlink dangling situation (like permission or path resolution issue), raise.
+            raise ExperimentInvalidError(f"Authoritative pointer path exists but cannot be accessed: {BEST_MANIFEST_PATH}")
+        with open(BEST_MANIFEST_PATH, "r") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise ExperimentInvalidError(f"Authoritative pointer (best_manifest.json) is corrupted, malformed, or unsafe: {e}")
+
+    # Explicit dictionary, schema and incomplete field checks
+    if not isinstance(data, dict):
+        raise ExperimentInvalidError("Authoritative pointer (best_manifest.json) is not a JSON object/dictionary")
+    if data.get("pointer_schema_version") != "2":
+        raise ExperimentInvalidError(f"Authoritative pointer (best_manifest.json) schema version mismatch (expected '2', got {data.get('pointer_schema_version')!r})")
+    if "run_manifest_path" not in data or "run_manifest_sha256" not in data:
+        raise ExperimentInvalidError("Authoritative pointer (best_manifest.json) is incomplete: missing run_manifest_path or run_manifest_sha256")
+
+    # Fully validate the pointer target BEFORE any classification or recovery action
+    try:
+        validate_manifest_pointer_and_target(data, allow_pending=True)
+    except Exception as e:
+        raise ExperimentInvalidError(f"Authoritative pointer targets a corrupted, malformed, or missing run manifest/report: {e}")
+
+    return data
+
+
+def _validate_invalid_marker_and_report(run_dir: str) -> bool:
+    invalid_path = os.path.join(run_dir, "invalid_manifest.json")
+    report_path = os.path.join(run_dir, "operator_report.json")
+
+    # If the invalid manifest does not exist, there's no cleanup validation needed
+    if not os.path.exists(invalid_path):
+        return False
+
+    try:
+        # Check invalid_manifest.json symlink and mode
+        ist = os.lstat(invalid_path)
+        if stat.S_ISLNK(ist.st_mode):
+            raise ExperimentInvalidError(f"Symlink detected at invalid manifest path: {invalid_path}")
+        if (ist.st_mode & 0o777) != 0o444:
+            raise ExperimentInvalidError(f"Invalid manifest is not sealed to 0o444: {invalid_path}")
+
+        # Check operator_report.json symlink and mode
+        if not os.path.exists(report_path):
+            raise ExperimentInvalidError(f"Operator report missing for invalid manifest: {report_path}")
+        rst = os.lstat(report_path)
+        if stat.S_ISLNK(rst.st_mode):
+            raise ExperimentInvalidError(f"Symlink detected at operator report path: {report_path}")
+        if (rst.st_mode & 0o777) != 0o444:
+            raise ExperimentInvalidError(f"Operator report is not sealed to 0o444: {report_path}")
+
+        # Parse invalid_manifest.json
+        with open(invalid_path, "r") as f:
+            manifest_data = json.load(f)
+        if not isinstance(manifest_data, dict):
+            raise ExperimentInvalidError(f"Invalid manifest is not a dictionary: {invalid_path}")
+        if manifest_data.get("schema_version") != "2" or manifest_data.get("status") != "invalid":
+            raise ExperimentInvalidError(f"Invalid manifest schema/status mismatch: {invalid_path}")
+
+        # Parse operator_report.json
+        with open(report_path, "r") as f:
+            report_data = json.load(f)
+        if not isinstance(report_data, dict):
+            raise ExperimentInvalidError(f"Operator report is not a dictionary: {report_path}")
+        if report_data.get("schema_version") != "2" or report_data.get("status") != "invalid":
+            raise ExperimentInvalidError(f"Operator report schema/status mismatch: {report_path}")
+
+        # Verify hash pairing
+        with open(invalid_path, "rb") as f:
+            manifest_bytes = f.read()
+        manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+        if report_data.get("manifest_sha256") != manifest_sha:
+            raise ExperimentInvalidError(f"Hash pairing mismatch between invalid manifest and report: {report_path}")
+
+        return True
+    except Exception as e:
+        raise ExperimentInvalidError(f"Untrusted or malformed invalid marker pairing: {e}")
+
+
+def _validate_pending_run_tuple(run_dir: str, entry: str, report_data: dict, manifest_data: dict) -> None:
+    # 1. Report mode verification
+    report_path = os.path.join(run_dir, "operator_report.json")
+    try:
+        rst = os.lstat(report_path)
+        if stat.S_ISLNK(rst.st_mode) or not stat.S_ISREG(rst.st_mode):
+            raise ExperimentInvalidError(f"Operator report is not a regular file or is a symlink: {report_path}")
+        if (rst.st_mode & 0o777) != 0o444:
+            raise ExperimentInvalidError(f"Operator report file mode is not 0o444: {report_path}")
+    except OSError as oe:
+        raise ExperimentInvalidError(f"Failed to stat operator report: {oe}")
+
+    # 2. Report schema and structure verification
+    if report_data.get("schema_version") != "2":
+        raise ExperimentInvalidError(f"Invalid report schema version: {report_data.get('schema_version')}")
+    status = report_data.get("status")
+    if status not in ["no_headroom", "completed_no_improvement", "completed_promoted"]:
+        raise ExperimentInvalidError(f"Invalid report status: {status}")
+    if report_data.get("run_id") != entry:
+        raise ExperimentInvalidError(f"Report run ID mismatch: expected {entry}, got {report_data.get('run_id')}")
+
+    # 3. Manifest mode verification
+    manifest_path = os.path.join(run_dir, "run_manifest.json")
+    try:
+        mst = os.lstat(manifest_path)
+        if stat.S_ISLNK(mst.st_mode) or not stat.S_ISREG(mst.st_mode):
+            raise ExperimentInvalidError(f"Run manifest is not a regular file or is a symlink: {manifest_path}")
+        if (mst.st_mode & 0o777) != 0o444:
+            raise ExperimentInvalidError(f"Run manifest file mode is not 0o444: {manifest_path}")
+    except OSError as oe:
+        raise ExperimentInvalidError(f"Failed to stat run manifest: {oe}")
+
+    # 4. Manifest schema and pairing verification
+    if manifest_data.get("schema_version") != "2":
+        raise ExperimentInvalidError(f"Invalid manifest schema version: {manifest_data.get('schema_version')}")
+    if manifest_data.get("status") != status:
+        raise ExperimentInvalidError(f"Manifest status mismatch: expected {status}, got {manifest_data.get('status')}")
+    if manifest_data.get("run_id") != entry:
+        raise ExperimentInvalidError(f"Manifest run ID mismatch: expected {entry}, got {manifest_data.get('run_id')}")
+
+    actual_manifest_sha = _sha256_file(manifest_path)
+    if report_data.get("manifest_sha256") != actual_manifest_sha:
+        raise ExperimentInvalidError(f"Report manifest hash mismatch: expected {actual_manifest_sha}, got {report_data.get('manifest_sha256')}")
+
+    # 5. Prompt authentication
+    selected_prompt_path = manifest_data.get("selected_prompt_path")
+    selected_prompt_hash = manifest_data.get("selected_prompt_hash")
+    if not selected_prompt_path or not selected_prompt_hash:
+        raise ExperimentInvalidError("selected_prompt_path or selected_prompt_hash missing from run manifest")
+
+    # Reject parent directory traversals
+    parts = []
+    for part in selected_prompt_path.split(os.sep):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            raise ExperimentInvalidError("Parent directory traversal (..) is not allowed in selected_prompt_path")
+        parts.append(part)
+
+    current_path = os.path.realpath(run_dir)
+    for part in parts:
+        current_path = os.path.join(current_path, part)
+        try:
+            st = os.lstat(current_path)
+            if stat.S_ISLNK(st.st_mode):
+                raise ExperimentInvalidError(f"Symlink detected in selected prompt path: {current_path}")
+        except OSError as oe:
+            raise ExperimentInvalidError(f"Failed to stat component {current_path}: {oe}")
+
+    prompt_full_path = os.path.realpath(current_path)
+    if not is_contained(prompt_full_path, run_dir):
+        raise ExperimentInvalidError(f"Selected prompt path {prompt_full_path} is not contained within run directory {run_dir}")
+    if not os.path.exists(prompt_full_path):
+        raise ExperimentInvalidError(f"Selected prompt file missing: {prompt_full_path}")
+    if os.path.islink(prompt_full_path) or not os.path.isfile(prompt_full_path):
+        raise ExperimentInvalidError(f"Selected prompt path is not a regular file: {prompt_full_path}")
+
+    # Mode 0o444 validation
+    pst = os.stat(prompt_full_path)
+    if (pst.st_mode & 0o777) != 0o444:
+        raise ExperimentInvalidError(f"Selected prompt file mode is not 0o444: {prompt_full_path}")
+
+    # Hash validation
+    actual_prompt_hash = _sha256_file(prompt_full_path)
+    if actual_prompt_hash != selected_prompt_hash:
+        raise ExperimentInvalidError(f"Selected prompt hash mismatch: expected {selected_prompt_hash}, got {actual_prompt_hash}")
+
+
+def recover_pending_runs() -> None:
+    """
+    Scans the history directory for any run directories that have terminal artifacts
+    but whose operator report is still marked as 'pending'.
+    Reconciles them atomically according to the Recovery State Decision Table.
+    """
+    # Pass 1: Read-only classification and validation
+    pointer_data = _read_authorized_pointer = _read_authoritative_pointer()
+
+    if not os.path.exists(HISTORY_DIR):
+        return
+
+    # Check if HISTORY_DIR is a symlink
+    hst = os.lstat(HISTORY_DIR)
+    if stat.S_ISLNK(hst.st_mode):
+        raise ExperimentInvalidError(f"Symlink detected at history directory: {HISTORY_DIR}")
+
+    classified_pending_runs = []
+    cleanup_marker_runs = []
+
+    for entry in os.listdir(HISTORY_DIR):
+        if entry == "legacy":
+            continue
+
+        run_dir = os.path.join(HISTORY_DIR, entry)
+        try:
+            st = os.lstat(run_dir)
+            if stat.S_ISLNK(st.st_mode):
+                raise ExperimentInvalidError(f"Symlink detected in history directory: {run_dir}")
+            if not stat.S_ISDIR(st.st_mode):
+                continue
+        except OSError as oe:
+            raise ExperimentInvalidError(f"Failed to lstat history entry {run_dir}: {oe}")
+
+        # If it doesn't start with run_, it is an unknown non-run directory. We skip it explicitly.
+        if not entry.startswith("run_"):
+            continue
+
+        # Realpath containment check
+        real_run_dir = os.path.realpath(run_dir)
+        real_history_dir = os.path.realpath(HISTORY_DIR)
+        if not is_contained(real_run_dir, real_history_dir):
+            raise ExperimentInvalidError(f"Run directory {real_run_dir} is not contained within HISTORY_DIR")
+
+        report_path = os.path.join(run_dir, "operator_report.json")
+        manifest_path = os.path.join(run_dir, "run_manifest.json")
+        invalid_path = os.path.join(run_dir, "invalid_manifest.json")
+        prompt_path = os.path.join(run_dir, "inner_agent_best.txt")
+
+        # Scan all items inside run_dir to intercept any symlinks or dangling symlinks
+        try:
+            for item in os.listdir(run_dir):
+                item_path = os.path.join(run_dir, item)
+                ist = os.lstat(item_path)
+                if stat.S_ISLNK(ist.st_mode):
+                    raise ExperimentInvalidError(f"Symlink detected in run directory {run_dir}: {item_path}")
+                if not os.path.exists(item_path):
+                    raise ExperimentInvalidError(f"Dangling symlink or inaccessible file detected in run directory {run_dir}: {item_path}")
+        except OSError as oe:
+            raise ExperimentInvalidError(f"Failed to scan run directory {run_dir}: {oe}")
+
+        invalid_exists = os.path.lexists(invalid_path)
+        report_exists = os.path.lexists(report_path)
+        manifest_exists = os.path.lexists(manifest_path)
+        prompt_exists = os.path.lexists(prompt_path)
+
+        # Check for invalid marker cleanup validation first
+        if invalid_exists:
+            has_evidence = False
+            if prompt_exists or manifest_exists:
+                has_evidence = True
+            if has_evidence:
+                _validate_invalid_marker_and_report(run_dir)
+                cleanup_marker_runs.append((entry, run_dir))
+
+        if report_exists:
+            try:
+                with open(report_path, "r") as f:
+                    report_data = json.load(f)
+            except Exception as e:
+                raise ExperimentInvalidError(f"Operator report under {run_dir} is corrupted or unreadable: {e}")
+
+            status = report_data.get("pointer_commit_status")
+            if status == "pending":
+                if not manifest_exists:
+                    raise ExperimentInvalidError(f"Run manifest missing for pending run in {run_dir}")
+
+                try:
+                    with open(manifest_path, "r") as f:
+                        manifest_data = json.load(f)
+                    if not isinstance(manifest_data, dict):
+                        raise ExperimentInvalidError("Run manifest is not a dictionary")
+                except Exception as e:
+                    raise ExperimentInvalidError(f"Run manifest under {run_dir} is corrupted or unreadable: {e}")
+
+                # Authenticate the complete pending run tuple
+                _validate_pending_run_tuple(run_dir, entry, report_data, manifest_data)
+
+                # Classify commit status
+                commit_occurred = False
+                if pointer_data:
+                    ptr_manifest_path = pointer_data.get("run_manifest_path")
+                    ptr_manifest_sha = pointer_data.get("run_manifest_sha256")
+                    if ptr_manifest_path and ptr_manifest_sha:
+                        resolved_ptr_path = os.path.realpath(os.path.join(BASE_DIR, ptr_manifest_path))
+                        expected_manifest_path = os.path.realpath(manifest_path)
+                        if resolved_ptr_path == expected_manifest_path:
+                            actual_sha = _sha256_file(expected_manifest_path)
+                            if actual_sha == ptr_manifest_sha:
+                                commit_occurred = True
+
+                if commit_occurred:
+                    validate_manifest_pointer_and_target(pointer_data, allow_pending=True)
+                    classified_pending_runs.append((entry, run_dir, report_data, manifest_data, True))
+                else:
+                    classified_pending_runs.append((entry, run_dir, report_data, manifest_data, False))
+
+    # Pass 2: Authorized mutations (Only reached if Pass 1 succeeds with zero errors)
+    for entry, run_dir, report_data, manifest_data, commit_occurred in classified_pending_runs:
+        manifest_path = os.path.join(run_dir, "run_manifest.json")
+        if commit_occurred:
+            rec_ctx = RunContext()
+            rec_ctx.run_dir = run_dir
+            _update_operator_report_commit_status(rec_ctx, "committed")
+        else:
+            rec_ctx = RunContext()
+            rec_ctx.run_id = entry
+            rec_ctx.run_dir = run_dir
+            rec_ctx.terminal_state = "not_started"
+            rec_ctx.consumed_tokens = manifest_data.get("tokens_consumed", 0)
+            rec_ctx.unknown_token_state = manifest_data.get("unknown_token_state", False)
+            rec_ctx.approved_commit_sha = manifest_data.get("approved_commit_sha", "unknown")
+            rec_ctx.lock_file_hash = manifest_data.get("lock_file_hash", "unknown")
+
+            rec_ctx.operator_report = {
+                "schema_version": "2",
+                "run_id": entry,
+                "status": "invalid",
+                "lock_contents": {
+                    "approved_commit_sha": rec_ctx.approved_commit_sha
+                },
+                "lock_file_hash": rec_ctx.lock_file_hash,
+                "tokens": {
+                    "cumulative_consumed": rec_ctx.consumed_tokens
+                }
+            }
+
+            invalid_manifest_path = os.path.join(run_dir, "invalid_manifest.json")
+            invalid_data = {
+                "schema_version": "2",
+                "run_id": entry,
+                "status": "invalid",
+                "invalidation_reason": "Interrupted/crashed during pointer commit (left pending)",
+                "approved_commit_sha": rec_ctx.approved_commit_sha,
+                "lock_file_hash": rec_ctx.lock_file_hash,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+            # Step 1: publish invalid manifest and report (durable decision)
+            publish_terminal_manifest_and_report(rec_ctx, invalid_manifest_path, invalid_data, pointer_commit_status="not_applicable")
+
+            # Step 2: delete original false promotion files (after decision is durable)
+            for p in [os.path.join(run_dir, "inner_agent_best.txt"), manifest_path]:
+                if os.path.exists(p):
+                    try:
+                        os.chmod(p, 0o600)
+                        os.remove(p)
+                    except Exception as de:
+                        raise ExperimentInvalidError(f"Failed to delete false promotion artifact {p}: {de}")
+
+    # Idempotent cleanup of residual promotion files for runs that are already invalid
+    for entry, run_dir in cleanup_marker_runs:
+        for p in [os.path.join(run_dir, "inner_agent_best.txt"), os.path.join(run_dir, "run_manifest.json")]:
+            if os.path.exists(p):
+                try:
+                    os.chmod(p, 0o600)
+                    os.remove(p)
+                except Exception as de:
+                    raise ExperimentInvalidError(f"Failed to delete residual promotion artifact {p}: {de}")
+
+
 def main() -> None:
     ctx = RunContext()
     _capture_environment_metadata(ctx)
@@ -2170,7 +3153,11 @@ def main() -> None:
         sys.exit(0)
     except Exception as e:
         sys.stderr.write(f"FATAL: Experiment invalidated: {e}\n")
-        
+
+        if ctx.terminal_state != "not_started":
+            sys.stderr.write("Aborting: terminal publication already occurred, no competing invalid manifest will be written.\n")
+            sys.exit(1)
+
         ctx.operator_report["status"] = "invalid"
         ctx.operator_report["invalidation_reason"] = f"{type(e).__name__}: {e}"
         phase_map = {
@@ -2187,19 +3174,15 @@ def main() -> None:
                 log_phase_transition(ctx, active_phase, "failed", {"error": f"{type(e).__name__}: {e}"})
             except Exception:
                 pass
-        try:
-            save_operator_report(ctx, seal=True)
-        except Exception:
-            pass
 
         invalid_manifest_path = os.path.join(ctx.run_dir, "invalid_manifest.json")
         invalid_data = {
             "schema_version": "2",
-            "run_id": ctx.run_id,
+            "run_id": ctx.run_id or "unknown",
             "status": "invalid",
             **_terminal_environment_metadata(ctx),
-            "approved_commit_sha": ctx.approved_commit_sha,
-            "lock_file_hash": ctx.lock_file_hash,
+            "approved_commit_sha": ctx.approved_commit_sha or "unknown",
+            "lock_file_hash": ctx.lock_file_hash or "unknown",
             "codex_version": ctx.codex_version,
             **_model_manifest_fields(ctx),
             "error_message": f"{type(e).__name__}: {e}",
@@ -2223,10 +3206,7 @@ def main() -> None:
             "current_stage": ctx.current_stage,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        try:
-            _write_once_fsynced_manifest(invalid_manifest_path, invalid_data)
-        except Exception:
-            pass
+        publish_terminal_manifest_and_report(ctx, invalid_manifest_path, invalid_data, pointer_commit_status="not_applicable")
         sys.exit(1)
 
 if __name__ == "__main__":
