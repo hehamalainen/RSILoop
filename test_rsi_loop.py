@@ -54,6 +54,11 @@ from rsi_loop import (
     recover_pending_runs,
     update_best_manifest_pointer,
     _main_exec,
+    _validate_solution_file,
+    evaluate_prompt_on_tasks,
+    verify_existing_best_manifest_startup,
+    _filter_benchmarks,
+    _sha256_file,
 )
 
 class TestRsiLoopOrchestrator(unittest.TestCase):
@@ -719,6 +724,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         }
         with open(best_manifest_path, "w") as f:
             json.dump(pointer_data, f)
+        os.chmod(best_manifest_path, 0o444)
 
         with mock.patch("rsi_loop.BEST_MANIFEST_PATH", best_manifest_path), \
              mock.patch("rsi_loop.BASE_DIR", test_dir), \
@@ -747,6 +753,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         pointer_data["run_manifest_sha256"] = manifest_hash
         with open(best_manifest_path, "w") as f:
             json.dump(pointer_data, f)
+        os.chmod(best_manifest_path, 0o444)
 
         # Re-create empty legacy directory to reset count
         shutil.rmtree(legacy_dir)
@@ -770,6 +777,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         legacy_data = {"status": "success", "some_data": 123}
         with open(best_manifest_path, "w") as f:
             json.dump(legacy_data, f)
+        os.chmod(best_manifest_path, 0o444)
 
         with mock.patch("rsi_loop.BEST_MANIFEST_PATH", best_manifest_path), \
              mock.patch("rsi_loop.BASE_DIR", test_dir), \
@@ -789,6 +797,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         # Recreate a legacy best_manifest.json
         with open(best_manifest_path, "w") as f:
             json.dump(legacy_data, f)
+        os.chmod(best_manifest_path, 0o444)
 
         # Remove the legacy directory and replace with a symlink to an external directory
         shutil.rmtree(legacy_dir)
@@ -811,11 +820,14 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             self.assertEqual(len(os.listdir(external_dir)), 0)
 
         # 5. Test order of lock verification: if lock check fails, no mutation/archival happens
-        # Remove symlink and recreate legacy dir
-        os.remove(legacy_dir)
-        os.makedirs(legacy_dir)
+        if os.path.islink(legacy_dir) or os.path.exists(legacy_dir):
+            os.remove(legacy_dir)
+        os.makedirs(legacy_dir, exist_ok=True)
+        if os.path.exists(best_manifest_path):
+            os.remove(best_manifest_path)
         with open(best_manifest_path, "w") as f:
             json.dump(legacy_data, f)
+        os.chmod(best_manifest_path, 0o444)
 
         ctx = RunContext()
         ctx.allow_no_holdout = False
@@ -3078,6 +3090,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         }
         with open(best_manifest_path, "w") as f:
             json.dump(pointer_data, f, indent=2)
+        os.chmod(best_manifest_path, 0o444)
 
         with open(best_manifest_path, "rb") as f:
             original_pointer_bytes = f.read()
@@ -3252,6 +3265,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         }
         with open(best_manifest_path, "w") as f:
             json.dump(pointer_data, f, indent=2)
+        os.chmod(best_manifest_path, 0o444)
 
         prompt_dir = os.path.join(self.tmp_dir, "prompt_templates")
         os.makedirs(prompt_dir, exist_ok=True)
@@ -3591,6 +3605,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         }
         with open(best_manifest_path, "w") as f:
             json.dump(pointer_data, f, indent=2)
+        os.chmod(best_manifest_path, 0o444)
 
         prompt_dir = os.path.join(self.tmp_dir, "prompt_templates")
         os.makedirs(prompt_dir, exist_ok=True)
@@ -3775,6 +3790,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         }
         with open(best_manifest_path, "w") as f:
             json.dump(pointer_data, f, indent=2)
+        os.chmod(best_manifest_path, 0o444)
 
         with mock.patch("rsi_loop.HISTORY_DIR", history_dir), \
              mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
@@ -3802,6 +3818,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         best_manifest_path = os.path.join(self.tmp_dir, "best_manifest.json")
         with open(best_manifest_path, "w") as f:
             f.write("corrupted non-json content")
+        os.chmod(best_manifest_path, 0o444)
 
         with mock.patch("rsi_loop.HISTORY_DIR", history_dir), \
              mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
@@ -3862,6 +3879,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         }
         with open(best_manifest_path, "w") as f:
             json.dump(pointer_data, f, indent=2)
+        os.chmod(best_manifest_path, 0o444)
 
         with mock.patch("rsi_loop.HISTORY_DIR", history_dir), \
              mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
@@ -4118,6 +4136,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         }
         with open(best_manifest_path, "w") as f:
             json.dump(pointer_data, f, indent=2)
+        os.chmod(best_manifest_path, 0o444)
 
         with mock.patch("rsi_loop.HISTORY_DIR", history_dir), \
              mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
@@ -4333,6 +4352,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         best_manifest_path = os.path.join(self.tmp_dir, "best_manifest.json")
         with open(best_manifest_path, "w") as f:
             json.dump({"pointer_schema_version": "1"}, f)
+        os.chmod(best_manifest_path, 0o444)
 
         with mock.patch("rsi_loop.HISTORY_DIR", history_dir), \
              mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
@@ -4394,6 +4414,7 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         }
         with open(best_manifest_path, "w") as f:
             json.dump(pointer_data, f, indent=2)
+        os.chmod(best_manifest_path, 0o444)
 
         # A valid pending run in history
         run_pending_dir = os.path.join(history_dir, "run_pending_ok")
@@ -5090,6 +5111,695 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
 
             self.assertFalse(os.path.exists(manifest_path))
             self.assertFalse(os.path.exists(prompt_path))
+
+    def test_authoritative_pointer_sealed_0444_mode(self):
+        # 1. Test update_best_manifest_pointer creates 0o444 sealed pointer
+        run_dir = os.path.join(self.tmp_dir, "history", "run_pointer_test")
+        os.makedirs(run_dir, exist_ok=True)
+        manifest_path = os.path.join(run_dir, "run_manifest.json")
+        manifest_data = {
+            "schema_version": "2",
+            "run_id": "run_pointer_test",
+            "status": "completed_promoted",
+            "approved_commit_sha": "a" * 40,
+            "lock_file_hash": "mock_hash",
+            "selected_prompt_path": "inner_agent_best.txt",
+            "selected_prompt_hash": hashlib.sha256(b"prompt").hexdigest()
+        }
+        with open(manifest_path, "w") as f:
+            json.dump(manifest_data, f, indent=2)
+        os.chmod(manifest_path, 0o444)
+
+        prompt_path = os.path.join(run_dir, "inner_agent_best.txt")
+        with open(prompt_path, "w") as f:
+            f.write("prompt")
+        os.chmod(prompt_path, 0o444)
+
+        report_path = os.path.join(run_dir, "operator_report.json")
+        with open(report_path, "w") as f:
+            json.dump({
+                "schema_version": "2",
+                "run_id": "run_pointer_test",
+                "status": "completed_promoted",
+                "pointer_commit_status": "committed",
+                "manifest_sha256": hashlib.sha256(json.dumps(manifest_data, indent=2).encode('utf-8')).hexdigest()
+            }, f, indent=2)
+        os.chmod(report_path, 0o444)
+
+        best_manifest_path = os.path.realpath(os.path.join(self.tmp_dir, "best_manifest.json"))
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.BEST_MANIFEST_PATH", best_manifest_path):
+            update_best_manifest_pointer(manifest_path)
+            st = os.lstat(best_manifest_path)
+            self.assertEqual(st.st_mode & 0o777, 0o444)
+
+            # 2. Verify non-0o444 pointer is rejected by _read_authoritative_pointer
+            os.chmod(best_manifest_path, 0o666)
+            from rsi_loop import _read_authoritative_pointer
+            with self.assertRaises(ExperimentInvalidError) as e:
+                _read_authoritative_pointer()
+            self.assertIn("Authoritative pointer file mode is not 0o444", str(e.exception))
+
+    def test_huffman_solution_sealed_0444_mode_and_hash_validation(self):
+        run_dir = os.path.join(self.tmp_dir, "history", "run_sol_test")
+        huffman_dir = os.path.join(run_dir, "huffman_preflight")
+        os.makedirs(huffman_dir, exist_ok=True)
+
+        solution_path = os.path.join(huffman_dir, "solution.py")
+        sol_bytes = b"def solution(): pass"
+        with open(solution_path, "wb") as f:
+            f.write(sol_bytes)
+            f.flush()
+            os.fchmod(f.fileno(), 0o444)
+            os.fsync(f.fileno())
+
+        st = os.lstat(solution_path)
+        self.assertEqual(st.st_mode & 0o777, 0o444)
+
+        prompt_path = os.path.join(run_dir, "inner_agent_best.txt")
+        with open(prompt_path, "wb") as f:
+            f.write(b"prompt")
+        os.chmod(prompt_path, 0o444)
+
+        sol_rel = os.path.relpath(solution_path, run_dir)
+        sol_hash = hashlib.sha256(sol_bytes).hexdigest()
+
+        manifest_data = {
+            "schema_version": "2",
+            "run_id": "run_sol_test",
+            "status": "completed_promoted",
+            "approved_commit_sha": "a" * 40,
+            "lock_file_hash": "mock_hash",
+            "selected_prompt_path": "inner_agent_best.txt",
+            "selected_prompt_hash": hashlib.sha256(b"prompt").hexdigest(),
+            "preflight_huffman": {
+                "solution_path": sol_rel,
+                "solution_hash": sol_hash
+            }
+        }
+        manifest_path = os.path.join(run_dir, "run_manifest.json")
+        manifest_bytes = json.dumps(manifest_data, indent=2).encode('utf-8')
+        with open(manifest_path, "wb") as f:
+            f.write(manifest_bytes)
+        os.chmod(manifest_path, 0o444)
+
+        report_data = {
+            "schema_version": "2",
+            "run_id": "run_sol_test",
+            "status": "completed_promoted",
+            "pointer_commit_status": "committed",
+            "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "preflight_huffman": {
+                "solution_path": sol_rel,
+                "solution_hash": sol_hash
+            }
+        }
+        report_path = os.path.join(run_dir, "operator_report.json")
+        with open(report_path, "wb") as f:
+            f.write(json.dumps(report_data, indent=2).encode('utf-8'))
+        os.chmod(report_path, 0o444)
+
+        pointer_data = {
+            "pointer_schema_version": "2",
+            "run_manifest_path": "history/run_sol_test/run_manifest.json",
+            "run_manifest_sha256": report_data["manifest_sha256"]
+        }
+
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.HISTORY_DIR", os.path.join(self.tmp_dir, "history")):
+            # Should pass validation when solution is 0o444 and hash matches
+            validate_manifest_pointer_and_target(pointer_data)
+
+            # Re-writable solution file (0o644) should fail validation
+            os.chmod(solution_path, 0o644)
+            with self.assertRaises(RuntimeError) as e:
+                validate_manifest_pointer_and_target(pointer_data)
+            self.assertIn("Solution file mode is not 0o444", str(e.exception))
+
+    def test_terminal_no_headroom_explicit_not_run_holdout_fields(self):
+        ctx = RunContext()
+        ctx.run_id = "run_no_headroom_holdout_test"
+        ctx.run_dir = os.path.join(self.tmp_dir, "history", ctx.run_id)
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.lock_file_hash = "mock_hash"
+
+        init_operator_report(ctx)
+        self.assertEqual(ctx.operator_report["holdout"], {
+            "executed": "not_run",
+            "success": False,
+            "tokens": 0
+        })
+
+        sync_context_to_report(ctx)
+        self.assertEqual(ctx.operator_report["holdout"], {
+            "executed": "not_run",
+            "success": False,
+            "tokens": 0
+        })
+
+    def test_production_report_includes_solution_path_and_hash(self):
+        ctx = RunContext()
+        ctx.run_id = "run_prod_report_test"
+        ctx.run_dir = os.path.join(self.tmp_dir, "history", ctx.run_id)
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.lock_file_hash = "mock_hash"
+
+        init_operator_report(ctx)
+        ctx.preflight_huffman_data = {
+            "huffman_preflight_score": 1.0,
+            "huffman_preflight_success": True,
+            "solution_path": "huffman_preflight/solution.py",
+            "solution_hash": "a" * 64,
+            "tokens_consumed": 100
+        }
+        sync_context_to_report(ctx)
+        self.assertEqual(ctx.operator_report["preflight_huffman"]["solution_path"], "huffman_preflight/solution.py")
+        self.assertEqual(ctx.operator_report["preflight_huffman"]["solution_hash"], "a" * 64)
+
+    def test_validator_rejects_incomplete_report_missing_solution_path(self):
+        run_dir = os.path.join(self.tmp_dir, "history", "run_inc_test")
+        os.makedirs(run_dir, exist_ok=True)
+
+        prompt_path = os.path.join(run_dir, "inner_agent_best.txt")
+        with open(prompt_path, "wb") as f:
+            f.write(b"prompt")
+        os.chmod(prompt_path, 0o444)
+
+        manifest_data = {
+            "schema_version": "2",
+            "run_id": "run_inc_test",
+            "status": "completed_promoted",
+            "approved_commit_sha": "a" * 40,
+            "lock_file_hash": "mock_hash",
+            "selected_prompt_path": "inner_agent_best.txt",
+            "selected_prompt_hash": hashlib.sha256(b"prompt").hexdigest(),
+            "preflight_huffman": {
+                "solution_path": "huffman_preflight/solution.py",
+                "solution_hash": "a" * 64
+            }
+        }
+        manifest_path = os.path.join(run_dir, "run_manifest.json")
+        manifest_bytes = json.dumps(manifest_data, indent=2).encode('utf-8')
+        with open(manifest_path, "wb") as f:
+            f.write(manifest_bytes)
+        os.chmod(manifest_path, 0o444)
+
+        # Incomplete report missing solution_path in preflight_huffman
+        report_data = {
+            "schema_version": "2",
+            "run_id": "run_inc_test",
+            "status": "completed_promoted",
+            "pointer_commit_status": "committed",
+            "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "preflight_huffman": {
+                "solution_hash": "a" * 64
+            }
+        }
+        report_path = os.path.join(run_dir, "operator_report.json")
+        with open(report_path, "wb") as f:
+            f.write(json.dumps(report_data, indent=2).encode('utf-8'))
+        os.chmod(report_path, 0o444)
+
+        pointer_data = {
+            "pointer_schema_version": "2",
+            "run_manifest_path": "history/run_inc_test/run_manifest.json",
+            "run_manifest_sha256": report_data["manifest_sha256"]
+        }
+
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.HISTORY_DIR", os.path.join(self.tmp_dir, "history")):
+            with self.assertRaises(RuntimeError) as e:
+                validate_manifest_pointer_and_target(pointer_data)
+            self.assertIn("contains incomplete solution_path / solution_hash pair", str(e.exception))
+
+    def test_solution_symlink_components_rejected_without_realpath_bypass(self):
+        run_dir = os.path.join(self.tmp_dir, "history", "run_sym_test")
+        os.makedirs(run_dir, exist_ok=True)
+
+        real_sol = os.path.join(self.tmp_dir, "real_solution.py")
+        with open(real_sol, "wb") as f:
+            f.write(b"def solution(): pass")
+        os.chmod(real_sol, 0o444)
+
+        sol_link = os.path.join(run_dir, "solution_link.py")
+        os.symlink(real_sol, sol_link)
+
+        with self.assertRaises(RuntimeError) as e:
+            _validate_solution_file(run_dir, "solution_link.py", hashlib.sha256(b"def solution(): pass").hexdigest(), RuntimeError)
+        self.assertIn("Symlink detected in solution path", str(e.exception))
+
+    def test_candidate_trial_solutions_path_and_hash_validated(self):
+        ctx = RunContext()
+        ctx.run_dir = os.path.join(self.tmp_dir, "history", "run_trial_sol_test")
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        iter_dir = os.path.join(ctx.run_dir, "trial_1", "circular_buffer")
+        os.makedirs(iter_dir, exist_ok=True)
+
+        bench_dir = os.path.join(self.tmp_dir, "benchmarks", "circular_buffer")
+        os.makedirs(bench_dir, exist_ok=True)
+        with open(os.path.join(bench_dir, "problem.txt"), "w") as f:
+            f.write("problem")
+        with open(os.path.join(bench_dir, "test_harness.py"), "w") as f:
+            f.write("harness")
+
+        bench_root = os.path.join(self.tmp_dir, "benchmarks")
+        with mock.patch("rsi_loop.call_codex_sandboxed", return_value=("def solution(): pass", 10)), \
+             mock.patch("rsi_loop.run_evaluation_on_candidate", return_value={"success": True, "log": "Ran 5 tests"}):
+            score, results, tokens = evaluate_prompt_on_tasks("prompt", ctx.run_dir, "trial_1", bench_root, ["circular_buffer"], 0, ctx)
+
+        self.assertIn("solution_path", results["circular_buffer"])
+        self.assertIn("solution_hash", results["circular_buffer"])
+        self.assertEqual(results["circular_buffer"]["solution_path"], "trial_1/circular_buffer/solution.py")
+
+        filtered = _filter_benchmarks(results)
+        self.assertIn("solution_path", filtered["circular_buffer"])
+        self.assertIn("solution_hash", filtered["circular_buffer"])
+
+    def test_terminal_manifest_publication_and_pointer_reload_validation(self):
+        ctx = RunContext()
+        ctx.run_id = "run_term_val_test"
+        ctx.approved_commit_sha = "a" * 40
+        ctx.run_dir = os.path.realpath(os.path.join(self.tmp_dir, "history", ctx.run_id))
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.lock_file_hash = "mock_hash"
+
+        # Create solution file
+        sol_dir = os.path.join(ctx.run_dir, "trial_1", "circular_buffer")
+        os.makedirs(sol_dir, exist_ok=True)
+        sol_file = os.path.join(sol_dir, "solution.py")
+        sol_bytes = b"def solution(): return True"
+        with open(sol_file, "wb") as f:
+            f.write(sol_bytes)
+            f.flush()
+            os.fchmod(f.fileno(), 0o444)
+            os.fsync(f.fileno())
+
+        sol_hash = hashlib.sha256(sol_bytes).hexdigest()
+        sol_rel = os.path.relpath(os.path.realpath(sol_file), os.path.realpath(ctx.run_dir))
+
+        ctx.trial_results = [{
+            "trial": "trial_1",
+            "baseline_score": 0.5,
+            "opt_score": 1.0,
+            "delta": 0.5,
+            "candidate_prompt_hash": "b" * 64,
+            "baseline_run": {
+                "benchmarks": {
+                    "circular_buffer": {
+                        "success": True,
+                        "solution_path": sol_rel,
+                        "solution_hash": sol_hash
+                    }
+                },
+                "tokens_consumed": 50
+            },
+            "mutations": []
+        }]
+
+        val_sol_dir = os.path.join(ctx.run_dir, "validation_run", "circular_buffer")
+        os.makedirs(val_sol_dir, exist_ok=True)
+        val_sol_file = os.path.join(val_sol_dir, "solution.py")
+        with open(val_sol_file, "wb") as f:
+            f.write(sol_bytes)
+            f.flush()
+            os.fchmod(f.fileno(), 0o444)
+            os.fsync(f.fileno())
+
+        val_sol_rel = os.path.relpath(os.path.realpath(val_sol_file), os.path.realpath(ctx.run_dir))
+
+        ctx.validation_run_record = {
+            "baseline": {
+                "score": 1.0,
+                "benchmarks": {
+                    "circular_buffer": {
+                        "success": True,
+                        "solution_path": val_sol_rel,
+                        "solution_hash": sol_hash
+                    }
+                },
+                "tokens_consumed": 50
+            },
+            "candidates": {}
+        }
+
+        init_operator_report(ctx)
+        sync_context_to_report(ctx)
+
+        prompt_path = os.path.join(ctx.run_dir, "inner_agent_best.txt")
+        with open(prompt_path, "wb") as f:
+            f.write(b"prompt_text")
+        os.chmod(prompt_path, 0o444)
+
+        manifest_data = {
+            "schema_version": "2",
+            "run_id": ctx.run_id,
+            "status": "completed_promoted",
+            "approved_commit_sha": "a" * 40,
+            "lock_file_hash": "mock_hash",
+            "selected_prompt_path": "inner_agent_best.txt",
+            "selected_prompt_hash": hashlib.sha256(b"prompt_text").hexdigest(),
+            "trial_results": ctx.trial_results,
+            "validation_run": ctx.validation_run_record
+        }
+
+        manifest_path = os.path.join(ctx.run_dir, "run_manifest.json")
+        publish_terminal_manifest_and_report(ctx, manifest_path, manifest_data, pointer_commit_status="committed")
+
+        pointer_data = {
+            "pointer_schema_version": "2",
+            "run_manifest_path": f"history/{ctx.run_id}/run_manifest.json",
+            "run_manifest_sha256": _sha256_file(manifest_path)
+        }
+
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.HISTORY_DIR", os.path.join(self.tmp_dir, "history")):
+            validated = validate_manifest_pointer_and_target(pointer_data)
+            self.assertEqual(validated["run_id"], ctx.run_id)
+
+    def test_startup_sequence_reconciles_committed_pointer_with_pending_report(self):
+        ctx = RunContext()
+        ctx.run_id = "run_pending_recovery_order_test"
+        ctx.approved_commit_sha = "a" * 40
+        ctx.run_dir = os.path.realpath(os.path.join(self.tmp_dir, "history", ctx.run_id))
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.lock_file_hash = "mock_hash"
+
+        init_operator_report(ctx)
+        sync_context_to_report(ctx)
+
+        prompt_path = os.path.join(ctx.run_dir, "inner_agent_best.txt")
+        prompt_bytes = b"recovered prompt text"
+        with open(prompt_path, "wb") as f:
+            f.write(prompt_bytes)
+        os.chmod(prompt_path, 0o444)
+
+        manifest_data = {
+            "schema_version": "2",
+            "run_id": ctx.run_id,
+            "status": "completed_promoted",
+            "approved_commit_sha": "a" * 40,
+            "lock_file_hash": "mock_hash",
+            "selected_prompt_path": "inner_agent_best.txt",
+            "selected_prompt_hash": hashlib.sha256(prompt_bytes).hexdigest()
+        }
+
+        manifest_path = os.path.join(ctx.run_dir, "run_manifest.json")
+        publish_terminal_manifest_and_report(ctx, manifest_path, manifest_data, pointer_commit_status="pending")
+
+        best_manifest_path = os.path.join(self.tmp_dir, "best_manifest.json")
+        pointer_data = {
+            "pointer_schema_version": "2",
+            "run_manifest_path": f"history/{ctx.run_id}/run_manifest.json",
+            "run_manifest_sha256": _sha256_file(manifest_path)
+        }
+        with open(best_manifest_path, "w") as f:
+            json.dump(pointer_data, f)
+        os.chmod(best_manifest_path, 0o444)
+
+        with mock.patch("rsi_loop.BEST_MANIFEST_PATH", best_manifest_path), \
+             mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.HISTORY_DIR", os.path.join(self.tmp_dir, "history")):
+            recover_pending_runs()
+            verify_existing_best_manifest_startup()
+
+        # Operator report should now be reconciled to committed
+        report_path = os.path.join(ctx.run_dir, "operator_report.json")
+        with open(report_path) as f:
+            rep = json.load(f)
+        self.assertEqual(rep["pointer_commit_status"], "committed")
+
+    def test_actual_historical_legacy_pointer_and_target_archived_without_mutation(self):
+        legacy_run_id = "run_1785357988_aaf6d755"
+        run_dir = os.path.realpath(os.path.join(self.tmp_dir, "history", legacy_run_id))
+        os.makedirs(run_dir, exist_ok=True)
+
+        huffman_dir = os.path.join(run_dir, "huffman_preflight")
+        os.makedirs(huffman_dir, exist_ok=True)
+        sol_file = os.path.join(huffman_dir, "solution.py")
+        sol_bytes = b"def solution(): pass"
+        with open(sol_file, "wb") as f:
+            f.write(sol_bytes)
+        os.chmod(sol_file, 0o644)  # Legacy 0o644 mode
+
+        sol_hash = hashlib.sha256(sol_bytes).hexdigest()
+
+        # Real historical schema 2 shape with preflight_huffman omitting solution_path
+        report_data = {
+            "schema_version": "2",
+            "run_id": legacy_run_id,
+            "status": "completed_promoted",
+            "pointer_commit_status": "committed",
+            "preflight_huffman": {
+                "score": 1.0,
+                "success": True,
+                "tokens": 1021,
+                "solution_hash": sol_hash
+            }
+        }
+        report_path = os.path.join(run_dir, "operator_report.json")
+        with open(report_path, "w") as f:
+            json.dump(report_data, f, indent=2)
+
+        manifest_data = {
+            "schema_version": "2",
+            "run_id": legacy_run_id,
+            "status": "completed_promoted",
+            "preflight_huffman": {
+                "huffman_preflight_score": 1.0,
+                "huffman_preflight_success": True,
+                "solution_hash": sol_hash,
+                "tokens_consumed": 1021
+            }
+        }
+        manifest_path = os.path.join(run_dir, "run_manifest.json")
+        manifest_bytes = json.dumps(manifest_data, indent=2).encode('utf-8')
+        manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+        with open(manifest_path, "wb") as f:
+            f.write(manifest_bytes)
+        os.chmod(manifest_path, 0o444)
+
+        best_manifest_path = os.path.join(self.tmp_dir, "best_manifest.json")
+        # Real exact historical pointer bytes matching production KNOWN_HISTORICAL_POINTER_HASH
+        exact_pointer_bytes = b'{\n  "pointer_schema_version": "2",\n  "run_manifest_path": "history/run_1785357988_aaf6d755/run_manifest.json",\n  "run_manifest_sha256": "9b98867be35797592b71138e90c3094838b1c3d439888c2bdacec046c64fe1c1"\n}'
+        with open(best_manifest_path, "wb") as f:
+            f.write(exact_pointer_bytes)
+        os.chmod(best_manifest_path, 0o600)  # Legacy 0o600 pointer
+
+        from rsi_loop import KNOWN_HISTORICAL_POINTER_HASH
+
+        with mock.patch("rsi_loop.BEST_MANIFEST_PATH", best_manifest_path), \
+             mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.HISTORY_DIR", os.path.join(self.tmp_dir, "history")):
+            # Unmocked assertion against production KNOWN_HISTORICAL_POINTER_HASH constant
+            self.assertEqual(_sha256_file(best_manifest_path), KNOWN_HISTORICAL_POINTER_HASH)
+
+            # 1. Assert an unrelated 0o600 pointer (modified bytes) is REJECTED without mutation
+            unrelated_pointer_path = os.path.join(self.tmp_dir, "unrelated_pointer.json")
+            with open(unrelated_pointer_path, "wb") as f:
+                f.write(b'{"pointer_schema_version": "2", "run_manifest_path": "history/unrelated/run_manifest.json", "run_manifest_sha256": "aaaa"}')
+            os.chmod(unrelated_pointer_path, 0o600)
+
+            with mock.patch("rsi_loop.BEST_MANIFEST_PATH", unrelated_pointer_path):
+                with self.assertRaises(ExperimentInvalidError) as un_err:
+                    recover_pending_runs()
+                self.assertIn("file mode is not 0o444", str(un_err.exception))
+                self.assertEqual(os.stat(unrelated_pointer_path).st_mode & 0o777, 0o600)
+
+            # 2. Historical pointer pass 1 classification & startup archival
+            recover_pending_runs()
+            with self.assertRaises(ExperimentInvalidError) as e:
+                verify_existing_best_manifest_startup()
+            self.assertIn("was invalid/legacy", str(e.exception))
+
+            # Verify pointer was archived and removed
+            self.assertFalse(os.path.exists(best_manifest_path))
+            legacy_arch_dir = os.path.join(self.tmp_dir, "history", "legacy")
+            self.assertEqual(len(os.listdir(legacy_arch_dir)), 1)
+
+            # Verify historical target solution file mode was NOT mutated
+            st = os.stat(sol_file)
+            self.assertEqual(st.st_mode & 0o777, 0o644)
+
+            # Next startup should proceed cleanly without raising
+            verify_existing_best_manifest_startup()
+
+    def test_main_exec_production_path_assigns_validation_record_and_validates(self):
+        ctx = RunContext()
+        ctx.run_id = "run_prod_main_exec_val_test"
+        ctx.allow_no_holdout = True
+        ctx.run_dir = os.path.realpath(os.path.join(self.tmp_dir, "history", ctx.run_id))
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.lock_file_hash = "mock_hash"
+
+        # Baseline prompt file
+        base_prompt_path = os.path.join(self.tmp_dir, "inner_agent_best.txt")
+        with open(base_prompt_path, "w") as f:
+            f.write("baseline prompt")
+        os.chmod(base_prompt_path, 0o444)
+
+        for fname in ["candidate.sb.template", "generator.sb.template", "preflight_hashes.json"]:
+            fpath = os.path.join(self.tmp_dir, fname)
+            with open(fpath, "w") as f:
+                f.write("{}")
+
+        sol_bytes = b"def solution(): pass"
+        sol_hash = hashlib.sha256(sol_bytes).hexdigest()
+
+        val_sol_dir = os.path.join(ctx.run_dir, "validation_baseline", "circular_buffer")
+        os.makedirs(val_sol_dir, exist_ok=True)
+        val_sol_file = os.path.join(val_sol_dir, "solution.py")
+        with open(val_sol_file, "wb") as f:
+            f.write(sol_bytes)
+            f.flush()
+            os.fchmod(f.fileno(), 0o444)
+            os.fsync(f.fileno())
+
+        val_res_dict = {
+            "circular_buffer": {
+                "success": True,
+                "solution_path": "validation_baseline/circular_buffer/solution.py",
+                "solution_hash": sol_hash
+            }
+        }
+
+        fail_res_dict = {
+            "circular_buffer": {
+                "success": False,
+                "solution_path": "validation_baseline/circular_buffer/solution.py",
+                "solution_hash": sol_hash,
+                "error": "test failure"
+            }
+        }
+
+        best_manifest_path = os.path.join(self.tmp_dir, "best_manifest.json")
+
+        def mock_eval_cand(candidate_dir, harness_path):
+            if "huffman_preflight" in candidate_dir:
+                return {"success": False, "score": 0.0, "log": "Ran 5 tests in 0.001s\n\nFAILED", "tests_run": 5}
+            return {"success": True, "score": 1.0, "log": "Ran 5 tests in 0.001s\n\nOK", "tests_run": 5}
+
+        def mock_eval_prompt(prompt, rdir, label, bdir, tasks, tokens, ctx_arg):
+            if "baseline" in label:
+                return (0.5, fail_res_dict, 50)
+            return (1.0, val_res_dict, 50)
+
+        with mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.HISTORY_DIR", os.path.join(self.tmp_dir, "history")), \
+             mock.patch("rsi_loop.BEST_MANIFEST_PATH", best_manifest_path), \
+             mock.patch("rsi_loop.BASELINE_PROMPT_PATH", base_prompt_path), \
+             mock.patch("rsi_loop._list_optimization_benchmarks", return_value=["circular_buffer"]), \
+             mock.patch("rsi_loop._list_validation_benchmarks", return_value=["circular_buffer"]), \
+             mock.patch("rsi_loop.verify_experiment_lock", return_value="a" * 40), \
+             mock.patch("rsi_loop.verify_preflight_hashes"), \
+             mock.patch("rsi_loop.run_smoke_and_canary", return_value=("codex-cli 0.144.5", 5)), \
+             mock.patch("rsi_loop.call_codex_sandboxed", return_value=("opt prompt", 10)), \
+             mock.patch("rsi_loop.run_evaluation_on_candidate", side_effect=mock_eval_cand), \
+             mock.patch("rsi_loop.evaluate_prompt_on_tasks", side_effect=mock_eval_prompt), \
+             mock.patch("rsi_loop.update_best_manifest_pointer"):
+
+            init_operator_report(ctx)
+            _main_exec(ctx)
+
+            # Assert production _main_exec assigned ctx.validation_run_record
+            self.assertIsNotNone(ctx.validation_run_record)
+            self.assertIn("baseline", ctx.validation_run_record)
+            self.assertIn("candidates", ctx.validation_run_record)
+
+            # Assert operator report contains validation_run matching run_manifest exactly
+            report_path = os.path.join(ctx.run_dir, "operator_report.json")
+            manifest_path = os.path.join(ctx.run_dir, "run_manifest.json")
+            self.assertTrue(os.path.exists(report_path))
+            self.assertTrue(os.path.exists(manifest_path))
+
+            with open(report_path) as rf, open(manifest_path) as mf:
+                rep = json.load(rf)
+                man = json.load(mf)
+
+            self.assertIn("validation_run", rep)
+            self.assertIn("validation_run", man)
+            self.assertEqual(rep["validation_run"], man["validation_run"])
+
+            # Construct published pointer and run production validator against it
+            pointer_data = {
+                "pointer_schema_version": "2",
+                "run_manifest_path": f"history/{ctx.run_id}/run_manifest.json",
+                "run_manifest_sha256": _sha256_file(manifest_path)
+            }
+            with open(best_manifest_path, "w") as pf:
+                json.dump(pointer_data, pf)
+            os.chmod(best_manifest_path, 0o444)
+
+            validated = validate_manifest_pointer_and_target(pointer_data)
+            self.assertEqual(validated["run_id"], ctx.run_id)
+
+    def test_holdout_solution_sealed_0444_and_authenticated(self):
+        ctx = RunContext()
+        ctx.run_id = "run_holdout_auth_test"
+        ctx.run_dir = os.path.realpath(os.path.join(self.tmp_dir, "history", ctx.run_id))
+        os.makedirs(ctx.run_dir, exist_ok=True)
+        ctx.lock_file_hash = "mock_hash"
+        ctx.approved_commit_sha = "a" * 40
+
+        priv_dir = os.path.join(self.tmp_dir, "private")
+        matcher_dir = os.path.join(priv_dir, "simple_regex_matcher")
+        os.makedirs(matcher_dir, exist_ok=True)
+        with open(os.path.join(matcher_dir, "problem.txt"), "w") as f:
+            f.write("problem")
+        with open(os.path.join(matcher_dir, "test_holdout.py"), "w") as f:
+            f.write("harness")
+
+        from rsi_loop import run_holdout_evaluation
+        with mock.patch("rsi_loop.PRIVATE_DIR", priv_dir), \
+             mock.patch("rsi_loop.verify_holdout_hashes"), \
+             mock.patch("rsi_loop.call_codex_sandboxed", return_value=("def holdout_sol(): pass", 15)), \
+             mock.patch("rsi_loop.run_evaluation_on_candidate", return_value={"success": True}):
+            record, tokens = run_holdout_evaluation("best_prompt", ctx.run_dir, ctx)
+
+        self.assertIsNotNone(record)
+        self.assertIn("solution_path", record)
+        self.assertIn("solution_hash", record)
+        self.assertEqual(record["solution_path"], "holdout_evaluation/solution.py")
+
+        sol_file = os.path.join(ctx.run_dir, "holdout_evaluation", "solution.py")
+        self.assertTrue(os.path.exists(sol_file))
+        st = os.stat(sol_file)
+        self.assertEqual(st.st_mode & 0o777, 0o444)
+
+        ctx.holdout_record = record
+        init_operator_report(ctx)
+        sync_context_to_report(ctx)
+
+        prompt_path = os.path.join(ctx.run_dir, "inner_agent_best.txt")
+        with open(prompt_path, "wb") as f:
+            f.write(b"prompt_text")
+        os.chmod(prompt_path, 0o444)
+
+        manifest_data = {
+            "schema_version": "2",
+            "run_id": ctx.run_id,
+            "status": "completed_promoted",
+            "approved_commit_sha": "a" * 40,
+            "lock_file_hash": "mock_hash",
+            "selected_prompt_path": "inner_agent_best.txt",
+            "selected_prompt_hash": hashlib.sha256(b"prompt_text").hexdigest(),
+            "holdout": record
+        }
+
+        manifest_path = os.path.join(ctx.run_dir, "run_manifest.json")
+        publish_terminal_manifest_and_report(ctx, manifest_path, manifest_data, pointer_commit_status="committed")
+
+        best_manifest_path = os.path.join(self.tmp_dir, "best_manifest.json")
+        with mock.patch("rsi_loop.BEST_MANIFEST_PATH", best_manifest_path), \
+             mock.patch("rsi_loop.BASE_DIR", self.tmp_dir), \
+             mock.patch("rsi_loop.HISTORY_DIR", os.path.join(self.tmp_dir, "history")):
+            update_best_manifest_pointer(manifest_path)
+            pointer_data = {
+                "pointer_schema_version": "2",
+                "run_manifest_path": f"history/{ctx.run_id}/run_manifest.json",
+                "run_manifest_sha256": _sha256_file(manifest_path)
+            }
+            validated = validate_manifest_pointer_and_target(pointer_data)
+            self.assertEqual(validated["run_id"], ctx.run_id)
 
 if __name__ == "__main__":
     unittest.main()

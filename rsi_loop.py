@@ -96,6 +96,7 @@ class RunContext:
         self.canary_tokens_consumed = "unknown"
         self.preflight_huffman_data = None
         self.trial_results = None
+        self.validation_run_record = None
         self.holdout_record = None
         self.terminal_state = "not_started"
         self.operator_report = {}
@@ -920,14 +921,19 @@ def evaluate_prompt_on_tasks(
         solution_file = os.path.join(iter_task_dir, "solution.py")
         with open(solution_file, "w") as f:
             f.write(solution_code)
+            f.flush()
+            os.fchmod(f.fileno(), 0o444)
+            os.fsync(f.fileno())
 
         test_harness_path = os.path.join(benchmark_dir, "test_harness.py")
         eval_res = run_evaluation_on_candidate(iter_task_dir, test_harness_path)
 
+        solution_rel_path = os.path.relpath(os.path.realpath(solution_file), os.path.realpath(ctx.run_dir))
         results[benchmark] = {
             "success": eval_res["success"],
             "error": eval_res.get("error"),
             "tokens_consumed": tokens,
+            "solution_path": solution_rel_path,
             "solution_hash": hashlib.sha256(solution_code.encode()).hexdigest(),
         }
         if eval_res["success"]:
@@ -1370,7 +1376,7 @@ def _filter_benchmarks(benchmarks: dict) -> dict:
     res = {}
     for task_name, task_data in benchmarks.items():
         if isinstance(task_data, dict):
-            allowed_fields = ["success", "tokens_consumed", "score", "status"]
+            allowed_fields = ["success", "tokens_consumed", "score", "status", "solution_path", "solution_hash"]
             filtered_task = {}
             for k in allowed_fields:
                 if k in task_data:
@@ -1432,7 +1438,8 @@ def sync_context_to_report(ctx: RunContext) -> None:
         ph["success"] = ctx.preflight_huffman_data.get("huffman_preflight_success", "unknown")
         ph["tests_run"] = 5
         ph["tokens"] = ctx.preflight_huffman_data.get("tokens_consumed", "unknown")
-        ph["solution_hash"] = ctx.preflight_huffman_data.get("solution_hash", "unknown")
+        ph["solution_path"] = ctx.preflight_huffman_data.get("solution_path")
+        ph["solution_hash"] = ctx.preflight_huffman_data.get("solution_hash")
 
     if ctx.trial_results is not None:
         filtered_trials = []
@@ -1478,11 +1485,37 @@ def sync_context_to_report(ctx: RunContext) -> None:
             for t in ctx.trial_results
         ]
 
+    if ctx.validation_run_record is not None:
+        ctx.operator_report["validation_run"] = {
+            "baseline": {
+                "score": ctx.validation_run_record.get("baseline", {}).get("score"),
+                "benchmarks": _filter_benchmarks(ctx.validation_run_record.get("baseline", {}).get("benchmarks", {})),
+                "tokens_consumed": ctx.validation_run_record.get("baseline", {}).get("tokens_consumed")
+            },
+            "candidates": {
+                t_name: {
+                    "score": c_data.get("score"),
+                    "benchmarks": _filter_benchmarks(c_data.get("benchmarks", {})),
+                    "tokens_consumed": c_data.get("tokens_consumed")
+                }
+                for t_name, c_data in ctx.validation_run_record.get("candidates", {}).items()
+            }
+        }
+
     if ctx.holdout_record is not None:
         ho = ctx.operator_report.setdefault("holdout", {})
         ho["executed"] = True
-        ho["success"] = ctx.holdout_record.get("result", "unknown")
-        ho["tokens"] = ctx.holdout_record.get("usage", {}).get("output_tokens", "unknown")
+        ho["success"] = ctx.holdout_record.get("result", False)
+        ho["tokens"] = ctx.holdout_record.get("usage", {}).get("output_tokens", 0)
+        if ctx.holdout_record.get("solution_path") is not None:
+            ho["solution_path"] = ctx.holdout_record.get("solution_path")
+        if ctx.holdout_record.get("solution_hash") is not None:
+            ho["solution_hash"] = ctx.holdout_record.get("solution_hash")
+    else:
+        ho = ctx.operator_report.setdefault("holdout", {})
+        ho["executed"] = "not_run"
+        ho["success"] = False
+        ho["tokens"] = 0
 
     if ctx.lock_remote_url != "unknown":
         ctx.operator_report["lock_remote_url"] = ctx.lock_remote_url
@@ -1594,17 +1627,12 @@ def init_operator_report(ctx: RunContext) -> None:
             "cumulative_consumed": 0,
             "ceiling": 50000
         },
-        "preflight_huffman": {
-            "score": "unknown",
-            "success": "unknown",
-            "log": "unknown"
-        },
         "trials": [],
         "candidates": [],
         "holdout": {
-            "executed": "unknown",
-            "success": "unknown",
-            "tokens": "unknown"
+            "executed": "not_run",
+            "success": False,
+            "tokens": 0
         },
         "model_requested": "unknown",
         "model_resolved": "unknown",
@@ -1614,6 +1642,88 @@ def init_operator_report(ctx: RunContext) -> None:
         "local_head_sha": "unknown",
         "remote_main_sha": "unknown"
     }
+
+
+def _validate_solution_file(run_dir: str, sol_rel: str, sol_hash: str, error_cls=RuntimeError) -> None:
+    if not sol_rel or not isinstance(sol_rel, str):
+        raise error_cls("solution_path is missing or not a string")
+    if not sol_hash or not isinstance(sol_hash, str):
+        raise error_cls("solution_hash is missing or not a string")
+
+    # 1. Symlink / path component rejection (check unresolved components from run_dir down using lstat)
+    parts = []
+    for part in sol_rel.split(os.sep):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            raise error_cls(f"Parent directory traversal (..) is not allowed in solution_path: {sol_rel}")
+        parts.append(part)
+
+    current_path = os.path.realpath(run_dir)
+    for part in parts:
+        current_path = os.path.join(current_path, part)
+        try:
+            st = os.lstat(current_path)
+            if stat.S_ISLNK(st.st_mode):
+                raise error_cls(f"Symlink detected in solution path: {current_path}")
+        except OSError as oe:
+            if isinstance(oe, FileNotFoundError):
+                raise error_cls(f"Solution file missing: {current_path}")
+            raise error_cls(f"Failed to stat component {current_path}: {oe}")
+
+    sol_full_path = os.path.realpath(current_path)
+
+    # 2. Containment validation
+    if not is_contained(sol_full_path, run_dir):
+        raise error_cls(f"Solution path {sol_full_path} is not contained within run directory {run_dir}")
+
+    # 3. Regular-file type check
+    if not os.path.exists(sol_full_path):
+        raise error_cls(f"Solution file missing: {sol_full_path}")
+    if os.path.islink(sol_full_path) or not os.path.isfile(sol_full_path):
+        raise error_cls(f"Solution path is not a regular file: {sol_full_path}")
+
+    # 4. Mode 0o444 validation
+    st = os.stat(sol_full_path)
+    if (st.st_mode & 0o777) != 0o444:
+        raise error_cls(f"Solution file mode is not 0o444: {oct(st.st_mode & 0o777)} for {sol_full_path}")
+
+    # 5. Hash validation
+    actual_hash = _sha256_file(sol_full_path)
+    if actual_hash != sol_hash:
+        raise error_cls(f"Solution hash mismatch for {sol_full_path}: expected {sol_hash}, got {actual_hash}")
+
+
+def _extract_and_validate_all_solutions(run_dir: str, manifest_data: dict, report_data: dict, error_cls=RuntimeError) -> None:
+    def _collect_solutions(container, out_dict):
+        if isinstance(container, dict):
+            rel = container.get("solution_path")
+            hsh = container.get("solution_hash")
+            if rel or hsh:
+                if not rel or not hsh:
+                    raise error_cls("Benchmark result contains incomplete solution_path / solution_hash pair")
+                out_dict[rel] = hsh
+            for v in container.values():
+                _collect_solutions(v, out_dict)
+        elif isinstance(container, list):
+            for item in container:
+                _collect_solutions(item, out_dict)
+
+    m_sols = {}
+    r_sols = {}
+    _collect_solutions(manifest_data, m_sols)
+    _collect_solutions(report_data, r_sols)
+
+    for rel, hsh in m_sols.items():
+        if rel not in r_sols:
+            raise error_cls(f"Solution {rel} in manifest is missing from operator report")
+        if r_sols[rel] != hsh:
+            raise error_cls(f"Solution {rel} hash mismatch between manifest ({hsh}) and report ({r_sols[rel]})")
+        _validate_solution_file(run_dir, rel, hsh, error_cls=error_cls)
+
+    for rel, hsh in r_sols.items():
+        if rel not in m_sols:
+            raise error_cls(f"Solution {rel} in report is missing from manifest")
 
 
 def validate_manifest_pointer_and_target(pointer_data: dict, allow_pending: bool = False) -> dict:
@@ -1740,6 +1850,9 @@ def validate_manifest_pointer_and_target(pointer_data: dict, allow_pending: bool
     if actual_prompt_hash != selected_prompt_hash:
         raise RuntimeError(f"Selected prompt hash mismatch: expected {selected_prompt_hash}, got {actual_prompt_hash}")
 
+    # 6. Solution file validation across all benchmarks (preflight, trials, candidates)
+    _extract_and_validate_all_solutions(run_dir, target_manifest, report_data, RuntimeError)
+
     return target_manifest
 
 def load_and_verify_best_manifest() -> dict | None:
@@ -1757,6 +1870,11 @@ def verify_existing_best_manifest_startup() -> None:
     if not os.path.exists(BEST_MANIFEST_PATH):
         return
     try:
+        st = os.lstat(BEST_MANIFEST_PATH)
+        if stat.S_ISLNK(st.st_mode):
+            raise ExperimentInvalidError(f"Symlink detected at pointer path: {BEST_MANIFEST_PATH}")
+        if (st.st_mode & 0o777) != 0o444:
+            raise ExperimentInvalidError(f"Authoritative pointer file mode is not 0o444: {oct(st.st_mode & 0o777)}")
         with open(BEST_MANIFEST_PATH) as f:
             ptr = json.load(f)
         validate_manifest_pointer_and_target(ptr)
@@ -1820,6 +1938,7 @@ def update_best_manifest_pointer(manifest_path: str) -> None:
         with os.fdopen(fd, 'w') as f:
             json.dump(pointer_data, f, indent=2)
             f.flush()
+            os.fchmod(f.fileno(), 0o444)
             os.fsync(f.fileno())
     except Exception as e:
         try:
@@ -1842,6 +1961,15 @@ def update_best_manifest_pointer(manifest_path: str) -> None:
             except Exception:
                 pass
         raise ExperimentInvalidError(f"Failed to atomically replace pointer file: {e}")
+
+    try:
+        st = os.lstat(BEST_MANIFEST_PATH)
+        if stat.S_ISLNK(st.st_mode):
+            raise ExperimentInvalidError(f"Symlink detected at pointer path: {BEST_MANIFEST_PATH}")
+        if (st.st_mode & 0o777) != 0o444:
+            raise ExperimentInvalidError(f"Authoritative pointer file mode is not 0o444: {oct(st.st_mode & 0o777)}")
+    except Exception as e:
+        raise ExperimentInvalidError(f"Failed to verify authoritative pointer mode: {e}")
 
     # fsync on parent directory descriptor of BEST_MANIFEST_PATH
     parent_dir = os.path.dirname(os.path.realpath(BEST_MANIFEST_PATH))
@@ -2118,6 +2246,9 @@ def run_holdout_evaluation(
         solution_file = os.path.join(temp_gen_dir, "solution.py")
         with open(solution_file, "w") as f:
             f.write(solution_code)
+            f.flush()
+            os.fchmod(f.fileno(), 0o444)
+            os.fsync(f.fileno())
 
         eval_res = run_evaluation_on_candidate(temp_gen_dir, harness_file)
         solution_hash = hashlib.sha256(solution_code.encode()).hexdigest()
@@ -2126,12 +2257,21 @@ def run_holdout_evaluation(
         if not is_contained(run_holdout_dir, run_dir):
             raise ExperimentInvalidError("Path traversal in holdout evaluation run directory")
         os.makedirs(run_holdout_dir, exist_ok=True)
-        shutil.copy2(solution_file, os.path.join(run_holdout_dir, "solution.py"))
+
+        dest_holdout_solution = os.path.join(run_holdout_dir, "solution.py")
+        with open(dest_holdout_solution, "w") as f:
+            f.write(solution_code)
+            f.flush()
+            os.fchmod(f.fileno(), 0o444)
+            os.fsync(f.fileno())
+
+        sol_rel_path = os.path.relpath(os.path.realpath(dest_holdout_solution), os.path.realpath(run_dir))
 
         holdout_manifest_path = os.path.join(run_holdout_dir, "holdout_manifest.json")
         holdout_record = {
             "problem_hash": problem_hash,
             "harness_hash": harness_hash,
+            "solution_path": sol_rel_path,
             "solution_hash": solution_hash,
             "result": eval_res["success"],
             "error": eval_res.get("error"),
@@ -2225,6 +2365,7 @@ def _main_exec(ctx: RunContext) -> None:
     ctx.current_stage = "preflight_verifications"
     log_phase_transition(ctx, "phase_0_lock_and_git", "running")
     approved_sha = verify_experiment_lock(ctx)
+    ctx.approved_commit_sha = approved_sha
     verify_preflight_hashes()
 
     # Verify holdout if no-holdout mode is not authorized
@@ -2279,6 +2420,9 @@ def _main_exec(ctx: RunContext) -> None:
     solution_file = os.path.join(huffman_iter_dir, "solution.py")
     with open(solution_file, "w") as f:
         f.write(huffman_code)
+        f.flush()
+        os.fchmod(f.fileno(), 0o444)
+        os.fsync(f.fileno())
 
     huffman_harness = os.path.join(BENCHMARKS_DIR, "huffman_coding", "test_harness.py")
     eval_res = run_evaluation_on_candidate(huffman_iter_dir, huffman_harness)
@@ -2291,12 +2435,14 @@ def _main_exec(ctx: RunContext) -> None:
     if not tests_run_match or int(tests_run_match.group(1)) != 5:
         raise ExperimentInvalidError(f"Huffman preflight failed: expected 5 tests to run, log output:\n{huffman_log}")
 
+    solution_rel_path = os.path.relpath(solution_file, ctx.run_dir)
     preflight_huffman_path = os.path.join(ctx.run_dir, "preflight_huffman.json")
     preflight_huffman_data = {
         "huffman_preflight_score": 1.0 if huffman_success else 0.0,
         "huffman_preflight_success": huffman_success,
         "huffman_log": huffman_log,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "solution_path": solution_rel_path,
         "solution_hash": hashlib.sha256(huffman_code.encode()).hexdigest(),
         "tokens_consumed": huff_tokens,
     }
@@ -2531,18 +2677,19 @@ def _main_exec(ctx: RunContext) -> None:
     validation_run_record = {
         "baseline": {
             "score": baseline_val_score,
-            "benchmarks": baseline_val_results,
+            "benchmarks": _filter_benchmarks(baseline_val_results),
             "tokens_consumed": val_baseline_tokens
         },
         "candidates": {
             t["trial"]: {
                 "score": candidate_val_scores[idx],
-                "benchmarks": candidate_val_results_list[idx],
+                "benchmarks": _filter_benchmarks(candidate_val_results_list[idx]),
                 "tokens_consumed": candidate_val_tokens_list[idx]
             }
             for idx, t in enumerate(trial_results)
         }
     }
+    ctx.validation_run_record = validation_run_record
 
     if not gate_passed:
         log_phase_transition(ctx, "validation_loop", "completed", {"baseline_val_score": baseline_val_score, "candidate_val_scores": candidate_val_scores, "gate_passed": False})
@@ -2774,6 +2921,17 @@ def _model_manifest_fields(ctx: RunContext) -> dict:
     }
 
 
+KNOWN_HISTORICAL_POINTER_HASH = "d880b66ff7c0587087d09e0df0480847ba5a025b73d857f610b737f959546d3b"
+
+def _is_known_historical_legacy_pointer(pointer_path: str) -> bool:
+    try:
+        st = os.lstat(pointer_path)
+        if stat.S_ISLNK(st.st_mode):
+            return False
+        return _sha256_file(pointer_path) == KNOWN_HISTORICAL_POINTER_HASH
+    except Exception:
+        return False
+
 def _read_authoritative_pointer() -> dict | None:
     if not os.path.lexists(BEST_MANIFEST_PATH):
         return None
@@ -2783,18 +2941,27 @@ def _read_authoritative_pointer() -> dict | None:
         if stat.S_ISLNK(st.st_mode):
             raise ExperimentInvalidError(f"Symlink detected at pointer path: {BEST_MANIFEST_PATH}")
         if not os.path.exists(BEST_MANIFEST_PATH):
-            # If lexists is True but exists is False, it's a dangling symlink, but we just caught it in lstat/S_ISLNK.
-            # In case of any other non-symlink dangling situation (like permission or path resolution issue), raise.
             raise ExperimentInvalidError(f"Authoritative pointer path exists but cannot be accessed: {BEST_MANIFEST_PATH}")
         with open(BEST_MANIFEST_PATH, "r") as f:
             data = json.load(f)
+    except ExperimentInvalidError:
+        raise
     except Exception as e:
+        if _is_known_historical_legacy_pointer(BEST_MANIFEST_PATH):
+            return None
         raise ExperimentInvalidError(f"Authoritative pointer (best_manifest.json) is corrupted, malformed, or unsafe: {e}")
 
-    # Explicit dictionary, schema and incomplete field checks
     if not isinstance(data, dict):
         raise ExperimentInvalidError("Authoritative pointer (best_manifest.json) is not a JSON object/dictionary")
+
+    if (st.st_mode & 0o777) != 0o444:
+        if _is_known_historical_legacy_pointer(BEST_MANIFEST_PATH):
+            return None
+        raise ExperimentInvalidError(f"Authoritative pointer file mode is not 0o444: {oct(st.st_mode & 0o777)}")
+
     if data.get("pointer_schema_version") != "2":
+        if _is_known_historical_legacy_pointer(BEST_MANIFEST_PATH):
+            return None
         raise ExperimentInvalidError(f"Authoritative pointer (best_manifest.json) schema version mismatch (expected '2', got {data.get('pointer_schema_version')!r})")
     if "run_manifest_path" not in data or "run_manifest_sha256" not in data:
         raise ExperimentInvalidError("Authoritative pointer (best_manifest.json) is incomplete: missing run_manifest_path or run_manifest_sha256")
@@ -2802,10 +2969,11 @@ def _read_authoritative_pointer() -> dict | None:
     # Fully validate the pointer target BEFORE any classification or recovery action
     try:
         validate_manifest_pointer_and_target(data, allow_pending=True)
+        return data
     except Exception as e:
+        if _is_known_historical_legacy_pointer(BEST_MANIFEST_PATH):
+            return None
         raise ExperimentInvalidError(f"Authoritative pointer targets a corrupted, malformed, or missing run manifest/report: {e}")
-
-    return data
 
 
 def _validate_invalid_marker_and_report(run_dir: str) -> bool:
@@ -2948,6 +3116,9 @@ def _validate_pending_run_tuple(run_dir: str, entry: str, report_data: dict, man
     if actual_prompt_hash != selected_prompt_hash:
         raise ExperimentInvalidError(f"Selected prompt hash mismatch: expected {selected_prompt_hash}, got {actual_prompt_hash}")
 
+    # Solution file validation across all benchmarks (preflight, trials, candidates)
+    _extract_and_validate_all_solutions(run_dir, manifest_data, report_data, ExperimentInvalidError)
+
 
 def recover_pending_runs() -> None:
     """
@@ -2956,7 +3127,7 @@ def recover_pending_runs() -> None:
     Reconciles them atomically according to the Recovery State Decision Table.
     """
     # Pass 1: Read-only classification and validation
-    pointer_data = _read_authorized_pointer = _read_authoritative_pointer()
+    pointer_data = _read_authoritative_pointer()
 
     if not os.path.exists(HISTORY_DIR):
         return
