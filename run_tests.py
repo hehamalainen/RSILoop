@@ -18,6 +18,17 @@ sys.unraisablehook = unraisable_hook
 def main():
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+    # Verify Campaign 2 preflight manifest and sealed evidence manifest strictly read-only before running tests
+    from campaign2.manifest import verify_campaign2_manifest, verify_campaign2_evidence_manifest
+    ok, manifest_count = verify_campaign2_manifest(os.path.dirname(os.path.abspath(__file__)))
+    if not ok or manifest_count != 128:
+        sys.stderr.write(f"FATAL: Campaign 2 preflight manifest verification failed (ok={ok}, count={manifest_count})\n")
+        sys.exit(1)
+
+    if not verify_campaign2_evidence_manifest(os.path.dirname(os.path.abspath(__file__))):
+        sys.stderr.write("FATAL: Campaign 2 sealed evidence manifest verification failed\n")
+        sys.exit(1)
+
     # 3. Load test suite
     loader = unittest.TestLoader()
     suite = loader.discover(start_dir=os.path.dirname(os.path.abspath(__file__)), pattern="test_*.py")
@@ -30,7 +41,7 @@ def main():
     sys.stdout.write(f"Discovered test cases: {discovered_count}\n")
 
     # Enforce the approved host-boundary regression floor.
-    MIN_TESTS = 151
+    MIN_TESTS = 171
     if discovered_count < MIN_TESTS:
         sys.stderr.write(f"FATAL: Discovered test count {discovered_count} is less than minimum {MIN_TESTS}\n")
         sys.exit(1)

@@ -1,0 +1,23 @@
+PROBLEM SPECIFICATION: Saga Orchestrator FSM (c_f4_05_saga_orchestrator_fsm)
+
+Implement a class `SagaOrchestrator` and factory function `create_saga_orchestrator(steps: list[dict])` that executes a saga workflow and performs compensating actions in reverse order on failure.
+
+CLASS SIGNATURE & METHODS:
+class SagaOrchestrator:
+    def __init__(self, steps: list[dict]): ...
+    def execute(self) -> dict: ...
+
+def create_saga_orchestrator(steps: list[dict]):
+    return SagaOrchestrator(steps)
+
+SPECIFICATION CLAUSES & RULES:
+1. Successful saga execution returns `{"status": "SUCCESS", "executed": [name1, ...], "compensated": []}`.
+2. Step failure triggers compensation in reverse order returning `{"status": "COMPENSATED", "failed_at": step_name, ...}`.
+3. Reverse compensation execution order (`c2`, then `c1`).
+4. Empty steps list returns `{"status": "SUCCESS", "executed": [], "compensated": []}`.
+5. All executed step names tracked.
+6. Exception in compensation function handled gracefully without crashing orchestrator.
+7. No compensation performed on success.
+8. Compensated step list count.
+9. Single step success execution.
+10. `failed_at` step name recorded.

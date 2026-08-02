@@ -1,0 +1,24 @@
+PROBLEM SPECIFICATION: LRU Cache with TTL Eviction (c_f3_01_lru_ttl_cache)
+
+Implement a class `LRUTTLCache` and factory function `create_lru_ttl_cache(capacity: int, default_ttl: float)` that manages an LRU cache with time-to-live expiration.
+
+CLASS & FACTORY SIGNATURE:
+class LRUTTLCache:
+    def __init__(self, capacity: int, default_ttl: float): ...
+    def get(self, key: str, current_time: float) -> Any: ...
+    def put(self, key: str, value: Any, current_time: float, ttl: float = None) -> bool: ...
+
+def create_lru_ttl_cache(capacity: int, default_ttl: float):
+    return LRUTTLCache(capacity, default_ttl)
+
+SPECIFICATION CLAUSES & RULES:
+1. `put` and `get` operations within default TTL.
+2. `get` returns `None` after item TTL expires (`current_time >= expiration_time`).
+3. LRU capacity eviction evicts least recently used key.
+4. `put` supports custom per-item `ttl` parameter override.
+5. `get` returns `None` for missing keys.
+6. `get` access updates LRU recency ordering.
+7. `put` update of existing key updates value and TTL expiration.
+8. Initial empty cache state.
+9. `get` hit before TTL expiration returns stored value.
+10. Capacity limit 1 eviction behavior.

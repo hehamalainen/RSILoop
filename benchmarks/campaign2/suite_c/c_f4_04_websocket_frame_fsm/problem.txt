@@ -1,0 +1,23 @@
+PROBLEM SPECIFICATION: WebSocket Frame Parser FSM (c_f4_04_websocket_frame_fsm)
+
+Implement a class `WebSocketParser` and factory function `create_websocket_parser()` that parses RFC 6455 WebSocket frames with unmasking algorithm.
+
+CLASS SIGNATURE & METHODS:
+class WebSocketParser:
+    def __init__(self): ...
+    def feed_bytes(self, data: bytes) -> list[dict]: ...
+
+def create_websocket_parser():
+    return WebSocketParser()
+
+SPECIFICATION CLAUSES & RULES:
+1. `feed_bytes` parses unmasked text frame returning `[{"fin": True, "opcode": 1, "payload": b"hi"}]`.
+2. Unmasks masked payload using 4-byte XOR mask key.
+3. Empty byte stream returns `[]`.
+4. Close frame opcode is 8 (`0x88`).
+5. Ping frame opcode is 9 (`0x89`).
+6. Stream buffering across multiple `feed_bytes` calls for incomplete frames.
+7. Zero-length payload frame parsing.
+8. Parses multiple frames present in single byte buffer.
+9. `fin` flag `True` bit parsing (MSB of byte 0).
+10. `fin` flag `False` continuation frame parsing.

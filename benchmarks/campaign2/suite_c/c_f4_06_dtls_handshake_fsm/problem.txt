@@ -1,0 +1,27 @@
+PROBLEM SPECIFICATION: DTLS Handshake FSM (c_f4_06_dtls_handshake_fsm)
+
+Implement a class `DTLSHandshake` and factory function `create_dtls_fsm()` that models DTLS handshake state transitions.
+
+CLASS SIGNATURE & PUBLIC ATTRIBUTES:
+class DTLSHandshake:
+    def __init__(self):
+        self.state = "IDLE"      # str: "IDLE", "CLIENT_HELLO", "CLIENT_HELLO_WITH_COOKIE", "SERVER_HELLO", "FINISHED"
+        self.cookie = None       # str or None
+        self.epoch = 0           # int
+
+    def send_client_hello(self) -> str: ...
+    def receive_hello_verify_request(self, cookie: str) -> str: ...
+    def receive_server_hello(self) -> str: ...
+    def finish_handshake(self) -> str: ...
+
+SPECIFICATION CLAUSES & RULES:
+1. Initial state `"IDLE"`, epoch `0`, cookie `None`.
+2. `send_client_hello()` transitions state from `"IDLE"` to `"CLIENT_HELLO"`.
+3. `receive_hello_verify_request(cookie)` stores cookie string and transitions state to `"CLIENT_HELLO_WITH_COOKIE"`.
+4. Cookie attribute stores exact verify cookie value.
+5. `receive_server_hello()` transitions state to `"SERVER_HELLO"`.
+6. `finish_handshake()` transitions state from `"SERVER_HELLO"` to `"FINISHED"`.
+7. `finish_handshake()` increments epoch to `1`.
+8. Invalid transition (e.g. `finish_handshake()` in `"IDLE"`) keeps state `"IDLE"`.
+9. `receive_server_hello()` directly from `"CLIENT_HELLO"` state.
+10. Initial cookie attribute is `None`.

@@ -1,0 +1,24 @@
+PROBLEM SPECIFICATION: CSV Record Repair (c_f1_03_csv_record_recovery)
+
+Implement a function `parse_csv_records(stream: str) -> list[list[str]]` that parses CSV formatted text with quoted fields and unclosed quote recovery.
+
+FUNCTION SIGNATURE:
+def parse_csv_records(stream: str) -> list[list[str]]:
+
+INPUT:
+- `stream` (str): Multi-line string containing CSV records separated by commas and newlines.
+
+OUTPUT:
+- Returns a list of rows, where each row is a list of field string values `list[list[str]]`.
+
+SPECIFICATION CLAUSES & RULES:
+1. Parse multi-line CSV records separated by newlines.
+2. Support quoted fields containing commas (e.g. `"hello, world",123`).
+3. Unescape doubled quotes `""` inside quotes to `"`.
+4. Recover from unclosed quotes at EOF by appending remaining text.
+5. Return `[]` for empty input string.
+6. Parse single-line records without newlines.
+7. Strip carriage returns (`\r`).
+8. Preserve empty fields (e.g. `,,` -> `["", "", ""]`).
+9. Parse multiple CSV rows sequentially.
+10. Support multi-line quoted fields containing embedded newlines.

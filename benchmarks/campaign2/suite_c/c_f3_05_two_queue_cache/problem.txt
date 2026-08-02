@@ -1,0 +1,24 @@
+PROBLEM SPECIFICATION: 2Q Cache (c_f3_05_two_queue_cache)
+
+Implement a class `TwoQueueCache` and factory function `create_2q_cache(in_cap: int, out_cap: int, main_cap: int)` that manages a 2Q caching algorithm with `in_fifo`, ghost `out_fifo`, and `main_lru` queues.
+
+CLASS & FACTORY SIGNATURE:
+class TwoQueueCache:
+    def __init__(self, in_cap: int, out_cap: int, main_cap: int): ...
+    def get(self, key: str) -> Any: ...
+    def put(self, key: str, value: Any) -> bool: ...
+
+def create_2q_cache(in_cap: int, out_cap: int, main_cap: int):
+    return TwoQueueCache(in_cap, out_cap, main_cap)
+
+SPECIFICATION CLAUSES & RULES:
+1. New items enter `in_fifo`.
+2. `in_fifo` capacity overflow evicts key to ghost `out_fifo` (values evicted from memory).
+3. Hit on key in `out_fifo` promotes key to `main_lru` and restores value.
+4. Missing key returns `None`.
+5. Updating existing key value updates cache.
+6. Ghost `out_fifo` capacity eviction drops key.
+7. `in_fifo` capacity tracking.
+8. Initial empty cache state.
+9. `main_lru` recency ordering upon hit.
+10. Eviction of item not present in cache.

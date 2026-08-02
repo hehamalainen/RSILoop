@@ -1,0 +1,24 @@
+PROBLEM SPECIFICATION: Protobuf Varint Stream Decoder (c_f1_05_protobuf_varint_decoder)
+
+Implement a function `decode_varint_stream(stream: bytes) -> list[int]` that decodes an array of 64-bit unsigned varint-encoded integers from a binary stream.
+
+FUNCTION SIGNATURE:
+def decode_varint_stream(stream: bytes) -> list[int]:
+
+INPUT:
+- `stream` (bytes): Binary bytes containing LEB128 varint encoded integers.
+
+OUTPUT:
+- Returns a list of decoded integer values `list[int]`.
+
+SPECIFICATION CLAUSES & RULES:
+1. Decode single-byte varints (e.g. `0x01, 0x02, 0x03` -> `[1, 2, 3]`).
+2. Decode 2-byte varint `0x96 0x01` -> `[150]`.
+3. Decode zero value `0x00` -> `[0]`.
+4. Empty input bytes returns `[]`.
+5. Decode 2-byte varint `0xAC 0x02` -> `[300]`.
+6. Max single-byte varint value `0x7F` -> `[127]`.
+7. Power of 2 boundary value `0x80 0x01` -> `[128]`.
+8. Parse mixed stream of 1-byte and multi-byte varints.
+9. Preserve sequence element count.
+10. High single-byte range `0xFF 0x01` -> `[255]`.

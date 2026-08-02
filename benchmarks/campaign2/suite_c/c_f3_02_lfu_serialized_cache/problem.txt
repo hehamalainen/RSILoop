@@ -1,0 +1,25 @@
+PROBLEM SPECIFICATION: LFU Serialized Cache (c_f3_02_lfu_serialized_cache)
+
+Implement a class `LFUCache` and factory function `create_lfu_cache(capacity: int)` that manages a least-frequently used cache with JSON serialization.
+
+CLASS & FACTORY SIGNATURE:
+class LFUCache:
+    def __init__(self, capacity: int): ...
+    def get(self, key: str) -> Any: ...
+    def put(self, key: str, value: Any) -> bool: ...
+    def serialize() -> str: ...
+
+def create_lfu_cache(capacity: int):
+    return LFUCache(capacity)
+
+SPECIFICATION CLAUSES & RULES:
+1. `put` and `get` operations.
+2. Evict key with lowest access frequency on capacity overflow.
+3. `serialize()` returns JSON string representation of contents.
+4. `get` returns `None` for missing keys.
+5. Capacity 1 LFU eviction.
+6. `put` on capacity <= 0 returns `False`.
+7. Updating existing key value increments access frequency.
+8. Empty cache `serialize()` returns `"{}"`.
+9. Tie-breaking LFU eviction by least recently used order.
+10. Single key value store and retrieve.

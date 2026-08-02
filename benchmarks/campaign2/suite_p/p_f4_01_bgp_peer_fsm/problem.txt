@@ -1,0 +1,32 @@
+PROBLEM SPECIFICATION: BGP Peer FSM (p_f4_01_bgp_peer_fsm)
+
+Implement a class `BGPPeerFSM` and factory function `create_bgp_fsm(local_asn: int, remote_asn: int)` that models BGP Peer state machine transitions.
+
+CLASS SIGNATURE & PUBLIC ATTRIBUTES:
+class BGPPeerFSM:
+    def __init__(self, local_asn: int, remote_asn: int):
+        self.local_asn = local_asn      # int
+        self.remote_asn = remote_asn    # int
+        self.state = "IDLE"             # str: "IDLE", "CONNECT", "OPENCONFIRM", "ESTABLISHED"
+        self.hold_time = 90             # int: default 90 seconds
+
+    def connect(self) -> str: ...
+    def receive_open(self, remote_asn: int, hold_time: int) -> bool: ...
+    def receive_keepalive(self) -> str: ...
+    def receive_notification(self, code: int) -> str: ...
+    def get_state(self) -> str: ...
+
+def create_bgp_fsm(local_asn: int = 65001, remote_asn: int = 65002):
+    return BGPPeerFSM(local_asn, remote_asn)
+
+SPECIFICATION CLAUSES & RULES:
+1. Initial peer state is `"IDLE"`.
+2. `connect()` transitions state from `"IDLE"` to `"CONNECT"`.
+3. `receive_open(remote_asn, hold_time)` matching `remote_asn` transitions state to `"OPENCONFIRM"`, updates `hold_time`, and returns `True`.
+4. `receive_keepalive()` in `"OPENCONFIRM"` state transitions state to `"ESTABLISHED"`.
+5. `receive_notification(code)` transitions state back to `"IDLE"`.
+6. `receive_open()` with mismatched `remote_asn` returns `False` and stays in current state.
+7. Default `hold_time` attribute is 90 seconds.
+8. `receive_open()` updates `hold_time` attribute to received value.
+9. `local_asn` and `remote_asn` stored as public integer attributes.
+10. `get_state()` returns current state string.

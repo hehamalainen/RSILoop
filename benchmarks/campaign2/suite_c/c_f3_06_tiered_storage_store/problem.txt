@@ -1,0 +1,25 @@
+PROBLEM SPECIFICATION: Tiered Storage Store (c_f3_06_tiered_storage_store)
+
+Implement a class `TieredStore` and factory function `create_tiered_store(ram_cap: int, disk_store: dict)` that manages RAM and disk storage tiers with cold migration.
+
+CLASS & FACTORY SIGNATURE:
+class TieredStore:
+    def __init__(self, ram_cap: int, disk_store: dict): ...
+    def get(self, key: str) -> Any: ...
+    def put(self, key: str, val: Any) -> bool: ...
+    def migrate_cold(self) -> int: ...
+
+def create_tiered_store(ram_cap: int, disk_store: dict):
+    return TieredStore(ram_cap, disk_store)
+
+SPECIFICATION CLAUSES & RULES:
+1. RAM tier stores up to `ram_cap` items.
+2. RAM capacity overflow migrates coldest item to `disk_store`.
+3. `get` hit on disk loads item into RAM tier.
+4. `migrate_cold()` manually migrates coldest RAM item to disk (returns count 1 or 0).
+5. Missing key returns `None`.
+6. `put` updates existing key in RAM tier.
+7. `get` hit on disk demotes coldest RAM item to disk if RAM is full.
+8. Initial empty RAM tier.
+9. RAM capacity 1 migration behavior.
+10. `disk_store` dictionary persistence.

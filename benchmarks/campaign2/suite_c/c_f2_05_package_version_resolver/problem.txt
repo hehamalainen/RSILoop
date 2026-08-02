@@ -1,0 +1,22 @@
+PROBLEM SPECIFICATION: Package Version Resolver (c_f2_05_package_version_resolver)
+
+Implement a function `resolve_package_versions(required: dict[str, str], available: dict[str, list[str]]) -> dict[str, str]` that resolves requested package version requirements against available package versions.
+
+FUNCTION SIGNATURE:
+def resolve_package_versions(required: dict[str, str], available: dict[str, list[str]]) -> dict[str, str]:
+
+INPUT:
+- `required` (dict[str, str]): Package constraints `dict[str, str]`.
+- `available` (dict[str, list[str]]): Available package versions sorted descending by preference.
+
+SPECIFICATION CLAUSES & RULES:
+1. Exact version requirement matching (picks exact `"1.0.0"` even when higher version `"2.0.0"` is available).
+2. Wildcard constraint `"*"` selects first available version.
+3. Empty required dictionary returns `{}`.
+4. Missing package in available dictionary returns `{}`.
+5. Multiple package resolution.
+6. `"latest"` constraint selects first available version.
+7. Empty available dictionary returns `{}`.
+8. Single package resolution.
+9. Empty inputs return `{}`.
+10. Package constraint mapping dictionary.

@@ -1,0 +1,32 @@
+PROBLEM SPECIFICATION: SIP Call Flow FSM (p_f4_02_sip_call_flow_fsm)
+
+Implement a class `SIPCallFSM` and factory function `create_sip_fsm(call_id: str)` that models SIP dialog state transitions for INVITE, 100 Trying, 180 Ringing, 200 OK + ACK, and BYE.
+
+CLASS SIGNATURE & PUBLIC ATTRIBUTES:
+class SIPCallFSM:
+    def __init__(self, call_id: str):
+        self.call_id = call_id    # str
+        self.state = "IDLE"       # str: "IDLE", "CALLING", "PROCEEDING", "EARLY_OK", "CONFIRMED", "TERMINATED"
+
+    def send_invite(self) -> str: ...
+    def receive_trying_100(self) -> str: ...
+    def receive_ringing_180(self) -> str: ...
+    def receive_ok_200(self) -> str: ...
+    def send_ack(self) -> str: ...
+    def send_bye(self) -> str: ...
+    def get_state(self) -> str: ...
+
+def create_sip_fsm(call_id: str = "call_123"):
+    return SIPCallFSM(call_id)
+
+SPECIFICATION CLAUSES & RULES:
+1. Initial dialog state is `"IDLE"`.
+2. `send_invite()` transitions state from `"IDLE"` to `"CALLING"`.
+3. `receive_trying_100()` transitions state to `"PROCEEDING"`.
+4. `receive_ok_200()` transitions state to `"EARLY_OK"`.
+5. `send_ack()` transitions state to `"CONFIRMED"`.
+6. `send_bye()` in `"CONFIRMED"` state transitions to `"TERMINATED"`.
+7. Invalid transition (e.g. `send_bye()` in `"IDLE"`) keeps current state `"IDLE"`.
+8. `receive_ringing_180()` transitions state to `"PROCEEDING"`.
+9. `call_id` stored as public string attribute.
+10. `get_state()` returns current state string.

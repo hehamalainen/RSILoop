@@ -1,0 +1,23 @@
+PROBLEM SPECIFICATION: Resource Limit Job Batch Planner (c_f2_02_resource_limit_planner)
+
+Implement a function `plan_resource_batches(jobs: list[dict], max_cpu: int, max_ram: int) -> list[list[str]]` that batches job execution while respecting CPU and RAM resource constraints.
+
+FUNCTION SIGNATURE:
+def plan_resource_batches(jobs: list[dict], max_cpu: int, max_ram: int) -> list[list[str]]:
+
+INPUT:
+- `jobs` (list[dict]): `[{"id": str, "cpu": int, "ram": int}]`.
+- `max_cpu` (int): Max CPU per batch.
+- `max_ram` (int): Max RAM per batch.
+
+SPECIFICATION CLAUSES & RULES:
+1. Batch jobs within CPU and RAM limits.
+2. Start new batch when adding job exceeds CPU/RAM limit.
+3. Empty jobs list returns `[]`.
+4. Single job placed alone in own batch.
+5. Multiple small jobs split across batches.
+6. `max_cpu <= 0` or `max_ram <= 0` returns `[]`.
+7. Single job batch matching.
+8. 1-by-1 job allocation when capacity is 1.
+9. Oversized single job placement.
+10. Full batch packing.

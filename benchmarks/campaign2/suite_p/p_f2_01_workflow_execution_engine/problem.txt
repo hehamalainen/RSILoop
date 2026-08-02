@@ -1,0 +1,22 @@
+PROBLEM SPECIFICATION: Workflow Execution Engine (p_f2_01_workflow_execution_engine)
+
+Implement a function `execute_workflow(tasks: list[dict], context: dict) -> dict` that executes a sequence of workflow task functions against a shared state context dictionary.
+
+FUNCTION SIGNATURE:
+def execute_workflow(tasks: list[dict], context: dict) -> dict:
+
+INPUT:
+- `tasks` (list[dict]): `[{"id": str, "func": callable, "on_failure": str or None}]`.
+- `context` (dict): Initial context state.
+
+SPECIFICATION CLAUSES & RULES:
+1. Sequential task execution updating shared context.
+2. Task failure with `on_failure: "continue"` skips failed task and continues workflow.
+3. Task failure with `on_failure: "abort"` stops workflow execution immediately.
+4. Empty task list returns initial context unchanged.
+5. Task function reads and updates context dictionary values.
+6. Task returning None leaves context unchanged.
+7. Multiple task context updates.
+8. Empty context dict returns `{}`.
+9. Task execution status tracking.
+10. Context overwriting by subsequent task.

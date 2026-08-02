@@ -1,0 +1,282 @@
+{
+  "provenance_verified": true,
+  "reproducibility_verified": true,
+  "total_tasks_evaluated": 30,
+  "tier_summary": {
+    "Tier-1 (Optimal)": 0,
+    "Tier-2 (Partial)": 12,
+    "Tier-3 (Zero)": 18
+  },
+  "score_records": [
+    {
+      "task_id": "c_f1_01_log_stream_parser",
+      "seed": 1729,
+      "earned": 6,
+      "max_score": 10,
+      "raw_output_sha256": "dfe13e9fcbbb4480c7b75e240e1de2f3bc99ed2d99ca48337dcd39c12ef67698",
+      "extracted_code_sha256": "abe01b1680098526bdba14bca8d0cc41f321ac0d5275e64d09e37df6a8c70d37",
+      "derived_tier": "Tier-2 (Partial)"
+    },
+    {
+      "task_id": "c_f1_02_json_tokenizer_recovery",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "ea1ada18c601cfe36af9bdeec1df3a79bf972aeb60f9c84129f8c7f9bfc3a508",
+      "extracted_code_sha256": "ea1ada18c601cfe36af9bdeec1df3a79bf972aeb60f9c84129f8c7f9bfc3a508",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f1_03_csv_record_recovery",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "357145de59187b43c6489df252f41915ac38f1a753b55b264890738aee6a213e",
+      "extracted_code_sha256": "357145de59187b43c6489df252f41915ac38f1a753b55b264890738aee6a213e",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f1_04_http_chunked_decoder",
+      "seed": 1729,
+      "earned": 1,
+      "max_score": 10,
+      "raw_output_sha256": "f29fb83110d92661a01d8d7aefaed462fb2a299f4676eea5b42aa005b65c4ae6",
+      "extracted_code_sha256": "bd197e3da8651c917ec02dee1343320e867918e94b111eada57e68f6a78382b4",
+      "derived_tier": "Tier-2 (Partial)"
+    },
+    {
+      "task_id": "c_f1_05_protobuf_varint_decoder",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "c8133b44881896980e48fe755c962921ba5874c5dba0ad51e62d38d842523797",
+      "extracted_code_sha256": "c8133b44881896980e48fe755c962921ba5874c5dba0ad51e62d38d842523797",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f2_01_dag_task_scheduler",
+      "seed": 1729,
+      "earned": 2,
+      "max_score": 10,
+      "raw_output_sha256": "98bd0375aa07d003ca174945a58e74a93d24e3839be9633a6f387e17305ed3fa",
+      "extracted_code_sha256": "e3b2f32a9841eee10a63df44c58aa70e2da326aaa0a04ac4a37845437fb8294e",
+      "derived_tier": "Tier-2 (Partial)"
+    },
+    {
+      "task_id": "c_f2_02_resource_limit_planner",
+      "seed": 1729,
+      "earned": 2,
+      "max_score": 10,
+      "raw_output_sha256": "8099d1258282e198736616adf3ce94db5e18846521c83c951fae87faef8d3394",
+      "extracted_code_sha256": "12d0ee21ea7f8c08fda8f53416709ddce6e731d52693ea41293c7a9063a78f90",
+      "derived_tier": "Tier-2 (Partial)"
+    },
+    {
+      "task_id": "c_f2_03_build_dependency_graph",
+      "seed": 1729,
+      "earned": 3,
+      "max_score": 10,
+      "raw_output_sha256": "c0fab04b4c7fdfaa583f69eaea8624c7d0348bf65e4ed5d76db082637d709ea8",
+      "extracted_code_sha256": "3225a42619925557be1d91a9fd2305cd40ccd0b61e90beedfbed3d9a77b3e44b",
+      "derived_tier": "Tier-2 (Partial)"
+    },
+    {
+      "task_id": "c_f2_04_pipeline_stage_scheduler",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "966e3fcbb7de41bff34277f5792adfa4ff199bf176df325b693846aeb387ef0c",
+      "extracted_code_sha256": "8011939fe8a3588122618f3e793912cc2571e66386f35eba927f5b94460d4daa",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f2_05_package_version_resolver",
+      "seed": 1729,
+      "earned": 2,
+      "max_score": 10,
+      "raw_output_sha256": "5e1f36050661367589aeaf5ada381da18966dc1ca27fbdbd1341799857f337fe",
+      "extracted_code_sha256": "6a5fabda06021c9a27e7e27d23165dad87740f83d97df7f764b3d234f6f462ec",
+      "derived_tier": "Tier-2 (Partial)"
+    },
+    {
+      "task_id": "c_f3_01_lru_ttl_cache",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "8914ee1e9aa80e1d336c4b112adcd70f918b0bcfdfab6ffaf9148c23604be9f6",
+      "extracted_code_sha256": "8914ee1e9aa80e1d336c4b112adcd70f918b0bcfdfab6ffaf9148c23604be9f6",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f3_02_lfu_serialized_cache",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "0d1c98ffb5cacb88276169b116c1dc3a70ad44058627f5e20c0b174e56ec892d",
+      "extracted_code_sha256": "fbc0646908ba227179c0f87f254972868c9634ed5f47fe637591d529797868cf",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f3_03_write_through_cache",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "86f8893fbf5306e3828d4b77a03352af418998ae8f72beb64798c36e60e18241",
+      "extracted_code_sha256": "64c7cee284afe45b3927ee53c55a28dce28dfb6eb41f8920f5c81f45bbf77ce5",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f3_04_segmented_2tier_cache",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "cc5da553e64df578866797c367818c228988bd7858af424800049575c9b0da10",
+      "extracted_code_sha256": "8a93209c4db5ebae87073f5ec8f2e58549ac7d60ad1f75ccc49fc87a926e6710",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f3_05_two_queue_cache",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "86e92771441535b8b99c5e2bff96d1b2b7a8264d00134e257ace8e111b68a833",
+      "extracted_code_sha256": "6f350a36f04198f920c903f8eba7eb5ac0b3ed0e3c1f5eb10b3c049eeea9cf65",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f3_06_tiered_storage_store",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "d291745f33bdc89e312d1bed57207b8496068942e182c047a84b44a6a29869f2",
+      "extracted_code_sha256": "d291745f33bdc89e312d1bed57207b8496068942e182c047a84b44a6a29869f2",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f4_01_raft_leader_election",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "3a11304e85ae66c0401e6828444a7f7d2ec875df169cdb1c64a2c442eac9b9d8",
+      "extracted_code_sha256": "3a11304e85ae66c0401e6828444a7f7d2ec875df169cdb1c64a2c442eac9b9d8",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f4_02_tcp_state_machine",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "1909bd1bbe173af892113af55b82fa3aca9b82ba8c3faaa97d5658acbc52e932",
+      "extracted_code_sha256": "ce18ef052178ee6123835e501a5f597628ea3a3a3764a3c80cc46f1be70d40c4",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f4_03_oauth2_flow_simulator",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "c31343e137ca5df9ee4e5adc1ba7a32aa5cb5f4ac07996d470cc2a7d998febc6",
+      "extracted_code_sha256": "bd07512b867ef5b608d5a0e0ec6d8f758ae6c436d33c7e18188852f59e6b63aa",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f4_04_websocket_frame_fsm",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "1993d85801dd8d8331a122a42fe6e45a338f20a45b373df72a19ddd70afd3133",
+      "extracted_code_sha256": "1993d85801dd8d8331a122a42fe6e45a338f20a45b373df72a19ddd70afd3133",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f4_05_saga_orchestrator_fsm",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "a44864d97dbcb0ba1b71bea5f5dbcbfba4a5d9a9a98ff35f3dc6a94969d354e1",
+      "extracted_code_sha256": "78513efdb31928f24d86c5ba71dcbb4e45eb66ba2432277bea8f3706c43b109d",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "c_f4_06_dtls_handshake_fsm",
+      "seed": 1729,
+      "earned": 5,
+      "max_score": 10,
+      "raw_output_sha256": "bb5758ec0ed721bf22c5ff116b0af442e1812375f7331bfcc81e704c38937297",
+      "extracted_code_sha256": "79b16605094938b53df35caab49e0daf1ed01d2bd2a008e3d9f9c8a38ce5d8a4",
+      "derived_tier": "Tier-2 (Partial)"
+    },
+    {
+      "task_id": "p_f1_01_ndjson_stream_parser",
+      "seed": 1729,
+      "earned": 7,
+      "max_score": 10,
+      "raw_output_sha256": "bf6021af05837961b3d005281ac14a122e05ee0a0a19cfcbd6b21ac4038e0a59",
+      "extracted_code_sha256": "52b165823f934ff235f40d3cac0d240bd2e5e9a308af18a764497c88f9ca3c43",
+      "derived_tier": "Tier-2 (Partial)"
+    },
+    {
+      "task_id": "p_f1_02_syslog_framing_decoder",
+      "seed": 1729,
+      "earned": 2,
+      "max_score": 10,
+      "raw_output_sha256": "d1008f6d6534846ffd4d0865bdb7d956f149547ec9a79e0849dcf46fb0ca49c5",
+      "extracted_code_sha256": "e1b7d47bccd40c1d94f25b6f213c8ba5f7e82598ca6a7c1873260d5c691a4583",
+      "derived_tier": "Tier-2 (Partial)"
+    },
+    {
+      "task_id": "p_f2_01_workflow_execution_engine",
+      "seed": 1729,
+      "earned": 2,
+      "max_score": 10,
+      "raw_output_sha256": "f14c5684b82153b23701cb95ae12f87a8ceda3917f891e02411b14d5ddfc83f9",
+      "extracted_code_sha256": "a1b07aad88f86ff214e8ced4b31954c24d1a394768cc9a8fc82b80bbbfc2d940",
+      "derived_tier": "Tier-2 (Partial)"
+    },
+    {
+      "task_id": "p_f2_02_k8s_pod_scheduler",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "903fef3a7922916d8cfa9293ad2aaba5edaab83399f845b737dc96ec31c423eb",
+      "extracted_code_sha256": "903fef3a7922916d8cfa9293ad2aaba5edaab83399f845b737dc96ec31c423eb",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "p_f3_01_arc_adaptive_cache",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "9267c7cbf9068ef754a02ea7bc91d711ab6c4708677873b0a32f2813b43d2dba",
+      "extracted_code_sha256": "9267c7cbf9068ef754a02ea7bc91d711ab6c4708677873b0a32f2813b43d2dba",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "p_f3_02_ring_buffer_cache",
+      "seed": 1729,
+      "earned": 0,
+      "max_score": 10,
+      "raw_output_sha256": "bf4b4d003c5b020dcc6b47a1d625355034b586cdc6b64a36cb74b2e1b1feb3ef",
+      "extracted_code_sha256": "c2a7f596bbfbff5af0e42056b6952e9154c0394f22018353b89334899892907d",
+      "derived_tier": "Tier-3 (Zero)"
+    },
+    {
+      "task_id": "p_f4_01_bgp_peer_fsm",
+      "seed": 1729,
+      "earned": 6,
+      "max_score": 10,
+      "raw_output_sha256": "d41fec84b0bde4bc7e81cb17409aba52c9d089e240c08aa0c43613f7e2a1cd5e",
+      "extracted_code_sha256": "d75460baefc488a91ccb6a0668345c4604b2fcb3c68b451242b232100fff906d",
+      "derived_tier": "Tier-2 (Partial)"
+    },
+    {
+      "task_id": "p_f4_02_sip_call_flow_fsm",
+      "seed": 1729,
+      "earned": 2,
+      "max_score": 10,
+      "raw_output_sha256": "7bf6346cecf907d37cfb16fa944c8c46dacf1fb00ce20aea5a3c497747341e31",
+      "extracted_code_sha256": "52e5f1b16537dde5d35b1984241a36c2bbdc1bb4f3baf6f445c0ae6bb2b35b47",
+      "derived_tier": "Tier-2 (Partial)"
+    }
+  ]
+}

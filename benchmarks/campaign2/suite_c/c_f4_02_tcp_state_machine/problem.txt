@@ -1,0 +1,25 @@
+PROBLEM SPECIFICATION: TCP Connection FSM (c_f4_02_tcp_state_machine)
+
+Implement a class `TCPConnection` and factory function `create_tcp_fsm()` that models RFC 793 TCP connection state transitions.
+
+CLASS SIGNATURE & PUBLIC ATTRIBUTES:
+class TCPConnection:
+    def __init__(self):
+        self.state = "CLOSED"    # str
+
+    def passive_open(self) -> str: ...
+    def active_open(self) -> str: ...
+    def receive_flag(self, flag: str) -> str: ...
+    def close(self) -> str: ...
+
+SPECIFICATION CLAUSES & RULES:
+1. Initial connection state is `"CLOSED"`.
+2. `passive_open()` transitions state from `"CLOSED"` to `"LISTEN"`.
+3. `active_open()` transitions state from `"CLOSED"` to `"SYN_SENT"`.
+4. `receive_flag("SYN")` in `"LISTEN"` state transitions to `"SYN_RCVD"`.
+5. `receive_flag("ACK")` in `"SYN_RCVD"` state transitions to `"ESTABLISHED"`.
+6. `receive_flag("SYN_ACK")` in `"SYN_SENT"` state transitions to `"ESTABLISHED"`.
+7. `close()` in `"ESTABLISHED"` state transitions to `"FIN_WAIT_1"`.
+8. Handshake sequence `FIN_WAIT_1` -> `ACK` -> `FIN_WAIT_2` -> `FIN` -> `TIME_WAIT`.
+9. `receive_flag("FIN")` in `"ESTABLISHED"` state transitions to `"CLOSE_WAIT"`.
+10. Unrecognized flag does not alter current state.

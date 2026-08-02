@@ -1,0 +1,24 @@
+PROBLEM SPECIFICATION: Adaptive Replacement Cache (p_f3_01_arc_adaptive_cache)
+
+Implement a class `ARCCache` and factory function `create_arc_cache(capacity: int)` that manages an Adaptive Replacement Cache (ARC) balancing recent and frequent items.
+
+CLASS SIGNATURE & METHODS:
+class ARCCache:
+    def __init__(self, capacity: int): ...
+    def get(self, key: str) -> Any: ...
+    def put(self, key: str, val: Any) -> bool: ...
+
+def create_arc_cache(capacity: int):
+    return ARCCache(capacity)
+
+SPECIFICATION CLAUSES & RULES:
+1. `put` and `get` operations.
+2. Hit on item moves key from `t1` (recent) to `t2` (frequent).
+3. Capacity eviction evicts `t1` or `t2` items.
+4. `get` returns `None` for missing keys.
+5. `put` updates existing key value.
+6. Capacity 1 eviction behavior.
+7. Initial empty cache state.
+8. `t1` list tracking.
+9. `put` on capacity <= 0 returns `False`.
+10. Value retrieval from cache.

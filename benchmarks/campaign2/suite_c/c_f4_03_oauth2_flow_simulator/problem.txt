@@ -1,0 +1,21 @@
+PROBLEM SPECIFICATION: OAuth2 PKCE Flow Simulator (c_f4_03_oauth2_flow_simulator)
+
+Implement a class `OAuth2Provider` and factory function `create_oauth2_provider()` that simulates OAuth2 authorization code flow with PKCE code verification.
+
+CLASS SIGNATURE & METHODS:
+class OAuth2Provider:
+    def __init__(self): ...
+    def generate_auth_code(self, client_id: str, redirect_uri: str, code_challenge: str) -> str: ...
+    def exchange_code(self, client_id: str, code: str, code_verifier: str) -> dict: ...
+
+SPECIFICATION CLAUSES & RULES:
+1. `generate_auth_code` generates code string starting with `"code_"`.
+2. `exchange_code` verifies PKCE S256 challenge (SHA256 of `code_verifier` URL-safe base64 unpadded matches `code_challenge`) and returns `{"access_token": token, "token_type": "Bearer"}`.
+3. Authorization codes are single-use; exchanging twice raises `ValueError`.
+4. Invalid `code_verifier` failing PKCE check raises `ValueError`.
+5. Mismatched `client_id` raises `ValueError`.
+6. Non-existent authorization code raises `ValueError`.
+7. Sequential `generate_auth_code` calls produce unique code strings.
+8. Return dictionary contains `"access_token"` key.
+9. Initial provider state has empty codes registry.
+10. Access token format `token_{code}`.

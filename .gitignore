@@ -14,3 +14,4 @@ experiment.lock
 *.sb
 tmp/
 /tmp/
+models/*.gguf

@@ -1,0 +1,26 @@
+PROBLEM SPECIFICATION: HTTP Chunked Stream Decoder (c_f1_04_http_chunked_decoder)
+
+Implement a function `decode_chunked_stream(stream: bytes) -> dict` that parses an HTTP/1.1 chunked transfer-encoded byte stream and extracts decoded payload and trailer headers.
+
+FUNCTION SIGNATURE:
+def decode_chunked_stream(stream: bytes) -> dict:
+
+INPUT:
+- `stream` (bytes): Raw HTTP chunked-encoded byte stream.
+
+OUTPUT:
+- Returns a dictionary with keys:
+  - "data" (bytes): Decoded concatenated body bytes.
+  - "trailers" (dict[str, str]): Key-value dictionary of HTTP trailer headers parsed after terminal chunk `0\r\n`.
+
+SPECIFICATION CLAUSES & RULES:
+1. Decode single chunk payload terminated by `\r\n`.
+2. Concatenate multiple sequential chunk bodies.
+3. Parse HTTP trailer headers after 0-size chunk formatted as `Header-Name: Header-Value\r\n`.
+4. Empty stream `b""` returns `{"data": b"", "trailers": {}}`.
+5. Zero-size chunk `0\r\n\r\n` produces empty body `b""`.
+6. Hexadecimal chunk size parsing (e.g. `0xA` = 10 bytes).
+7. Sequential single-byte chunks concatenation.
+8. Exact chunk content extraction.
+9. Correct byte count calculation for multi-character chunk sizes.
+10. Standard HTTP chunk body parsing.

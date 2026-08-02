@@ -1,0 +1,23 @@
+PROBLEM SPECIFICATION: Build Target Dependency Graph Resolver (c_f2_03_build_dependency_graph)
+
+Implement a function `compute_build_order(target: str, graph: dict[str, list[str]], missing_targets: list[str]) -> list[str]` that computes post-order build execution steps for a target node in a dependency graph.
+
+FUNCTION SIGNATURE:
+def compute_build_order(target: str, graph: dict[str, list[str]], missing_targets: list[str]) -> list[str]:
+
+INPUT:
+- `target` (str): Target build node name.
+- `graph` (dict[str, list[str]]): Dependency adjacency list mapping target to prerequisite targets.
+- `missing_targets` (list[str]): List of missing/unbuildable target names.
+
+SPECIFICATION CLAUSES & RULES:
+1. Return post-order build sequence (`lib -> app`).
+2. Return `[]` if target depends on missing target.
+3. Single target with no dependencies returns `[target]`.
+4. Target missing from graph returns `[]`.
+5. Multi-dependency post-order build order.
+6. Empty target string returns `[]`.
+7. Target listed in missing_targets returns `[]`.
+8. Indirect missing target dependency returns `[]`.
+9. Unused missing targets list does not block independent target build (`["b", "a"]`).
+10. Deep DAG dependency post-order traversal.

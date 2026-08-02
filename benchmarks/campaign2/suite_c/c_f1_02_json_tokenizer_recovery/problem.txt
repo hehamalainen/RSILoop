@@ -1,0 +1,34 @@
+PROBLEM SPECIFICATION: JSON Tokenizer with Recovery (c_f1_02_json_tokenizer_recovery)
+
+Implement a function `parse_json_tokens(stream: str) -> list[tuple]` that tokenizes a JSON string into a sequence of typed token tuples.
+
+FUNCTION SIGNATURE:
+def parse_json_tokens(stream: str) -> list[tuple]:
+
+INPUT:
+- `stream` (str): Input string containing JSON data.
+
+OUTPUT:
+- Returns a list of `(token_type, value)` tuples:
+  - ("LBRACE", "{")
+  - ("RBRACE", "}")
+  - ("LBRACKET", "[")
+  - ("RBRACKET", "]")
+  - ("COLON", ":")
+  - ("COMMA", ",")
+  - ("STRING", str_val)
+  - ("NUMBER", int_or_float_val)
+  - ("BOOLEAN", bool_val)
+  - ("NULL", None)
+
+SPECIFICATION CLAUSES & RULES:
+1. Tokenize JSON objects (e.g. `{"a": 123}`).
+2. Tokenize JSON arrays containing booleans and null (`[true, false, null]`).
+3. Recover from trailing commas before `]` or `}` by skipping the comma token.
+4. Tokenize strings with spaces (e.g. `"hello world"`).
+5. Tokenize negative numbers and floating point values (e.g. `-45.67`).
+6. Recover from trailing commas in objects (e.g. `{"key": "val",}`).
+7. Return `[]` for empty input string.
+8. Strip outer and inter-token whitespace (e.g. `  [ 100 ]  `).
+9. Handle escaped quotes in string literals.
+10. Tokenize nested objects and arrays.

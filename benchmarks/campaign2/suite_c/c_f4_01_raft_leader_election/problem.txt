@@ -1,0 +1,29 @@
+PROBLEM SPECIFICATION: Raft Leader Election FSM (c_f4_01_raft_leader_election)
+
+Implement a class `RaftNode` and factory function `create_raft_node(node_id: str, peers: list[str])` that models Raft consensus leader election state transitions.
+
+CLASS SIGNATURE & PUBLIC ATTRIBUTES:
+class RaftNode:
+    def __init__(self, node_id: str, peers: list[str]):
+        self.node_id = node_id        # str
+        self.peers = peers            # list[str]
+        self.state = "FOLLOWER"       # str: "FOLLOWER", "CANDIDATE", or "LEADER"
+        self.current_term = 0         # int
+        self.voted_for = None         # str or None
+        self.votes_received = set()   # set[str]
+
+    def handle_election_timeout(self) -> str: ...
+    def receive_request_vote(self, term: int, candidate_id: str) -> bool: ...
+    def receive_vote_response(self, from_peer: str, granted: bool) -> str: ...
+
+SPECIFICATION CLAUSES & RULES:
+1. Initial node state is `"FOLLOWER"`, term is `0`, and `voted_for` is `None`.
+2. `handle_election_timeout()` increments `current_term`, sets state to `"CANDIDATE"`, votes for self (`voted_for = node_id`), adds self to `votes_received`, and returns `"CANDIDATE"`.
+3. `receive_request_vote(term, candidate_id)` grants vote (returns `True`) if `term == current_term` and `(voted_for is None or voted_for == candidate_id)`.
+4. `receive_vote_response(from_peer, granted)` transitions state to `"LEADER"` when votes received reach majority threshold `(len(peers)+1)//2 + 1`.
+5. `receive_request_vote` rejects vote (returns `False`) if node already voted for a different candidate in the same term.
+6. `receive_request_vote` rejects vote (returns `False`) if `term < current_term`.
+7. Denied vote response (`granted=False`) retains `"CANDIDATE"` state.
+8. Majority calculation for 2-node cluster (`len(peers)=1`) requires vote response from peer before transitioning to `"LEADER"`.
+9. `receive_request_vote` with higher `term > current_term` updates `current_term`, resets state to `"FOLLOWER"`, clears `voted_for`, and grants vote.
+10. Initial `voted_for` attribute is `None`.

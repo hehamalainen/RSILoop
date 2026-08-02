@@ -1,0 +1,27 @@
+PROBLEM SPECIFICATION: Log Stream Parser (c_f1_01_log_stream_parser)
+
+Implement a function `parse_log_stream(stream: str) -> list[dict]` that parses formatted log stream lines.
+
+FUNCTION SIGNATURE:
+def parse_log_stream(stream: str) -> list[dict]:
+
+INPUT:
+- `stream` (str): Multi-line string containing log lines in the format `[TIMESTAMP] LEVEL - MESSAGE` or `LEVEL - MESSAGE` or raw messages.
+
+OUTPUT:
+- Returns a list of dictionaries, where each dict has keys:
+  - "timestamp" (str or None): Extracted timestamp string inside square brackets `[TS]`, or None if omitted or invalid.
+  - "level" (str): Log level string, defaulting to "INFO" if unspecified or unrecognized. Recognized levels: "DEBUG", "INFO", "WARN", "ERROR".
+  - "message" (str): Log message body string with trailing whitespace/newlines stripped.
+
+SPECIFICATION CLAUSES & RULES:
+1. Parse standard `[TS] LEVEL - MSG` log lines.
+2. Support multi-line logs with multiple recognized levels ("DEBUG", "INFO", "WARN", "ERROR").
+3. Missing timestamp inside `[...]` defaults to `None`.
+4. Unrecognized log level defaults to `"INFO"`.
+5. Blank/empty lines are ignored.
+6. Trailing whitespace and newlines are stripped from message body.
+7. Messages containing hyphens (e.g. `A - B`) split on the first hyphen after log level.
+8. Empty input string returns `[]`.
+9. Invalid timestamp format (missing brackets) is treated as no timestamp (`None`).
+10. Multi-line inputs produce equal count of non-empty dict records.

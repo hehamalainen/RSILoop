@@ -1,0 +1,24 @@
+PROBLEM SPECIFICATION: Segmented 2-Tier Cache (c_f3_04_segmented_2tier_cache)
+
+Implement a class `Segmented2TierCache` and factory function `create_2tier_cache(l1_cap: int, l2_cap: int)` that manages a two-tiered L1 (fast) and L2 (overflow) cache.
+
+CLASS & FACTORY SIGNATURE:
+class Segmented2TierCache:
+    def __init__(self, l1_cap: int, l2_cap: int): ...
+    def get(self, key: str) -> Any: ...
+    def put(self, key: str, value: Any) -> bool: ...
+
+def create_2tier_cache(l1_cap: int, l2_cap: int):
+    return Segmented2TierCache(l1_cap, l2_cap)
+
+SPECIFICATION CLAUSES & RULES:
+1. New items are inserted directly into L1 cache.
+2. L1 capacity eviction demotes oldest L1 item to L2 cache.
+3. L2 capacity eviction drops oldest L2 item permanently.
+4. `get` hit on L2 promotes item back into L1.
+5. Missing key returns `None`.
+6. `put` updates existing key value in L1.
+7. Initial empty L1 and L2 cache tiers.
+8. L2 capacity tracking.
+9. Retrieval of demoted L2 item.
+10. Initial L1 placement.

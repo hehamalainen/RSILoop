@@ -1,0 +1,24 @@
+PROBLEM SPECIFICATION: Write-Through Cache (c_f3_03_write_through_cache)
+
+Implement a class `WriteThroughCache` and factory function `create_write_through_cache(capacity: int, backing_store: dict)` that keeps memory cache and backing storage synchronized.
+
+CLASS & FACTORY SIGNATURE:
+class WriteThroughCache:
+    def __init__(self, capacity: int, backing_store: dict): ...
+    def get(self, key: str) -> Any: ...
+    def put(self, key: str, value: Any) -> bool: ...
+
+def create_write_through_cache(capacity: int, backing_store: dict):
+    return WriteThroughCache(capacity, backing_store)
+
+SPECIFICATION CLAUSES & RULES:
+1. `put` updates memory cache and immediately writes through to `backing_store`.
+2. `get` populates memory cache from `backing_store` on cache miss.
+3. LRU memory eviction retains evicted item in `backing_store`.
+4. `get` returns `None` for missing keys in both memory and backing store.
+5. Updating existing key value syncs to `backing_store`.
+6. `get` hit on memory cache updates LRU recency order.
+7. Initial empty cache.
+8. Memory capacity 1 eviction retains all items in `backing_store`.
+9. Value retrieval from memory cache.
+10. `backing_store` persistence after memory cache eviction.

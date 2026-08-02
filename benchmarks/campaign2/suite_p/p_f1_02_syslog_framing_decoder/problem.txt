@@ -1,0 +1,28 @@
+PROBLEM SPECIFICATION: Syslog Octet-Counted Decoder (p_f1_02_syslog_framing_decoder)
+
+Implement a function `decode_syslog_stream(stream: bytes) -> list[dict]` that decodes RFC 5424 octet-counted syslog streams.
+
+FUNCTION SIGNATURE:
+def decode_syslog_stream(stream: bytes) -> list[dict]:
+
+INPUT:
+- `stream` (bytes): Octet-counted syslog byte stream.
+
+OUTPUT:
+- Returns list of message dicts `list[dict]` with keys:
+  - "pri" (int or None): Priority value inside `<PRI>`.
+  - "facility" (int or None): `pri // 8`.
+  - "severity" (int or None): `pri % 8`.
+  - "body" (str): Message body string.
+
+SPECIFICATION CLAUSES & RULES:
+1. Decode RFC 5424 octet-counted message calculating `facility = pri // 8` and `severity = pri % 8`.
+2. Parse multiple octet-counted syslog messages in stream.
+3. Empty byte stream returns `[]`.
+4. Message without `<PRI>` header sets `pri`, `facility`, `severity` to `None`.
+5. Facility integer calculation (`pri // 8`).
+6. Parse multiple small octet-counted messages.
+7. Message body string extraction.
+8. Truncated message at EOF ignored.
+9. Missing priority header handling.
+10. Priority 0 message (`facility=0, severity=0`).

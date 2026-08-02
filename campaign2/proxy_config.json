@@ -1,0 +1,20 @@
+{
+  "model": "Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF",
+  "model_artifact_path": "models/Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf",
+  "model_artifact_sha256": "1d9614638d18024d0fbb36575a15f1302a3adf044df10345688ec4f6e1c4ff32",
+  "runtime_binary": "campaign2/local_model_runner.py",
+  "runtime_binary_sha256": "7c8a44f3d5c7f1a92ea1a98d5c6b96f2fe2d67ccaeee3be78f3786ff075b20c0",
+  "python_executable": "/opt/homebrew/opt/python@3.14/bin/python3.14",
+  "python_executable_sha256": "cbf84109626aa1013bbe408fbb9590bd0f1c1548f038b2221c6b8b87de26ca43",
+  "llama_cpp_version": "0.3.34",
+  "native_lib_path": "/opt/homebrew/lib/python3.14/site-packages/llama_cpp/lib",
+  "native_lib_sha256": "5b090b134b81655ce489a19e301442628d2ef6ab63f5e475ae7371609912d980",
+  "temperature": 0.2,
+  "top_p": 0.95,
+  "n_ctx": 2048,
+  "max_tokens": 1024,
+  "stop": ["<|im_end|>"],
+  "seeds": [1729, 2718, 31415],
+  "k_trials": 3,
+  "timeout_seconds": 120
+}

@@ -1,0 +1,22 @@
+PROBLEM SPECIFICATION: Pipeline Stage Scheduler (c_f2_04_pipeline_stage_scheduler)
+
+Implement a function `schedule_pipeline(stages: list[dict], worker_pools: dict[str, int]) -> list[dict]` that schedules tasks across barrier stages and worker pool resources.
+
+FUNCTION SIGNATURE:
+def schedule_pipeline(stages: list[dict], worker_pools: dict[str, int]) -> list[dict]:
+
+INPUT:
+- `stages` (list[dict]): `[{"tasks": [{"id": str, "pool": str, "duration": int}]}]`.
+- `worker_pools` (dict[str, int]): `dict[str, int]`.
+
+SPECIFICATION CLAUSES & RULES:
+1. Schedule single task stage with start and end times.
+2. Stage barrier: Stage N+1 starts after Stage N completes.
+3. Empty stages list returns `[]`.
+4. Empty worker pools returns `[]`.
+5. Unregistered worker pool tasks are skipped.
+6. Serial pool tasks scheduling within stage.
+7. Task duration calculation (`end = start + duration`).
+8. Stage index tracking.
+9. Empty inputs returns `[]`.
+10. Task ID preservation.

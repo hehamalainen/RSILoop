@@ -1,0 +1,26 @@
+PROBLEM SPECIFICATION: NDJSON Stream Parser (p_f1_01_ndjson_stream_parser)
+
+Implement a function `parse_ndjson_stream(stream: str) -> tuple[list[dict], list[str]]` that parses newline-delimited JSON with error collection.
+
+FUNCTION SIGNATURE:
+def parse_ndjson_stream(stream: str) -> tuple[list[dict], list[str]]:
+
+INPUT:
+- `stream` (str): Multi-line string where each line is a JSON object string.
+
+OUTPUT:
+- Returns a tuple `(valid_records, error_lines)`:
+  - `valid_records` (list[dict]): Parsed valid JSON dictionaries.
+  - `error_lines` (list[str]): Original raw line strings that failed JSON parsing.
+
+SPECIFICATION CLAUSES & RULES:
+1. Parse valid NDJSON lines into list of dictionaries.
+2. Collect malformed JSON line strings in `error_lines` list.
+3. Empty input string returns `([], [])`.
+4. Non-dictionary JSON values (e.g. `"[1, 2]"`) added to `error_lines`.
+5. Blank lines ignored.
+6. Mixed valid and invalid NDJSON lines count.
+7. Dictionary content preservation.
+8. Raw non-JSON text added to `error_lines`.
+9. Multi-record valid NDJSON line parsing.
+10. Multiple error line collection.

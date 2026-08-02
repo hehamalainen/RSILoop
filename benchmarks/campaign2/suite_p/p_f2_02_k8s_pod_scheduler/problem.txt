@@ -1,0 +1,22 @@
+PROBLEM SPECIFICATION: Kubernetes Pod Scheduler (p_f2_02_k8s_pod_scheduler)
+
+Implement a function `schedule_pods(pods: list[dict], nodes: list[dict]) -> dict[str, str]` that schedules Kubernetes pods onto nodes respecting CPU/memory requests, taints/tolerations, and node selectors.
+
+FUNCTION SIGNATURE:
+def schedule_pods(pods: list[dict], nodes: list[dict]) -> dict[str, str]:
+
+INPUT:
+- `pods` (list[dict]): `[{"id": str, "cpu": int, "mem": int, "tolerations": list[str], "selector": dict}]`.
+- `nodes` (list[dict]): `[{"name": str, "cpu": int, "mem": int, "taints": list[str], "labels": dict}]`.
+
+SPECIFICATION CLAUSES & RULES:
+1. Schedule pod onto node with sufficient CPU and memory.
+2. Pod requiring CPU > node capacity remains unscheduled.
+3. Pod without required toleration rejected by tainted node.
+4. Pod with required toleration accepted by tainted node.
+5. Node selector matching node labels.
+6. Empty inputs return `{}`.
+7. Node capacity decremented upon pod scheduling.
+8. Standard scheduling mapping.
+9. Empty pods list returns `{}`.
+10. Node label mismatch rejects pod.

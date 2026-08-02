@@ -1,0 +1,25 @@
+PROBLEM SPECIFICATION: Ring Buffer Cache (p_f3_02_ring_buffer_cache)
+
+Implement a class `RingBufferCache` and factory function `create_ring_buffer(capacity: int)` that manages a sliding window ring buffer cache storing float values with quantile calculation.
+
+CLASS SIGNATURE & METHODS:
+class RingBufferCache:
+    def __init__(self, capacity: int): ...
+    def push(self, val: float): ...
+    def get_window(self) -> list[float]: ...
+    def quantile(self, q: float) -> float: ...
+
+def create_ring_buffer(capacity: int):
+    return RingBufferCache(capacity)
+
+SPECIFICATION CLAUSES & RULES:
+1. `push(val)` appends float to buffer.
+2. Capacity overflow drops oldest item (sliding window).
+3. `quantile(q)` calculates value at quantile q (0.0 to 1.0).
+4. Empty buffer `quantile(q)` returns `0.0`.
+5. `quantile(0.0)` returns minimum element.
+6. `quantile(1.0)` returns maximum element.
+7. `get_window()` returns list of window values.
+8. Pushed integer values converted to floats.
+9. Capacity 1 ring buffer overflow.
+10. Initial empty buffer window.

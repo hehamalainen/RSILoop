@@ -1,0 +1,25 @@
+PROBLEM SPECIFICATION: DAG Task Scheduler (c_f2_01_dag_task_scheduler)
+
+Implement a function `schedule_dag_tasks(tasks: list[dict], max_workers: int) -> list[list[str]]` that schedules task execution in parallel stages respecting DAG dependencies and worker limits.
+
+FUNCTION SIGNATURE:
+def schedule_dag_tasks(tasks: list[dict], max_workers: int) -> list[list[str]]:
+
+INPUT:
+- `tasks` (list[dict]): List of task dictionaries `[{"id": str, "deps": list[str]}]`.
+- `max_workers` (int): Maximum tasks per stage.
+
+OUTPUT:
+- Returns a list of stages `list[list[str]]`.
+
+SPECIFICATION CLAUSES & RULES:
+1. Schedule sequential task dependencies across stages (`a -> b`).
+2. Schedule independent tasks in parallel stage up to `max_workers`.
+3. `max_workers = 1` forces serial stages.
+4. Empty tasks list returns `[]`.
+5. Cycle in DAG raises `ValueError`.
+6. Multiple dependent tasks scheduled in stages.
+7. Single task DAG returns single stage `[["x"]]`.
+8. `max_workers <= 0` returns `[]`.
+9. Chained dependencies stage count.
+10. Lexicographical ID tie-breaking within worker limit.
