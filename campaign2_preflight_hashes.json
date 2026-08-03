@@ -120,11 +120,11 @@
   "benchmarks/campaign2/suite_p/p_f4_02_sip_call_flow_fsm/solution.py": "f176d21c1f685ef72c790a49a9bae497bbbde7451388bfd0c4d24f05c4a01a35",
   "benchmarks/campaign2/suite_p/p_f4_02_sip_call_flow_fsm/test_harness.py": "62fb6980d9b819bd64a85587a91b9ab33b1058829e8e6b52cbb0271c6cfc8c48",
   "campaign2/defects.py": "2d8797df93ea4573407cc177b736fd3dfe34561f5deabbb6f5c4620e9a2f2288",
-  "campaign2/local_model_runner.py": "7c8a44f3d5c7f1a92ea1a98d5c6b96f2fe2d67ccaeee3be78f3786ff075b20c0",
-  "campaign2/manifest.py": "7749f0263818f01a0d7182e6ae6fa44f6d74d13aaa04ed468c2db1acd700017f",
-  "campaign2/proxy.py": "6b178cd73633e25124efcfa605b15d57f05acf0b95a7500a353ef5d827268bd5",
-  "campaign2/proxy_config.json": "edda8e46cfea7c716515af928fa509331411b153a83828c9f14d05168a1c0d96",
+  "campaign2/local_model_runner.py": "9b174be270474d301b2b10c86c3426b89ada45a78cec4c95b0f713c596bced54",
+  "campaign2/manifest.py": "7045d0fa814ef306d31e6569721c47432be332c47380ebb42f3791a4029bf567",
+  "campaign2/proxy.py": "07ddc40416ce6a7af4645cc8f7ea1aafca0b26a9a2992341894244cefb358216",
+  "campaign2/proxy_config.json": "4682b6acb1e8930cf5d9d27ef0d94025d34b06898a592e6d8d11b1c80c0acf22",
   "campaign2/scorer.py": "9a24687f8120b4617fe609e4211d4adc3f3cb1d0feb9e5f775aadd8ecc0bfbbd",
   "models/fetch_model.py": "0c7193a2085598fcd9691d552a3007cc75e717e503f35a2701bd1b50816421dd",
-  "models/model_descriptor.json": "5dc0fffcc756acc4801b3f5db77b28b96d9d132fe5ab804ea4c0bf9613cebaee"
+  "models/model_descriptor.json": "a9d452a097355703d2e67c7d71a11754e6cb950149963768f15e3030433862f0"
 }

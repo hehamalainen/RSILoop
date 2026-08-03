@@ -123,9 +123,12 @@ class TaggedCodec:
             pairs = [[cls.encode(k, register_cb_fn, register_obj_fn, register_host_obj_fn), cls.encode(v, register_cb_fn, register_obj_fn, register_host_obj_fn)] for k, v in obj.items()]
             return {"t": "dict", "pairs": pairs}
         elif isinstance(obj, BaseException):
+            exc_mod = type(obj).__module__
+            if exc_mod != "builtins":
+                raise InfrastructureError(f"Custom candidate exception '{type(obj).__name__}' from module '{exc_mod}' rejected by contract")
             return {
                 "t": "exception",
-                "module": type(obj).__module__,
+                "module": exc_mod,
                 "qualname": type(obj).__qualname__,
                 "message": str(obj)
             }
@@ -185,22 +188,19 @@ class TaggedCodec:
             exc_module = env.get("module", "builtins")
             exc_qualname = env.get("qualname", "RuntimeError")
             msg = env.get("message", "")
-            try:
-                mod = sys.modules.get(exc_module) or __import__(exc_module, fromlist=[exc_qualname])
-                exc_cls = getattr(mod, exc_qualname, None)
-                if not (isinstance(exc_cls, type) and issubclass(exc_cls, BaseException)):
-                    exc_cls = getattr(sys.modules["builtins"], exc_qualname, RuntimeError)
-            except Exception:
-                exc_cls = getattr(sys.modules["builtins"], exc_qualname, RuntimeError)
+            if exc_module != "builtins":
+                raise InfrastructureError(f"Non-builtin exception module '{exc_module}' rejected by contract")
+            builtins_mod = sys.modules.get("builtins")
+            exc_cls = getattr(builtins_mod, exc_qualname, None)
             if not (isinstance(exc_cls, type) and issubclass(exc_cls, BaseException)):
-                exc_cls = RuntimeError
+                raise InfrastructureError(f"Invalid builtin exception qualname '{exc_qualname}'")
             return exc_cls(msg)
         else:
             raise ValueError(f"Unknown tagged type: {t}")
 
 
 def compute_combined_native_library_hash() -> str:
-    """Computes a single sorted combined SHA256 hash across all native shared libraries in llama_cpp/lib."""
+    """Computes a single sorted combined SHA256 hash across all native shared libraries in llama_cpp/lib using 8MB streaming chunks."""
     try:
         import llama_cpp
         llama_pkg_dir = os.path.dirname(llama_cpp.__file__)
@@ -221,7 +221,8 @@ def compute_combined_native_library_hash() -> str:
         sha = hashlib.sha256()
         for fpath in so_files:
             with open(fpath, "rb") as f:
-                sha.update(f.read())
+                while chunk := f.read(8192 * 1024):
+                    sha.update(chunk)
         return sha.hexdigest()
     except Exception as e:
         raise InfrastructureError(f"Failed to compute combined native library hash: {e}")
@@ -235,15 +236,18 @@ def load_proxy_config() -> Dict[str, Any]:
 
 
 def verify_proxy_config_provenance() -> bool:
-    """Dynamically verifies Python SHA256, llama_cpp version, combined native lib hash, n_ctx, max_tokens, stop sequences."""
+    """Dynamically verifies Python SHA256, llama_cpp version, combined native lib hash, runtime runner SHA256, renderer SHA256, n_ctx, max_tokens, stop sequences."""
     cfg = load_proxy_config()
 
     # 1. Python executable SHA256
     py_executable = sys.executable
     if not os.path.exists(py_executable):
         raise InfrastructureError(f"Configured Python executable missing: {py_executable}")
+    py_sha = hashlib.sha256()
     with open(py_executable, "rb") as f:
-        py_hash = hashlib.sha256(f.read()).hexdigest()
+        while chunk := f.read(8192 * 1024):
+            py_sha.update(chunk)
+    py_hash = py_sha.hexdigest()
     if py_hash != cfg.get("python_executable_sha256"):
         raise InfrastructureError(
             f"Python executable SHA256 mismatch: expected {cfg.get('python_executable_sha256')}, got {py_hash}"
@@ -267,11 +271,47 @@ def verify_proxy_config_provenance() -> bool:
             f"Native library combined SHA256 mismatch: expected {cfg.get('native_lib_sha256')}, got {native_hash}"
         )
 
-    # 4. Generation parameters
+    # 4. Runtime runner binary SHA256
+    runner_rel_path = cfg.get("runtime_binary", "campaign2/local_model_runner.py")
+    runner_full_path = os.path.join(BASE_DIR, runner_rel_path)
+    if not os.path.exists(runner_full_path):
+        raise InfrastructureError(f"Missing runtime runner binary: {runner_full_path}")
+    runner_sha = hashlib.sha256()
+    with open(runner_full_path, "rb") as f:
+        while chunk := f.read(8192 * 1024):
+            runner_sha.update(chunk)
+    actual_runner_hash = runner_sha.hexdigest()
+    if actual_runner_hash != cfg.get("runtime_binary_sha256"):
+        raise InfrastructureError(
+            f"Runtime runner binary SHA256 mismatch: expected {cfg.get('runtime_binary_sha256')}, got {actual_runner_hash}"
+        )
+
+    # 5. Prompt renderer SHA256
+    from campaign2.local_model_runner import PROMPT_RENDERER_SHA256
+    if PROMPT_RENDERER_SHA256 != cfg.get("prompt_renderer_sha256"):
+        raise InfrastructureError(
+            f"Prompt renderer SHA256 mismatch: expected {cfg.get('prompt_renderer_sha256')}, got {PROMPT_RENDERER_SHA256}"
+        )
+
+    # 6. Generation parameters
     req_fields = ["temperature", "top_p", "n_ctx", "max_tokens", "stop"]
     for field in req_fields:
         if field not in cfg:
             raise InfrastructureError(f"Missing required proxy config generation parameter: {field}")
+
+    # 7. Model artifact check if not pending
+    model_sha = cfg.get("model_artifact_sha256")
+    model_path = cfg.get("model_artifact_path")
+    if model_sha and model_sha != "PENDING_AUTHORIZED_DOWNLOAD":
+        if not model_path or not os.path.exists(model_path):
+            raise InfrastructureError(f"Missing model artifact file: {model_path}")
+        model_file_sha = hashlib.sha256()
+        with open(model_path, "rb") as f:
+            while chunk := f.read(8192 * 1024):
+                model_file_sha.update(chunk)
+        actual_model_sha = model_file_sha.hexdigest()
+        if actual_model_sha != model_sha:
+            raise InfrastructureError(f"Model artifact SHA256 mismatch: expected {model_sha}, got {actual_model_sha}")
 
     return True
 
@@ -1077,6 +1117,9 @@ def run_local_proxy_inference(task_id: str, seed: int) -> Tuple[int, int, str, s
     cfg = load_proxy_config()
 
     # 1. Verify model artifact file and SHA256 before launch
+    if cfg.get("model_artifact_sha256") == "PENDING_AUTHORIZED_DOWNLOAD":
+        raise InfrastructureError("Model artifact download pending authorized operator run")
+
     model_path = os.path.join(BASE_DIR, cfg["model_artifact_path"])
     if not os.path.exists(model_path):
         raise InfrastructureError(f"Missing model artifact file: {model_path}")
@@ -1190,16 +1233,191 @@ def verify_proxy_reproducibility() -> bool:
     return True
 
 
+def validate_and_aggregate_calibration_records(score_records: List[Dict[str, Any]], seeds: List[int], k_trials: int) -> Dict[str, Any]:
+    """
+    Validates exact Cartesian product of 30 task IDs x k_trials seeds (90 records).
+    Computes per-task 3-sample aggregation (mean_score, min_score, max_score, range, std_dev) and derived task tier.
+    Raises InfrastructureError fail-closed if any missing, duplicate, unexpected, or mismatched record is found.
+    """
+    import math
+
+    if k_trials != len(seeds):
+        raise InfrastructureError(f"k_trials ({k_trials}) does not equal len(seeds) ({len(seeds)})")
+    if k_trials != 3:
+        raise InfrastructureError(f"k_trials ({k_trials}) must equal 3")
+
+    expected_seeds = [1729, 2718, 31415]
+    if sorted(seeds) != sorted(expected_seeds):
+        raise InfrastructureError(f"Seeds {seeds} do not match pre-registered seeds {expected_seeds}")
+
+    all_task_ids = [
+        "c_f1_01_log_stream_parser", "c_f1_02_json_tokenizer_recovery", "c_f1_03_csv_record_recovery",
+        "c_f1_04_http_chunked_decoder", "c_f1_05_protobuf_varint_decoder", "c_f2_01_dag_task_scheduler",
+        "c_f2_02_resource_limit_planner", "c_f2_03_build_dependency_graph", "c_f2_04_pipeline_stage_scheduler",
+        "c_f2_05_package_version_resolver", "c_f3_01_lru_ttl_cache", "c_f3_02_lfu_serialized_cache",
+        "c_f3_03_write_through_cache", "c_f3_04_segmented_2tier_cache", "c_f3_05_two_queue_cache",
+        "c_f3_06_tiered_storage_store", "c_f4_01_raft_leader_election", "c_f4_02_tcp_state_machine",
+        "c_f4_03_oauth2_flow_simulator", "c_f4_04_websocket_frame_fsm", "c_f4_05_saga_orchestrator_fsm",
+        "c_f4_06_dtls_handshake_fsm", "p_f1_01_ndjson_stream_parser", "p_f1_02_syslog_framing_decoder",
+        "p_f2_01_workflow_execution_engine", "p_f2_02_k8s_pod_scheduler", "p_f3_01_arc_adaptive_cache",
+        "p_f3_02_ring_buffer_cache", "p_f4_01_bgp_peer_fsm", "p_f4_02_sip_call_flow_fsm"
+    ]
+
+    expected_pairs = {(t_id, s) for t_id in all_task_ids for s in seeds}
+    seen_pairs = set()
+
+    if len(score_records) != 90:
+        raise InfrastructureError(f"Calibration score records count must be exactly 90, got {len(score_records)}")
+
+    task_scores = {t_id: [] for t_id in all_task_ids}
+
+    for rec in score_records:
+        t_id = rec.get("task_id")
+        s = rec.get("seed")
+        pair = (t_id, s)
+
+        if pair not in expected_pairs:
+            raise InfrastructureError(f"Unexpected or invalid task/seed pair in calibration: {pair}")
+        if pair in seen_pairs:
+            raise InfrastructureError(f"Duplicate task/seed pair in calibration: {pair}")
+
+        seen_pairs.add(pair)
+        earned = rec.get("earned", 0)
+        maximum = rec.get("maximum", rec.get("max_score", 10))
+        norm_score = rec.get("normalized_score", earned / maximum if maximum else 0.0)
+        task_scores[t_id].append(norm_score)
+
+    if seen_pairs != expected_pairs:
+        missing = expected_pairs - seen_pairs
+        raise InfrastructureError(f"Missing pre-registered task/seed pairs: {sorted(list(missing))}")
+
+    task_summaries = {}
+    tier_counts = {"Tier-1 (Optimal)": 0, "Tier-2 (Partial)": 0, "Tier-3 (Zero)": 0}
+
+    for t_id in sorted(all_task_ids):
+        scores = task_scores[t_id]
+        if len(scores) != 3:
+            raise InfrastructureError(f"Task {t_id} must have exactly 3 seed scores, got {len(scores)}")
+
+        mean_val = sum(scores) / 3.0
+        min_val = min(scores)
+        max_val = max(scores)
+        rng_val = max_val - min_val
+        variance = sum((x - mean_val) ** 2 for x in scores) / 2.0  # sample variance (n-1=2)
+        std_dev = math.sqrt(variance)
+
+        if mean_val == 1.0:
+            tier = "Tier-1 (Optimal)"
+        elif mean_val > 0.0:
+            tier = "Tier-2 (Partial)"
+        else:
+            tier = "Tier-3 (Zero)"
+
+        tier_counts[tier] += 1
+        task_summaries[t_id] = {
+            "task_id": t_id,
+            "seed_scores": scores,
+            "mean_score": round(mean_val, 6),
+            "min_score": min_val,
+            "max_score": max_val,
+            "range": round(rng_val, 6),
+            "std_dev": round(std_dev, 6),
+            "derived_tier": tier
+        }
+
+    return {
+        "total_records": len(score_records),
+        "tier_summary": tier_counts,
+        "task_summaries": task_summaries
+    }
+
+
+def evaluate_proxy_adequacy(calib_data: Dict[str, Any], workspace_root: str = BASE_DIR) -> Dict[str, Any]:
+    """
+    Evaluates pre-registered Campaign 2 proxy adequacy gate for the 16 suite-C F1-F3 tasks.
+    Recomputes task summaries directly from raw score_records via validate_and_aggregate_calibration_records.
+    Requires:
+    1. Exactly 90 records (30 tasks x 3 seeds).
+    2. At least 3 task means equal 1.0 across 16 suite-C F1-F3 tasks.
+    3. At least 3 task means equal 0.0 across 16 suite-C F1-F3 tasks.
+    4. No identical task-mean value shared by more than 6 tasks.
+    5. All 3 seeds present for every task.
+    """
+    score_records = calib_data.get("score_records", [])
+    cfg = load_proxy_config()
+    seeds = cfg.get("seeds", [1729, 2718, 31415])
+    k_trials = cfg.get("k_trials", 3)
+
+    # Recompute task summaries directly from raw records (fails closed if records invalid)
+    agg_res = validate_and_aggregate_calibration_records(score_records, seeds, k_trials)
+    task_summaries = agg_res["task_summaries"]
+
+    reasons = []
+    if len(score_records) != 90:
+        reasons.append(f"Calibration score records count is {len(score_records)} (required exactly 90)")
+
+    suite_c_16_tasks = [
+        "c_f1_01_log_stream_parser", "c_f1_02_json_tokenizer_recovery", "c_f1_03_csv_record_recovery",
+        "c_f1_04_http_chunked_decoder", "c_f1_05_protobuf_varint_decoder", "c_f2_01_dag_task_scheduler",
+        "c_f2_02_resource_limit_planner", "c_f2_03_build_dependency_graph", "c_f2_04_pipeline_stage_scheduler",
+        "c_f2_05_package_version_resolver", "c_f3_01_lru_ttl_cache", "c_f3_02_lfu_serialized_cache",
+        "c_f3_03_write_through_cache", "c_f3_04_segmented_2tier_cache", "c_f3_05_two_queue_cache",
+        "c_f3_06_tiered_storage_store"
+    ]
+
+    c_means = []
+    mean_counts = {}
+    for task_id in suite_c_16_tasks:
+        summary = task_summaries.get(task_id, {})
+        mean_val = summary.get("mean_score", -1.0)
+        c_means.append(mean_val)
+        mean_counts[mean_val] = mean_counts.get(mean_val, 0) + 1
+
+    ones_count = sum(1 for m in c_means if m == 1.0)
+    zeros_count = sum(1 for m in c_means if m == 0.0)
+    max_shared_count = max(mean_counts.values()) if mean_counts else 0
+
+    if ones_count < 3:
+        reasons.append(f"Suite-C 16-task means equal to 1.0 count is {ones_count} (required >= 3)")
+    if zeros_count < 3:
+        reasons.append(f"Suite-C 16-task means equal to 0.0 count is {zeros_count} (required >= 3)")
+    if max_shared_count > 6:
+        reasons.append(f"Max shared task-mean frequency is {max_shared_count} (required <= 6)")
+
+    adequacy_ok = len(reasons) == 0
+
+    result = {
+        "status": "proxy_calibration_adequate" if adequacy_ok else "proxy_calibration_inadequate",
+        "adequacy_verified": adequacy_ok,
+        "suite_c_16_means_equals_one_count": ones_count,
+        "suite_c_16_means_equals_zero_count": zeros_count,
+        "suite_c_16_max_shared_mean_frequency": max_shared_count,
+        "reasons": reasons
+    }
+
+    artifact_path = os.path.join(workspace_root, "campaign2_proxy_adequacy.json")
+    if os.path.exists(artifact_path):
+        os.chmod(artifact_path, 0o644)
+    with open(artifact_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2)
+    os.chmod(artifact_path, 0o444)
+
+    return result
+
+
 def generate_and_persist_proxy_calibration_artifacts() -> Dict[str, Any]:
     """
-    Generates and persists campaign2_proxy_calibration.json containing complete pre-registered
-    proxy score distribution across ALL 30 tasks, deterministic tier summaries, and reproducibility evidence.
+    Generates and persists campaign2_proxy_calibration_gpt_oss_20b.json and campaign2_proxy_adequacy.json.
+    Runs 30 tasks x 3 seeds = 90 inference runs and evaluates pre-registered adequacy gate.
     """
     verify_proxy_config_provenance()
     reproducible = verify_proxy_reproducibility()
     cfg = load_proxy_config()
-    seeds = cfg.get("seeds", [1729])
-    seed = seeds[0]
+    seeds = cfg.get("seeds", [1729, 2718, 31415])
+    k_trials = cfg.get("k_trials", 3)
+
+    if k_trials != len(seeds) or k_trials != 3:
+        raise InfrastructureError(f"Invalid calibration configuration: k_trials ({k_trials}) != len(seeds) ({len(seeds)})")
 
     all_task_ids = [
         "c_f1_01_log_stream_parser", "c_f1_02_json_tokenizer_recovery", "c_f1_03_csv_record_recovery",
@@ -1215,42 +1433,39 @@ def generate_and_persist_proxy_calibration_artifacts() -> Dict[str, Any]:
     ]
 
     score_records = []
-    tier_counts = {"Tier-1 (Optimal)": 0, "Tier-2 (Partial)": 0, "Tier-3 (Zero)": 0}
-
     for task_id in all_task_ids:
-        earned, max_s, raw_hash, code_hash = run_local_proxy_inference(task_id, seed)
-        if earned == 10:
-            tier = "Tier-1 (Optimal)"
-        elif earned > 0:
-            tier = "Tier-2 (Partial)"
-        else:
-            tier = "Tier-3 (Zero)"
+        for seed in seeds:
+            earned, max_s, raw_hash, code_hash = run_local_proxy_inference(task_id, seed)
+            norm_score = earned / max_s
+            score_records.append({
+                "task_id": task_id,
+                "seed": seed,
+                "earned": earned,
+                "maximum": max_s,
+                "normalized_score": round(norm_score, 6),
+                "raw_output_sha256": raw_hash,
+                "extracted_code_sha256": code_hash
+            })
 
-        tier_counts[tier] += 1
-        score_records.append({
-            "task_id": task_id,
-            "seed": seed,
-            "earned": earned,
-            "max_score": max_s,
-            "raw_output_sha256": raw_hash,
-            "extracted_code_sha256": code_hash,
-            "derived_tier": tier
-        })
+    agg_res = validate_and_aggregate_calibration_records(score_records, seeds, k_trials)
 
     calibration_data = {
         "provenance_verified": True,
         "reproducibility_verified": reproducible,
-        "total_tasks_evaluated": len(score_records),
-        "tier_summary": tier_counts,
+        "total_records_evaluated": len(score_records),
+        "tier_summary": agg_res["tier_summary"],
+        "task_summaries": agg_res["task_summaries"],
         "score_records": score_records
     }
 
-    artifact_path = os.path.join(BASE_DIR, "campaign2_proxy_calibration.json")
+    artifact_path = os.path.join(BASE_DIR, "campaign2_proxy_calibration_gpt_oss_20b.json")
     if os.path.exists(artifact_path):
         os.chmod(artifact_path, 0o644)
-
     with open(artifact_path, "w", encoding="utf-8") as f:
         json.dump(calibration_data, f, indent=2)
-
     os.chmod(artifact_path, 0o444)
+
+    adequacy_res = evaluate_proxy_adequacy(calibration_data)
+    calibration_data["adequacy"] = adequacy_res
+
     return calibration_data

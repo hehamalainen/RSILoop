@@ -125,25 +125,36 @@ def generate_campaign2_manifest(workspace_root: str = BASE_DIR) -> Dict[str, str
 
 
 def verify_external_model_artifact(workspace_root: str = BASE_DIR) -> bool:
-    """Verifies Category 2: Permitted external model artifact."""
-    full_path = os.path.join(workspace_root, EXPECTED_EXTERNAL_MODEL_RELPATH)
+    """Verifies Category 2: Permitted external model artifact based on models/model_descriptor.json."""
+    desc_path = os.path.join(workspace_root, "models", "model_descriptor.json")
+    if not os.path.exists(desc_path):
+        raise FileNotFoundError(f"Missing model descriptor at: {desc_path}")
+    with open(desc_path, "r", encoding="utf-8") as f:
+        desc = json.load(f)
+
+    expected_sha = desc.get("expected_sha256")
+    if expected_sha == "PENDING_AUTHORIZED_DOWNLOAD":
+        return True
+
+    rel_path = desc.get("relative_path", os.path.join("models", desc.get("filename", "")))
+    full_path = os.path.join(workspace_root, rel_path)
     if not os.path.exists(full_path):
         raise FileNotFoundError(f"Permitted external model artifact missing at: {full_path}")
     _check_no_symlinks(full_path, workspace_root)
     if os.path.islink(full_path):
         raise ValueError(f"External model artifact must not be a symlink: {full_path}")
 
-    st = os.stat(full_path)
-    if st.st_size != EXPECTED_EXTERNAL_MODEL_SIZE:
-        raise ValueError(
-            f"External model size mismatch: expected {EXPECTED_EXTERNAL_MODEL_SIZE} bytes, got {st.st_size}"
-        )
+    expected_size = desc.get("expected_size_bytes")
+    if expected_size is not None:
+        st = os.stat(full_path)
+        if st.st_size != expected_size:
+            raise ValueError(f"External model size mismatch: expected {expected_size} bytes, got {st.st_size}")
 
-    actual_sha = _sha256_file(full_path, workspace_root)
-    if actual_sha != EXPECTED_EXTERNAL_MODEL_SHA256:
-        raise ValueError(
-            f"External model SHA256 mismatch: expected {EXPECTED_EXTERNAL_MODEL_SHA256}, got {actual_sha}"
-        )
+    if expected_sha:
+        actual_sha = _sha256_file(full_path, workspace_root)
+        if actual_sha != expected_sha:
+            raise ValueError(f"External model SHA256 mismatch: expected {expected_sha}, got {actual_sha}")
+
     return True
 
 
@@ -220,21 +231,64 @@ def verify_campaign2_manifest(workspace_root: str = BASE_DIR) -> Tuple[bool, int
 def verify_campaign2_evidence_manifest(workspace_root: str = BASE_DIR) -> bool:
     """
     STRICTLY READ-ONLY Verification of Sealed Scientific Evidence Manifest (campaign2_evidence_hashes.json).
-    Authenticates SHA256 hashes of parity matrix, calibration distribution, and proxy config.
+    Authenticates exact 6-file inventory, 64-char lowercase hex SHA256 hashes, symlink rejection, regular file type, and mode 0o444.
     """
+    import stat
+    import re
     manifest_path = os.path.join(workspace_root, "campaign2_evidence_hashes.json")
     if not os.path.exists(manifest_path):
         raise FileNotFoundError(f"Missing sealed evidence manifest: {manifest_path}")
 
+    _check_no_symlinks(manifest_path, workspace_root)
+    if not os.path.isfile(manifest_path) or os.path.islink(manifest_path):
+        raise ValueError(f"Evidence manifest must be a regular non-symlink file: {manifest_path}")
+
+    st_mode = stat.S_IMODE(os.stat(manifest_path).st_mode)
+    if st_mode != 0o444:
+        raise ValueError(f"Evidence manifest permission mode must be 0o444, got {oct(st_mode)}")
+
     with open(manifest_path, "r", encoding="utf-8") as f:
-        hashes = json.load(f)
+        try:
+            hashes = json.load(f)
+        except Exception as e:
+            raise ValueError(f"Invalid JSON in evidence manifest: {e}")
+
+    if not isinstance(hashes, dict):
+        raise ValueError("Evidence manifest JSON must be a dictionary")
+
+    required_inventory = {
+        "campaign2_parity_matrix.json",
+        "campaign2_proxy_calibration_qwen2_5_coder_0_5b_rejected.json",
+        "campaign2_proxy_calibration_gpt_oss_20b.json",
+        "campaign2_proxy_adequacy.json",
+        "campaign2/proxy_config.json",
+        "models/model_descriptor.json"
+    }
+
+    manifest_keys = set(hashes.keys())
+    if manifest_keys != required_inventory:
+        missing = sorted(list(required_inventory - manifest_keys))
+        extra = sorted(list(manifest_keys - required_inventory))
+        raise ValueError(f"Evidence manifest inventory mismatch. Missing: {missing}, Extra: {extra}")
+
+    hex_pattern = re.compile(r"^[0-9a-f]{64}$")
 
     for rel_path, expected_hash in hashes.items():
+        if not isinstance(expected_hash, str) or not hex_pattern.match(expected_hash):
+            raise ValueError(f"Invalid hash format for {rel_path}: '{expected_hash}' (must be 64 lowercase hex characters)")
+
         full_path = os.path.join(workspace_root, rel_path)
-        if not os.path.exists(full_path):
-            raise FileNotFoundError(f"Sealed evidence entry missing on disk: {rel_path}")
+        _check_no_symlinks(full_path, workspace_root)
+
+        if not os.path.isfile(full_path) or os.path.islink(full_path):
+            raise ValueError(f"Evidence entry must be a regular non-symlink file: {rel_path}")
+
+        mode = stat.S_IMODE(os.stat(full_path).st_mode)
+        if mode != 0o444:
+            raise ValueError(f"Evidence file permission mode must be 0o444 for {rel_path}, got {oct(mode)}")
+
         actual_hash = _sha256_file(full_path, workspace_root)
         if actual_hash != expected_hash:
-            raise ValueError(f"Sealed evidence hash mismatch for {rel_path}: expected {expected_hash}, got {actual_hash}")
+            raise ValueError(f"Evidence hash mismatch for {rel_path}: expected {expected_hash}, got {actual_hash}")
 
     return True

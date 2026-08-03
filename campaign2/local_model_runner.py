@@ -1,33 +1,51 @@
 """
 Campaign 2 Local Open-Weight Model Subprocess Runner.
 
-Loads Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf via llama_cpp.Llama.
+Loads unsloth/gpt-oss-20b-GGUF model weights via llama_cpp.Llama.
 Strictly prohibited from reading solution.py, defects.py, or test_harness.py.
 Reads ONLY problem.txt (the public problem specification).
-Generates deterministic candidate code completion inside ```python ... ``` fences.
+Generates deterministic candidate code completion inside ```python ... ``` fences using official OpenAI Harmony prompt format.
 """
 
 import os
 import sys
 import argparse
 import hashlib
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 try:
     from llama_cpp import Llama
 except ImportError:
     Llama = None
 
+PROMPT_RENDERER_NAME = "openai_harmony_encoding_v1"
+
+
+def render_harmony_prompt(problem_text: str) -> str:
+    """Renders system and user messages in official OpenAI Harmony format structure."""
+    system_prompt = (
+        "You are an expert Python developer. Write a clean, correct, and self-contained Python implementation "
+        "that perfectly satisfies the following problem specification. Return your complete solution inside a single ```python ... ``` code block."
+    )
+    return (
+        f"<|start|>system\n{system_prompt}<|end|>\n"
+        f"<|start|>user\n{problem_text}<|end|>\n"
+        f"<|start|>assistant\n"
+    )
+
+
+PROMPT_RENDERER_SHA256 = hashlib.sha256(render_harmony_prompt("").encode("utf-8")).hexdigest()
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run local GGUF model inference on a public task specification.")
+    parser = argparse.ArgumentParser(description="Run local model inference on a public task specification.")
     parser.add_argument("--task-id", type=str, required=True, help="Task ID string")
     parser.add_argument("--seed", type=int, required=True, help="Random sampling seed")
-    parser.add_argument("--model-path", type=str, required=True, help="Path to GGUF model weights file")
+    parser.add_argument("--model-path", type=str, required=True, help="Path to model weights file")
     parser.add_argument("--spec-path", type=str, default=None, help="Explicit path to problem.txt specification")
     parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature")
     parser.add_argument("--top-p", type=float, default=0.95, help="Sampling top-p")
-    parser.add_argument("--n-ctx", type=int, default=2048, help="Context window size")
+    parser.add_argument("--n-ctx", type=int, default=4096, help="Context window size")
     parser.add_argument("--max-tokens", type=int, default=1024, help="Maximum completion tokens")
     parser.add_argument("--stop", type=str, action="append", default=None, help="Stop sequence")
     return parser.parse_args()
@@ -48,27 +66,24 @@ def load_problem_spec(spec_path: str) -> str:
 
 def run_inference(task_id: str, seed: int, model_path: str, spec_path: str,
                   temperature: float = 0.2, top_p: float = 0.95,
-                  n_ctx: int = 2048, max_tokens: int = 1024, stop: list[str] = None) -> str:
+                  n_ctx: int = 4096, max_tokens: int = 1024, stop: List[str] = None) -> str:
     if Llama is None:
         raise ImportError("llama-cpp-python is not installed")
 
     if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Missing GGUF model file: {model_path}")
+        raise FileNotFoundError(f"Missing model file: {model_path}")
 
     problem_text = load_problem_spec(spec_path)
-    stop_seqs = stop if stop else ["<|im_end|>"]
+    stop_seqs = stop if stop else [
+        "<|return|>",
+        "<|call:default_api:code_interpreter|>",
+        "<|call:default_api:web_search|>",
+        "<|end_of_message|>",
+        "<|end_of_text|>"
+    ]
 
-    # Prompt template construction
-    prompt = (
-        f"<|im_start|>system\n"
-        f"You are an expert Python developer. Write a clean, correct, and self-contained Python implementation "
-        f"that perfectly satisfies the following problem specification. Return your complete solution inside a single ```python ... ``` code block.\n"
-        f"<|im_end|>\n"
-        f"<|im_start|>user\n"
-        f"{problem_text}\n"
-        f"<|im_end|>\n"
-        f"<|im_start|>assistant\n"
-    )
+    # Official Harmony Prompt Construction
+    prompt = render_harmony_prompt(problem_text)
 
     llm = Llama(
         model_path=model_path,
