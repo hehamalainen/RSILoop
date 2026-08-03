@@ -1,12 +1,22 @@
 # RSILoop: Host-Contained Recursive Self-Improvement Experiment
 
-A bi-level prompt-optimization harness that uses the local **Codex CLI** as both the candidate solution generator and the meta-optimizer. The harness evaluates candidate solutions in a macOS `sandbox-exec` jail, then feeds failure traces to the optimizer to mutate system prompts across three independent trials.
+> [!NOTE]
+> **Current status — 3 August 2026**
+> This README describes the committed baseline harness on `origin/main` at commit `153c05f9d58302e27189384ebe78859766f15afb`. Campaign 2 is being redesigned and is not yet represented on main. The proposed Campaign 2 design removes the model-based difficulty proxy and instead uses preregistered family-blocked task assignment. No additional local or cloud model is required for that proxy. No confirmatory Campaign 2 run or promoted result exists yet.
 
-**Status: research prototype, not production software.** The experiment has not yet produced a promoted result. The code is a containment harness first; any observed self-improvement is a hypothesis until the preflight run is complete and independently verified.
+**Document Specification Snapshot**: Commit `153c05f9d58302e27189384ebe78859766f15afb` | Date: 3 August 2026.
+
+A bi-level prompt-optimization harness that uses the installed **Codex CLI** (which performs remote model inference) as both the candidate solution generator and the meta-optimizer. The harness evaluates candidate solutions inside a macOS `sandbox-exec` containment jail, then feeds failure traces to the optimizer to mutate system prompts across three separately executed trials.
+
+> **Model Clarification**: The statement "no cloud or local model needed" applies strictly to the abandoned difficulty proxy. The core harness requires the Codex CLI, whose model inference is remote (not a local model).
+
+**Status: Research prototype, not production software.** The experiment has not yet produced a promoted result. The code is a containment harness first; any observed self-improvement is a hypothesis until the preflight run is complete and independently verified.
 
 ---
 
 ## Threat Model & Host Containment
+
+The harness implements and regression-tests a macOS containment boundary. It is a research prototype, not a hardened security sandbox, and should not be used to execute untrusted third-party code on a sensitive host.
 
 - **Process Isolation**: The candidate solution and the runner communication shim share a Python interpreter and process. Therefore, protocol authenticity is not guaranteed against active exploitation by candidate code (e.g., introspection to locate control descriptors).
 - **Correlation**: Request UUIDs provide stale-frame and accidental output pollution protection, not protocol cryptographic authenticity.
@@ -30,7 +40,7 @@ evaluator.py  (host, unsandboxed — trusted supervisor)
 │   ├── circular_buffer/          # Optimization task
 │   ├── json_parser/              # Optimization task
 │   ├── run_length_encoding/      # Optimization task
-│   ├── huffman_coding/           # Optimization task (frozen spec, deterministic)
+│   ├── huffman_coding/           # Optimization task (evaluated first as no-headroom preflight)
 │   └── validation/
 │       ├── string_calculator/    # Validation only — never used in mutation feedback
 │       └── matrix_operations/    # Validation only — never used in mutation feedback
@@ -45,30 +55,35 @@ evaluator.py  (host, unsandboxed — trusted supervisor)
 ├── preflight_hashes.json         # SHA-256 hashes of all task files (frozen before optimization)
 ├── test_evaluator.py             # Containment, IPC, and reference solution tests
 ├── test_rsi_loop.py              # Orchestrator, parser, and state validation tests
-└── run_tests.py                  # Strict combined test launcher (enforces zero skips, zero warnings)
+└── run_tests.py                  # Combined test launcher (enforces zero skips and zero ResourceWarnings)
 ```
 
 ---
 
 ## Getting Started
 
-### Requirements
+### Prerequisites
 
 - macOS (sandbox-exec required)
 - Python 3.11+
-- [Codex CLI](https://github.com/openai/codex) installed and authenticated: `codex login`
+- [Codex CLI](https://github.com/openai/codex) installed and authenticated.
+
+The real prerequisite for running the harness is an installed and authenticated Codex CLI. Authenticate via:
+```bash
+codex login
+```
+*Note*: `codex login` supports ChatGPT OAuth, API-key, or access-token authentication according to the [official Codex command reference](https://learn.chatgpt.com/docs/developer-commands#codex-login). Legacy SDK packages (such as `google-genai`, `openai`, `anthropic`, or `python-dotenv`) belong to legacy environment diagnostics and are not required by the committed experiment runtime.
 
 ### Setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install google-genai openai anthropic python-dotenv
 ```
 
 ### Run the test suite
 
-Run the strict test launcher from outside any sandbox (sandbox-exec calls require host access). The launcher enforces zero skips, zero warnings, and returns nonzero on any warnings, unraisable exceptions, skips, failures, or errors:
+Run the test launcher from outside any sandbox (sandbox-exec calls require host access). The launcher enforces zero skips, zero ResourceWarnings, and returns nonzero on any warnings, unraisable exceptions, skips, failures, or errors:
 
 ```bash
 python3 run_tests.py
@@ -90,12 +105,13 @@ A clean Git status is verified, and matching approved Git commit hash is checked
 
 The loop will:
 1. Run a `codex --version` smoke test and one canary API call inside `generator.sb`.
-2. Evaluate the frozen baseline against all four optimization tasks.
-3. Run three independent trials (baseline eval → up to 3 mutations → best eval).
-4. Evaluate the three candidate prompts on two validation tasks.
-5. Apply the promotion gate; retain baseline if it fails.
-6. Write run-scoped manifests under `history/run_<id>/` (fsync + read-only permissions 0444).
-7. Root `best_manifest.json` acts as a verified pointer to the run manifest.
+2. **Preflight Evaluation**: Evaluate the frozen baseline against `huffman_coding` as a no-headroom preflight check. If the baseline solution already passes `huffman_coding` completely without room for improvement, the experiment terminates early.
+3. Evaluate the frozen baseline against the remaining optimization tasks (`circular_buffer`, `json_parser`, `run_length_encoding`).
+4. Run **three separately executed trials** (baseline eval → up to 3 mutations → best eval). *Note*: Because trials share the same tasks, baseline, and model provider, statistical independence is not established.
+5. Evaluate the three candidate prompts on two validation tasks.
+6. Apply the promotion gate; retain baseline if it fails.
+7. Write run-scoped manifests under `history/run_<id>/` (fsync + read-only permissions 0444).
+8. Root `best_manifest.json` acts as a verified pointer to the run manifest.
 
 Token ceiling: **50,000 output tokens** across all calls. Any breach immediately invalidates the run.
 
@@ -123,7 +139,7 @@ Token ceiling: **50,000 output tokens** across all calls. Any breach immediately
 
 A candidate prompt is promoted only when **all** of the following hold:
 
-1. Mean paired delta across three trials is positive (`mean_delta > 0`).
+1. Mean paired delta across three separately executed trials is positive (`mean_delta > 0`).
 2. At least one candidate prompt outperforms the baseline on the validation suite.
 3. The selected candidate prompt must differ from the baseline prompt, have its own positive optimization delta (`delta > 0`), and beat the baseline validation score.
 4. **Note**: Statistical significance is not established by the validation gate sampling.
@@ -139,6 +155,13 @@ For environments where the private holdout test suite (`simple_regex_matcher`) i
 - **Enabling**: Set `ALLOW_NO_HOLDOUT=1` in the environment, and configure `"allow_no_holdout": true` inside the operator-approved `experiment.lock`. The harness enforces strict agreement between the environment and the lock file; any disagreement will abort the run immediately.
 - **Provenance Flag**: When No-Holdout Mode is active, any promoted manifest will record `"no_holdout_mode_active": true`.
 - **Research Limitations**: Without holdout validation, prompt optimization is susceptible to **overfitting** on the public/validation tasks. Promotion in this mode does not guarantee generalizable improvement and is intended solely for integration verification.
+
+---
+
+## Repository Access & Licensing Note
+
+- **Access Note**: The repository is private. Unauthenticated or anonymous HTTPS requests return `404 Not Found`. This PDF print specification represents a point-in-time snapshot labelled with commit SHA `153c05f9d58302e27189384ebe78859766f15afb` and date `3 August 2026`.
+- **Licensing**: Private research prototype. License terms to be resolved prior to any public distribution.
 
 ---
 
