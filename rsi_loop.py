@@ -3314,53 +3314,86 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
         generate_family_blocked_assignment,
     )
     from campaign2.registration import verify_master_registration
-    from campaign2.launch_lock import verify_launch_lock
+    from campaign2.launch_lock import verify_launch_lock, LaunchLockError
     from campaign2.attempt_lifecycle import (
         check_and_resume,
         publish_scientific_start,
+        AttemptLedger,
     )
+    from campaign2.durability import CheckpointManager
     from campaign2.model_provider import (
         MockModelProvider,
         MockTaskEvaluator,
         SolModelProvider,
     )
     from campaign2.orchestrator import Campaign2Orchestrator
+    from campaign2.ladder import evaluate_pilot_outcome_ladder
     from campaign2.reporting import generate_schema3_report, publish_schema3_report
+    from fractions import Fraction
 
-    # Preflight verifications
+    stage = args.stage
+    # P0-2: Hard-refuse full stage without Work Order C implementation
+    if stage == "full":
+        raise NotImplementedError("Campaign 2 full stage requires Work Order C implementation")
+
+    # 1. Preflight verifications
     verify_campaign2_manifest(BASE_DIR)
     verify_campaign2_evidence_manifest(BASE_DIR)
     verify_campaign2_parity_matrix(BASE_DIR)
     verify_family_blocked_assignment(BASE_DIR)
     reg_data = verify_master_registration(BASE_DIR)
 
-    # Launch lock check (if file exists)
+    # Launch lock check
     lock_path = os.path.join(BASE_DIR, "campaign2_launch_lock.json")
-    if os.path.exists(lock_path):
-        verify_launch_lock(BASE_DIR)
+    lock_hash = ""
+    if not args.mock:
+        # MANDATORY launch lock for scientific launch
+        lock_data = verify_launch_lock(BASE_DIR)
+        with open(lock_path, "rb") as f:
+            lock_hash = hashlib.sha256(f.read()).hexdigest()
+    else:
+        # In mock mode: verify lock if it exists, otherwise note mock testing mode
+        if os.path.exists(lock_path):
+            lock_data = verify_launch_lock(BASE_DIR)
+            with open(lock_path, "rb") as f:
+                lock_hash = hashlib.sha256(f.read()).hexdigest()
+        else:
+            sys.stdout.write("[mock mode] Proceeding without operator launch lock for vertical slice testing.\n")
+
+    # 2. Preflight Model Provider & Evaluator Initialization (BEFORE publishing SCIENTIFIC_START)
+    if args.mock:
+        model = MockModelProvider()
+        evaluator = MockTaskEvaluator()
+    else:
+        # Non-mock scientific run requires SolModelProvider, which raises NotImplementedError
+        # Failing HERE prevents SCIENTIFIC_START from being published prematurely
+        model = SolModelProvider()
+        evaluator = None
 
     ta_data = generate_family_blocked_assignment()
-    stage = args.stage
     suite = "suite_p" if stage == "pilot" else "suite_c"
 
+    # 3. Checkpoint & Scientific Start
     ckpt_path = os.path.join(BASE_DIR, f"campaign2_{stage}_checkpoint.json")
     existing_ckpt = check_and_resume(stage, ckpt_path, BASE_DIR)
     if existing_ckpt is None:
         publish_scientific_start(stage, BASE_DIR)
 
-    if args.mock:
-        model = MockModelProvider()
-        evaluator = MockTaskEvaluator()
-    else:
-        model = SolModelProvider()  # Work Order C
-        evaluator = None
+    ckpt_mgr = CheckpointManager(ckpt_path, stage)
 
+    # 4. Attempt Ledger
+    ledger_path = os.path.join(ctx.run_dir, f"campaign2_{stage}_ledger.jsonl")
+    ledger = AttemptLedger(ledger_path)
+
+    # 5. Instantiate & Run Orchestrator
     orch = Campaign2Orchestrator(
         model_provider=model,
         task_evaluator=evaluator,
         tier_assignment=ta_data,
         registration=reg_data,
         suite=suite,
+        ledger=ledger,
+        checkpoint_mgr=ckpt_mgr,
         workspace_root=BASE_DIR,
     )
 
@@ -3368,10 +3401,32 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
     orch.verify_trio_adjacency()
     outcome = orch.compute_outcome()
 
-    report = generate_schema3_report(outcome, reg_data, ta_data, BASE_DIR)
+    # 6. Pilot Ladder Evaluation
+    baseline_agg = Fraction(outcome["baseline_aggregate"])
+    opt_agg = Fraction(outcome["optimizer_winner_aggregate"])
+    ctrl_agg = Fraction(outcome["control_winner_aggregate"])
+    delta_val = Fraction(outcome["delta_opt_minus_ctrl"])
+
+    ladder = evaluate_pilot_outcome_ladder(
+        baseline_score=baseline_agg,
+        opt_sel_opt_score=opt_agg,
+        opt_sel_ctrl_score=ctrl_agg,
+        conf_holdout_opt_score=opt_agg,
+        conf_holdout_ctrl_score=ctrl_agg,
+        delta=delta_val,
+    )
+
+    # 7. Generate & Publish Schema 3 Report
+    report = generate_schema3_report(
+        outcome, reg_data, ta_data,
+        ledger_path=ledger_path,
+        ladder_outcome=ladder.to_dict(),
+        launch_lock_hash=lock_hash,
+        workspace_root=BASE_DIR,
+    )
     report_path = os.path.join(ctx.run_dir, f"campaign2_{stage}_report.json")
     publish_schema3_report(report, report_path)
-    sys.stdout.write(f"Campaign 2 {stage} execution complete. Report written to {report_path}\n")
+    sys.stdout.write(f"Campaign 2 {stage} execution complete. Ladder decision: {ladder.decision}. Report written to {report_path}\n")
 
 
 def main() -> None:

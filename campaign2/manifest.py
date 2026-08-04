@@ -91,8 +91,21 @@ def get_expected_frozen_inventory(workspace_root: str = BASE_DIR) -> List[str]:
         "campaign2/manifest.py",
         "campaign2/tier_assignment.py",
         "campaign2/scorer.py",
-        "campaign2/defects.py"
+        "campaign2/defects.py",
+        "campaign2/model_provider.py",
+        "campaign2/registration.py",
+        "campaign2/orchestrator.py",
+        "campaign2/launch_lock.py",
+        "campaign2/attempt_lifecycle.py",
+        "campaign2/durability.py",
+        "campaign2/reporting.py",
+        "campaign2/ladder.py",
+        "campaign2/envelope.py",
     ]
+
+    for sealed_file in ["campaign2_master_registration.json", "campaign2_registration_anchor.hash"]:
+        if os.path.exists(os.path.join(workspace_root, sealed_file)):
+            inventory.append(sealed_file)
 
     # Derive benchmark file inventory exclusively from hardcoded task IDs
     for task_id in ALL_30_TASK_IDS:
