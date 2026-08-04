@@ -11,6 +11,7 @@ import hashlib
 import time
 import tempfile
 import stat
+import argparse
 from datetime import datetime, timezone
 import uuid
 
@@ -3301,7 +3302,85 @@ def recover_pending_runs() -> None:
                     raise ExperimentInvalidError(f"Failed to delete residual promotion artifact {p}: {de}")
 
 
+def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
+    """Execute Campaign 2 pilot or full run orchestration."""
+    from campaign2.manifest import (
+        verify_campaign2_manifest,
+        verify_campaign2_evidence_manifest,
+        verify_campaign2_parity_matrix,
+    )
+    from campaign2.tier_assignment import (
+        verify_family_blocked_assignment,
+        generate_family_blocked_assignment,
+    )
+    from campaign2.registration import verify_master_registration
+    from campaign2.launch_lock import verify_launch_lock
+    from campaign2.attempt_lifecycle import (
+        check_and_resume,
+        publish_scientific_start,
+    )
+    from campaign2.model_provider import (
+        MockModelProvider,
+        MockTaskEvaluator,
+        SolModelProvider,
+    )
+    from campaign2.orchestrator import Campaign2Orchestrator
+    from campaign2.reporting import generate_schema3_report, publish_schema3_report
+
+    # Preflight verifications
+    verify_campaign2_manifest(BASE_DIR)
+    verify_campaign2_evidence_manifest(BASE_DIR)
+    verify_campaign2_parity_matrix(BASE_DIR)
+    verify_family_blocked_assignment(BASE_DIR)
+    reg_data = verify_master_registration(BASE_DIR)
+
+    # Launch lock check (if file exists)
+    lock_path = os.path.join(BASE_DIR, "campaign2_launch_lock.json")
+    if os.path.exists(lock_path):
+        verify_launch_lock(BASE_DIR)
+
+    ta_data = generate_family_blocked_assignment()
+    stage = args.stage
+    suite = "suite_p" if stage == "pilot" else "suite_c"
+
+    ckpt_path = os.path.join(BASE_DIR, f"campaign2_{stage}_checkpoint.json")
+    existing_ckpt = check_and_resume(stage, ckpt_path, BASE_DIR)
+    if existing_ckpt is None:
+        publish_scientific_start(stage, BASE_DIR)
+
+    if args.mock:
+        model = MockModelProvider()
+        evaluator = MockTaskEvaluator()
+    else:
+        model = SolModelProvider()  # Work Order C
+        evaluator = None
+
+    orch = Campaign2Orchestrator(
+        model_provider=model,
+        task_evaluator=evaluator,
+        tier_assignment=ta_data,
+        registration=reg_data,
+        suite=suite,
+        workspace_root=BASE_DIR,
+    )
+
+    results = orch.run_all_trials()
+    orch.verify_trio_adjacency()
+    outcome = orch.compute_outcome()
+
+    report = generate_schema3_report(outcome, reg_data, ta_data, BASE_DIR)
+    report_path = os.path.join(ctx.run_dir, f"campaign2_{stage}_report.json")
+    publish_schema3_report(report, report_path)
+    sys.stdout.write(f"Campaign 2 {stage} execution complete. Report written to {report_path}\n")
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="RSI Loop Orchestrator")
+    parser.add_argument("--campaign", type=int, default=1, choices=[1, 2], help="Campaign number (1 or 2)")
+    parser.add_argument("--stage", type=str, default="pilot", choices=["pilot", "full"], help="Stage for Campaign 2 (pilot or full)")
+    parser.add_argument("--mock", action="store_true", help="Use mock model provider and evaluator for verification")
+    args, unknown = parser.parse_known_args()
+
     ctx = RunContext()
     _capture_environment_metadata(ctx)
     ctx.run_id = f"run_{int(time.time())}_{uuid.uuid4().hex[:8]}"
@@ -3320,7 +3399,10 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        _main_exec(ctx)
+        if args.campaign == 2:
+            _run_campaign2(args, ctx)
+        else:
+            _main_exec(ctx)
         sys.exit(0)
     except Exception as e:
         sys.stderr.write(f"FATAL: Experiment invalidated: {e}\n")

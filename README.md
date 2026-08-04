@@ -2,13 +2,13 @@
 
 A bi-level prompt-optimization harness that uses the local **Codex CLI** (remote API model inference) as both the candidate solution generator and the meta-optimizer. The harness evaluates candidate solutions in a macOS `sandbox-exec` jail, then feeds failure traces to the optimizer to mutate system prompts across three independent trials.
 
-## Current Status — Campaign 2 Work Order A-REV3
+## Current Status — Campaign 2 Work Order B (Orchestration & Launch Preflight)
 
-**Status: Research Prototype — Not Production Software.**
-- **Active Branch & Commit**: Development is on branch `campaign2-work-order-a-rebuild` directly above pinned base commit `1abb708afc8dae8c90a2aa57e9f6d8a81a8a0bae`.
-- **No Confirmatory Run**: No confirmatory run has been executed yet.
-- **Model Inference**: Solution generation and prompt mutation use remote Codex model inference via API/CLI proxy harness.
-- **Evaluation Entry Points**: Campaign 2 candidate evaluation is currently reached via standalone test suite launchers (`python3 run_tests.py`, `evaluate_candidate_code_sandboxed`) and preflight manifest verifiers. It is not yet wired into the `rsi_loop.py` main CLI loop.
+**Status: Research Prototype — Executable Vertical Slice Ready.**
+- **Active Base Commit**: Pinned to base commit `96e04c94ef44b974301bbe9e4fedd2ba4281022d`.
+- **CLI Integration**: Wired directly into `rsi_loop.py` via `python3 rsi_loop.py --campaign 2 [--stage pilot|full] [--mock]`.
+- **Model Interface**: Pluggable `ModelProvider` architecture supporting `MockModelProvider` (vertical slice testing) and `SolModelProvider` (Work Order C production stub).
+- **Per-Trial Call Arithmetic**: Fully enforced per-trial call counts (202 for Suite C full-run, 86 for Suite P pilot) across baseline, mutation, winner selection, and post-selection microblock trios.
 
 **Operator Amendment — Legacy Model Deletion**:
 The 491 MB Qwen GGUF model (`models/Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf`) and active model calibration paths have been deleted as an explicit operator amendment. Model-based difficulty stratification is completely withdrawn and replaced with deterministic, machine-recomputable, family-blocked tier assignment (`campaign2_tier_assignment.json`). No local or cloud difficulty-proxy model is required.

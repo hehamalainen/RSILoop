@@ -1,0 +1,171 @@
+{
+  "arm_assignment_derivation": {
+    "algorithm": "SHA-256 rejection sampling uint32, bit -> +1/-1",
+    "base_commit": "96e04c94ef44b974301bbe9e4fedd2ba4281022d",
+    "domain": "rsi_loop/campaign2/arm_assignment",
+    "transcript": [
+      {
+        "action": "accept",
+        "chosen": 1,
+        "range_n": 2,
+        "rejection_limit": 4294967296,
+        "stream_index": 0,
+        "uint32_val": 485772363
+      },
+      {
+        "action": "accept",
+        "chosen": 1,
+        "range_n": 2,
+        "rejection_limit": 4294967296,
+        "stream_index": 1,
+        "uint32_val": 1466231681
+      },
+      {
+        "action": "accept",
+        "chosen": 1,
+        "range_n": 2,
+        "rejection_limit": 4294967296,
+        "stream_index": 2,
+        "uint32_val": 3082735101
+      },
+      {
+        "action": "accept",
+        "chosen": 0,
+        "range_n": 2,
+        "rejection_limit": 4294967296,
+        "stream_index": 3,
+        "uint32_val": 2801234938
+      },
+      {
+        "action": "accept",
+        "chosen": 1,
+        "range_n": 2,
+        "rejection_limit": 4294967296,
+        "stream_index": 4,
+        "uint32_val": 2372353431
+      },
+      {
+        "action": "accept",
+        "chosen": 1,
+        "range_n": 2,
+        "rejection_limit": 4294967296,
+        "stream_index": 5,
+        "uint32_val": 1233413877
+      },
+      {
+        "action": "accept",
+        "chosen": 1,
+        "range_n": 2,
+        "rejection_limit": 4294967296,
+        "stream_index": 6,
+        "uint32_val": 3854371501
+      },
+      {
+        "action": "accept",
+        "chosen": 0,
+        "range_n": 2,
+        "rejection_limit": 4294967296,
+        "stream_index": 7,
+        "uint32_val": 1898531954
+      },
+      {
+        "action": "accept",
+        "chosen": 0,
+        "range_n": 2,
+        "rejection_limit": 4294967296,
+        "stream_index": 8,
+        "uint32_val": 2681027796
+      },
+      {
+        "action": "accept",
+        "chosen": 1,
+        "range_n": 2,
+        "rejection_limit": 4294967296,
+        "stream_index": 9,
+        "uint32_val": 4169980419
+      }
+    ]
+  },
+  "arm_assignment_vectors": [
+    -1,
+    -1,
+    -1,
+    1,
+    -1,
+    -1,
+    -1,
+    1,
+    1,
+    -1
+  ],
+  "base_commit_sha": "96e04c94ef44b974301bbe9e4fedd2ba4281022d",
+  "campaign_id": "campaign_2_gpt5_6_sol",
+  "exploratory_secondaries": [
+    "score-improving mutations per model call",
+    "improvement per 1,000 output tokens",
+    "valid-candidate rate",
+    "mutation depth producing each new best"
+  ],
+  "frozen_trio_orderings": [
+    [
+      "baseline",
+      "optimizer_winner",
+      "control_winner"
+    ],
+    [
+      "baseline",
+      "control_winner",
+      "optimizer_winner"
+    ],
+    [
+      "optimizer_winner",
+      "baseline",
+      "control_winner"
+    ],
+    [
+      "optimizer_winner",
+      "control_winner",
+      "baseline"
+    ],
+    [
+      "control_winner",
+      "baseline",
+      "optimizer_winner"
+    ],
+    [
+      "control_winner",
+      "optimizer_winner",
+      "baseline"
+    ]
+  ],
+  "known_limitations": [
+    "Modest power; ten randomized trial blocks; narrow guided-vs-unguided claim only.",
+    "Estimand is the service presented as gpt-5.6-sol during the campaign window; silent provider changes undetectable.",
+    "CLI JSONL is strictly parsed and correlation-bound, not cryptographically authenticated.",
+    "One-shot enforcement is local, cooperative-operator threat model; the remote anchors definition only.",
+    "No hard token or cost bound; post-call ceiling with possible one-call overshoot.",
+    "Trial timeouts are accepted-risk thresholds, not worst-case.",
+    "Claims cover the eight fixed preregistered confirmatory tasks, not unseen tasks generally.",
+    "Tiers balanced by structural task FAMILY, not measured difficulty; families are not difficulty strata.",
+    "MacBook memory availability is not a production containment guarantee; accepted for this non-adversarial research campaign.",
+    "A candidate that blocks without consuming CPU will eventually hit the wall-clock supervisor timeout and be classified as a candidate failure scoring (0, 10). This is phase-attributed correctly but consumes real wall-clock time from the trial budget, potentially causing downstream timeouts if many candidates exhibit this behavior.",
+    "A >= 0.05 is an observed practical gate, not inferential proof of absolute improvement."
+  ],
+  "schema_version": "3",
+  "trio_ordering_derivation": {
+    "algorithm": "SHA-256 rejection sampling uint32",
+    "base_commit": "96e04c94ef44b974301bbe9e4fedd2ba4281022d",
+    "domain": "rsi_loop/campaign2/trio_ordering",
+    "transcript": [
+      {
+        "action": "accept",
+        "chosen": 685898983,
+        "range_n": 1073741824,
+        "rejection_limit": 4294967296,
+        "stream_index": 0,
+        "uint32_val": 3907124455
+      }
+    ]
+  },
+  "trio_ordering_master_seed": 685898983
+}
