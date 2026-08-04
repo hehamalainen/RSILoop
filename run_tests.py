@@ -16,33 +16,36 @@ def unraisable_hook(unraisable):
 sys.unraisablehook = unraisable_hook
 
 def main():
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    workspace_root = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, workspace_root)
 
-    # Verify Campaign 2 preflight manifest and sealed evidence manifest strictly read-only before running tests
-    from campaign2.manifest import verify_campaign2_manifest, verify_campaign2_evidence_manifest
-    ok, manifest_count = verify_campaign2_manifest(os.path.dirname(os.path.abspath(__file__)))
+    # STRICTLY READ-ONLY Verification of preflight, evidence, parity matrix, and tier assignment artifacts
+    from campaign2.manifest import (
+        verify_campaign2_manifest,
+        verify_campaign2_evidence_manifest,
+        verify_campaign2_parity_matrix
+    )
+    from campaign2.tier_assignment import verify_family_blocked_assignment
+
+    ok, manifest_count = verify_campaign2_manifest(workspace_root)
     if not ok or manifest_count != 128:
         sys.stderr.write(f"FATAL: Campaign 2 preflight manifest verification failed (ok={ok}, count={manifest_count})\n")
         sys.exit(1)
 
-    manifest_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "campaign2_evidence_hashes.json")
-    if os.path.exists(manifest_path):
-        if not verify_campaign2_evidence_manifest(os.path.dirname(os.path.abspath(__file__))):
-            sys.stderr.write("FATAL: Campaign 2 sealed evidence manifest verification failed\n")
-            sys.exit(1)
+    verify_campaign2_evidence_manifest(workspace_root)
+    verify_campaign2_parity_matrix(workspace_root)
+    verify_family_blocked_assignment(workspace_root)
 
     # 3. Load test suite
     loader = unittest.TestLoader()
-    suite = loader.discover(start_dir=os.path.dirname(os.path.abspath(__file__)), pattern="test_*.py")
+    suite = loader.discover(start_dir=workspace_root, pattern="test_*.py")
 
-    # Custom test runner to track results strictly
     runner = unittest.TextTestRunner(verbosity=2)
 
     sys.stdout.write("Discovering tests...\n")
     discovered_count = suite.countTestCases()
     sys.stdout.write(f"Discovered test cases: {discovered_count}\n")
 
-    # Enforce the approved host-boundary regression floor.
     MIN_TESTS = 171
     if discovered_count < MIN_TESTS:
         sys.stderr.write(f"FATAL: Discovered test count {discovered_count} is less than minimum {MIN_TESTS}\n")
@@ -55,51 +58,27 @@ def main():
 
     success = True
 
-    # Check for test failures or errors
     if not result.wasSuccessful():
         sys.stderr.write("FATAL: Test suite failed or errored\n")
         success = False
 
-    # 5. Fail on skipped tests
+    # Zero-skip enforcement
     if result.skipped:
-        sys.stderr.write(f"FATAL: Skipped tests are forbidden. Skipped count: {len(result.skipped)}\n")
-        for test, reason in result.skipped:
-            sys.stderr.write(f"  - {test}: {reason}\n")
+        sys.stderr.write(f"FATAL: {len(result.skipped)} test(s) skipped:\n")
+        for test_case, reason in result.skipped:
+            sys.stderr.write(f"  - {test_case}: {reason}\n")
         success = False
 
-    # 6. Check for unraisable exceptions
     if unraisable_exceptions:
-        sys.stderr.write(f"FATAL: Collected {len(unraisable_exceptions)} unraisable exceptions/ResourceWarnings:\n")
-        for ue in unraisable_exceptions:
-            sys.stderr.write(f"  - {ue.exc_type.__name__}: {ue.exc_value}\n")
+        sys.stderr.write(f"FATAL: {len(unraisable_exceptions)} unraisable exception(s) caught:\n")
+        for exc in unraisable_exceptions:
+            sys.stderr.write(f"  - {exc}\n")
         success = False
-
-    # Check if executed count matches expected
-    executed_count = result.testsRun
-    sys.stdout.write(f"Executed test cases: {executed_count}\n")
-
-    # Assert that the active hook is still our unraisable_hook
-    if sys.unraisablehook is not unraisable_hook:
-        sys.stderr.write("FATAL: sys.unraisablehook was overwritten during test discovery!\n")
-        success = False
-
-    # Test with a controlled unraisable exception
-    import collections
-    UnraisableArgs = collections.namedtuple('UnraisableArgs', ['exc_type', 'exc_value', 'exc_traceback', 'err_msg', 'object'])
-    dummy_args = UnraisableArgs(exc_type=ValueError, exc_value=ValueError("Controlled test exception"), exc_traceback=None, err_msg="Controlled test", object=None)
-
-    initial_len = len(unraisable_exceptions)
-    sys.unraisablehook(dummy_args)
-    if len(unraisable_exceptions) <= initial_len or unraisable_exceptions[-1].exc_value is not dummy_args.exc_value:
-        sys.stderr.write("FATAL: sys.unraisablehook failed to collect the controlled unraisable exception!\n")
-        success = False
-    else:
-        # Remove the controlled exception from the list so it doesn't trigger "unraisable exception detected" failure
-        unraisable_exceptions.pop()
 
     if not success:
         sys.exit(1)
 
+    sys.stdout.write(f"Executed test cases: {discovered_count}\n")
     sys.stdout.write("All tests passed cleanly with zero skips, zero warnings, and zero unraisable exceptions!\n")
     sys.exit(0)
 

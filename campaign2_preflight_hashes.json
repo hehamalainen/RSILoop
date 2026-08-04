@@ -1,4 +1,5 @@
 {
+  "README.md": "ba9f908258beb71a6321c21b48bd49146f837d06bd0391ef559bab35242336e9",
   "benchmarks/campaign2/suite_c/c_f1_01_log_stream_parser/defects.py": "a9f97792d9f1902d43ce80f24d23fca68aaa6367233a4d8cea766dd765a3ce41",
   "benchmarks/campaign2/suite_c/c_f1_01_log_stream_parser/problem.txt": "d1c87058e355edda88e2f7d83cef5c27fc80e07ce5bb7ac8ac5993cef6ea7b76",
   "benchmarks/campaign2/suite_c/c_f1_01_log_stream_parser/solution.py": "d784df8b6b2d50f23db9b34d3602dc9af78c9ecac1ccecdf625785c5fc6c687c",
@@ -120,11 +121,10 @@
   "benchmarks/campaign2/suite_p/p_f4_02_sip_call_flow_fsm/solution.py": "f176d21c1f685ef72c790a49a9bae497bbbde7451388bfd0c4d24f05c4a01a35",
   "benchmarks/campaign2/suite_p/p_f4_02_sip_call_flow_fsm/test_harness.py": "62fb6980d9b819bd64a85587a91b9ab33b1058829e8e6b52cbb0271c6cfc8c48",
   "campaign2/defects.py": "2d8797df93ea4573407cc177b736fd3dfe34561f5deabbb6f5c4620e9a2f2288",
-  "campaign2/local_model_runner.py": "9b174be270474d301b2b10c86c3426b89ada45a78cec4c95b0f713c596bced54",
-  "campaign2/manifest.py": "7045d0fa814ef306d31e6569721c47432be332c47380ebb42f3791a4029bf567",
-  "campaign2/proxy.py": "07ddc40416ce6a7af4645cc8f7ea1aafca0b26a9a2992341894244cefb358216",
-  "campaign2/proxy_config.json": "4682b6acb1e8930cf5d9d27ef0d94025d34b06898a592e6d8d11b1c80c0acf22",
+  "campaign2/manifest.py": "c2443a2778b45f239ac3539e702fc57c9a266475359dac984d6516e8ca01ecac",
+  "campaign2/proxy.py": "035c3585b156864f69ab61ccf3c0d4d372482e55087f8a342e9de7d842b5f1d8",
   "campaign2/scorer.py": "9a24687f8120b4617fe609e4211d4adc3f3cb1d0feb9e5f775aadd8ecc0bfbbd",
-  "models/fetch_model.py": "0c7193a2085598fcd9691d552a3007cc75e717e503f35a2701bd1b50816421dd",
-  "models/model_descriptor.json": "a9d452a097355703d2e67c7d71a11754e6cb950149963768f15e3030433862f0"
+  "campaign2/tier_assignment.py": "e000d8213586a9d33bea6b3fa04e8322a92cca1f9fcf32358b51abe26a9d799b",
+  "docs/walkthrough.md": "677ce6df0bb1f3beb718f9260f99c996b6364f1a6f016a00c1a0ba999b7b6830",
+  "run_tests.py": "66f826c9877efd7ac44d214f5a853543885f516925893429b253bcd712e606c3"
 }

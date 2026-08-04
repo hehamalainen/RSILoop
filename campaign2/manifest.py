@@ -1,247 +1,268 @@
 """
-Campaign 2 Preflight Manifest Generator & Inventory Verifier (A6).
+Campaign 2 Manifest & Evidence Integrity Verification Module.
 
-TWO-CATEGORY VERIFICATION GUARANTEE:
-Category 1: 128 Git-tracked frozen files (30 tasks * 4 files + core modules + descriptor & fetch script).
-Category 2: 1 Permitted external artifact (models/Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf),
-            verified by exact path, size (491400064 bytes), SHA256, regular-file status, and no symlinks.
-
-STRICTLY READ-ONLY verification: never creates or mutates files on disk or alters permissions during checks. Fail-closed.
+Provides preflight manifest generation and verification for 128 Git-tracked Category 1 files,
+sealed evidence manifest verification (4 required files), and strict read-only parity matrix verification.
 """
 
 import os
+import sys
 import json
+import stat
 import hashlib
-from typing import Dict, Any, Tuple
+from typing import Dict, List, Tuple, Any
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PREFLIGHT_MANIFEST_PATH = os.path.join(BASE_DIR, "campaign2_preflight_hashes.json")
+EVIDENCE_MANIFEST_PATH = os.path.join(BASE_DIR, "campaign2_evidence_hashes.json")
+PARITY_MATRIX_PATH = os.path.join(BASE_DIR, "campaign2_parity_matrix.json")
 
 EXPECTED_SUITE_C_TASK_IDS = [
-    "c_f1_01_log_stream_parser",
-    "c_f1_02_json_tokenizer_recovery",
-    "c_f1_03_csv_record_recovery",
-    "c_f1_04_http_chunked_decoder",
-    "c_f1_05_protobuf_varint_decoder",
-    "c_f2_01_dag_task_scheduler",
-    "c_f2_02_resource_limit_planner",
-    "c_f2_03_build_dependency_graph",
-    "c_f2_04_pipeline_stage_scheduler",
-    "c_f2_05_package_version_resolver",
-    "c_f3_01_lru_ttl_cache",
-    "c_f3_02_lfu_serialized_cache",
-    "c_f3_03_write_through_cache",
-    "c_f3_04_segmented_2tier_cache",
-    "c_f3_05_two_queue_cache",
-    "c_f3_06_tiered_storage_store",
-    "c_f4_01_raft_leader_election",
-    "c_f4_02_tcp_state_machine",
-    "c_f4_03_oauth2_flow_simulator",
-    "c_f4_04_websocket_frame_fsm",
-    "c_f4_05_saga_orchestrator_fsm",
-    "c_f4_06_dtls_handshake_fsm"
+    "c_f1_01_log_stream_parser", "c_f1_02_json_tokenizer_recovery", "c_f1_03_csv_record_recovery",
+    "c_f1_04_http_chunked_decoder", "c_f1_05_protobuf_varint_decoder",
+    "c_f2_01_dag_task_scheduler", "c_f2_02_resource_limit_planner", "c_f2_03_build_dependency_graph",
+    "c_f2_04_pipeline_stage_scheduler", "c_f2_05_package_version_resolver",
+    "c_f3_01_lru_ttl_cache", "c_f3_02_lfu_serialized_cache", "c_f3_03_write_through_cache",
+    "c_f3_04_segmented_2tier_cache", "c_f3_05_two_queue_cache", "c_f3_06_tiered_storage_store",
+    "c_f4_01_raft_leader_election", "c_f4_02_tcp_state_machine", "c_f4_03_oauth2_flow_simulator",
+    "c_f4_04_websocket_frame_fsm", "c_f4_05_saga_orchestrator_fsm", "c_f4_06_dtls_handshake_fsm"
 ]
 
 EXPECTED_SUITE_P_TASK_IDS = [
-    "p_f1_01_ndjson_stream_parser",
-    "p_f1_02_syslog_framing_decoder",
-    "p_f2_01_workflow_execution_engine",
-    "p_f2_02_k8s_pod_scheduler",
-    "p_f3_01_arc_adaptive_cache",
-    "p_f3_02_ring_buffer_cache",
-    "p_f4_01_bgp_peer_fsm",
-    "p_f4_02_sip_call_flow_fsm"
+    "p_f1_01_ndjson_stream_parser", "p_f1_02_syslog_framing_decoder",
+    "p_f2_01_workflow_execution_engine", "p_f2_02_k8s_pod_scheduler",
+    "p_f3_01_arc_adaptive_cache", "p_f3_02_ring_buffer_cache",
+    "p_f4_01_bgp_peer_fsm", "p_f4_02_sip_call_flow_fsm"
 ]
 
-EXPECTED_EXTERNAL_MODEL_RELPATH = os.path.join("models", "Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf")
-EXPECTED_EXTERNAL_MODEL_SHA256 = "1d9614638d18024d0fbb36575a15f1302a3adf044df10345688ec4f6e1c4ff32"
-EXPECTED_EXTERNAL_MODEL_SIZE = 491400064
+ALL_30_TASK_IDS = sorted(EXPECTED_SUITE_C_TASK_IDS + EXPECTED_SUITE_P_TASK_IDS)
 
 
-def _check_no_symlinks(full_path: str, workspace_root: str = BASE_DIR):
-    """Verifies that neither the path nor any parent directory within workspace_root is a symbolic link."""
-    abs_path = os.path.abspath(full_path)
-    abs_root = os.path.abspath(workspace_root)
-    curr = abs_path
-
-    while curr and curr.startswith(abs_root):
-        if os.path.islink(curr):
-            raise ValueError(f"Symlink detected in path component: {curr}")
-        if curr == abs_root:
-            break
-        curr = os.path.dirname(curr)
-
-
-def _sha256_file(path: str, workspace_root: str = BASE_DIR) -> str:
-    _check_no_symlinks(path, workspace_root)
+def compute_file_sha256(filepath: str) -> str:
+    """Computes SHA256 digest of a file in 64KB chunks."""
     sha = hashlib.sha256()
-    with open(path, "rb") as f:
-        while chunk := f.read(8192 * 1024):
+    with open(filepath, "rb") as f:
+        while chunk := f.read(65536):
             sha.update(chunk)
     return sha.hexdigest()
 
 
-def get_expected_frozen_inventory() -> list[str]:
-    """Returns the hardcoded 128 Git-tracked frozen file paths."""
-    files = [
-        os.path.join("campaign2", "scorer.py"),
-        os.path.join("campaign2", "defects.py"),
-        os.path.join("campaign2", "proxy.py"),
-        os.path.join("campaign2", "proxy_config.json"),
-        os.path.join("campaign2", "local_model_runner.py"),
-        os.path.join("campaign2", "manifest.py"),
-        os.path.join("models", "model_descriptor.json"),
-        os.path.join("models", "fetch_model.py"),
+def _verify_exact_task_directories(workspace_root: str = BASE_DIR) -> None:
+    """Verifies that actual benchmark task directories on disk match expected task IDs exactly."""
+    bench_dir = os.path.join(workspace_root, "benchmarks", "campaign2")
+
+    suite_c_dir = os.path.join(bench_dir, "suite_c")
+    actual_c = set()
+    if os.path.exists(suite_c_dir):
+        actual_c = {d for d in os.listdir(suite_c_dir) if os.path.isdir(os.path.join(suite_c_dir, d))}
+    expected_c = set(EXPECTED_SUITE_C_TASK_IDS)
+    if actual_c != expected_c:
+        extra = sorted(actual_c - expected_c)
+        missing = sorted(expected_c - actual_c)
+        if extra:
+            raise ValueError(f"Unauthorized extra task directory found in suite_c: {extra}")
+        if missing:
+            raise ValueError(f"Missing expected task directory in suite_c: {missing}")
+
+    suite_p_dir = os.path.join(bench_dir, "suite_p")
+    actual_p = set()
+    if os.path.exists(suite_p_dir):
+        actual_p = {d for d in os.listdir(suite_p_dir) if os.path.isdir(os.path.join(suite_p_dir, d))}
+    expected_p = set(EXPECTED_SUITE_P_TASK_IDS)
+    if actual_p != expected_p:
+        extra = sorted(actual_p - expected_p)
+        missing = sorted(expected_p - actual_p)
+        if extra:
+            raise ValueError(f"Unauthorized extra task directory found in suite_p: {extra}")
+        if missing:
+            raise ValueError(f"Missing expected task directory in suite_p: {missing}")
+
+
+def get_expected_frozen_inventory(workspace_root: str = BASE_DIR) -> List[str]:
+    """
+    Returns list of exact 128 Category 1 Git-tracked files comprising frozen Campaign 2 benchmark & harness.
+    Derived exclusively from hardcoded task IDs — no filesystem discovery.
+    """
+    inventory = [
+        "README.md",
+        "run_tests.py",
+        "docs/walkthrough.md",
+        "campaign2/proxy.py",
+        "campaign2/manifest.py",
+        "campaign2/tier_assignment.py",
+        "campaign2/scorer.py",
+        "campaign2/defects.py"
     ]
 
-    for task_id in EXPECTED_SUITE_C_TASK_IDS:
+    # Derive benchmark file inventory exclusively from hardcoded task IDs
+    for task_id in ALL_30_TASK_IDS:
+        if task_id in EXPECTED_SUITE_C_TASK_IDS:
+            suite = "suite_c"
+        elif task_id in EXPECTED_SUITE_P_TASK_IDS:
+            suite = "suite_p"
+        else:
+            raise ValueError(f"Task ID '{task_id}' not found in any expected suite")
         for fname in ["problem.txt", "solution.py", "test_harness.py", "defects.py"]:
-            files.append(os.path.join("benchmarks", "campaign2", "suite_c", task_id, fname))
+            inventory.append(os.path.join("benchmarks", "campaign2", suite, task_id, fname))
 
-    for task_id in EXPECTED_SUITE_P_TASK_IDS:
-        for fname in ["problem.txt", "solution.py", "test_harness.py", "defects.py"]:
-            files.append(os.path.join("benchmarks", "campaign2", "suite_p", task_id, fname))
-
-    return sorted(files)
+    return sorted(inventory)
 
 
-def generate_campaign2_manifest(workspace_root: str = BASE_DIR) -> Dict[str, str]:
+def generate_campaign2_manifest(workspace_root: str = BASE_DIR) -> str:
+    """Generates and writes sealed campaign2_preflight_hashes.json with mode 0o444."""
+    _verify_exact_task_directories(workspace_root)
+    inventory = get_expected_frozen_inventory(workspace_root)
+
+    manifest_data = {}
+    for rel_path in inventory:
+        abs_path = os.path.join(workspace_root, rel_path)
+        if not os.path.exists(abs_path):
+            raise FileNotFoundError(f"Missing required Category 1 file for manifest: {rel_path}")
+        manifest_data[rel_path] = compute_file_sha256(abs_path)
+
+    out_path = os.path.join(workspace_root, "campaign2_preflight_hashes.json")
+    if os.path.exists(out_path):
+        os.chmod(out_path, 0o644)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(manifest_data, f, indent=2, sort_keys=True)
+
+    os.chmod(out_path, 0o444)
+    return out_path
+
+
+def _check_no_symlink_components(workspace_root: str, target_path: str) -> None:
     """
-    Explicit generator tool to create campaign2_preflight_hashes.json during initial Gate A1 build.
+    Verifies that target_path and every parent directory component from workspace_root down to target_path is not a symlink.
     """
-    hashes = {}
-    expected_files = get_expected_frozen_inventory()
-    manifest_path = os.path.join(workspace_root, "campaign2_preflight_hashes.json")
+    if os.path.islink(target_path):
+        raise ValueError(f"Symlink rejected at target path: {target_path}")
 
-    for rel_path in expected_files:
-        full_path = os.path.join(workspace_root, rel_path)
-        if not os.path.exists(full_path):
-            raise FileNotFoundError(f"Required preregistered file missing: {full_path}")
-        hashes[rel_path] = _sha256_file(full_path, workspace_root)
+    try:
+        rel = os.path.relpath(target_path, workspace_root)
+    except ValueError:
+        return
 
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(hashes, f, indent=2, sort_keys=True)
+    if rel.startswith(".."):
+        return
 
-    return hashes
-
-
-def verify_external_model_artifact(workspace_root: str = BASE_DIR) -> bool:
-    """Verifies Category 2: Permitted external model artifact based on models/model_descriptor.json."""
-    desc_path = os.path.join(workspace_root, "models", "model_descriptor.json")
-    if not os.path.exists(desc_path):
-        raise FileNotFoundError(f"Missing model descriptor at: {desc_path}")
-    with open(desc_path, "r", encoding="utf-8") as f:
-        desc = json.load(f)
-
-    expected_sha = desc.get("expected_sha256")
-    if expected_sha == "PENDING_AUTHORIZED_DOWNLOAD":
-        return True
-
-    rel_path = desc.get("relative_path", os.path.join("models", desc.get("filename", "")))
-    full_path = os.path.join(workspace_root, rel_path)
-    if not os.path.exists(full_path):
-        raise FileNotFoundError(f"Permitted external model artifact missing at: {full_path}")
-    _check_no_symlinks(full_path, workspace_root)
-    if os.path.islink(full_path):
-        raise ValueError(f"External model artifact must not be a symlink: {full_path}")
-
-    expected_size = desc.get("expected_size_bytes")
-    if expected_size is not None:
-        st = os.stat(full_path)
-        if st.st_size != expected_size:
-            raise ValueError(f"External model size mismatch: expected {expected_size} bytes, got {st.st_size}")
-
-    if expected_sha:
-        actual_sha = _sha256_file(full_path, workspace_root)
-        if actual_sha != expected_sha:
-            raise ValueError(f"External model SHA256 mismatch: expected {expected_sha}, got {actual_sha}")
-
-    return True
+    curr = workspace_root
+    for part in rel.split(os.sep):
+        if not part or part == ".":
+            continue
+        curr = os.path.join(curr, part)
+        if os.path.islink(curr):
+            raise ValueError(f"Symlink rejected in parent component path: {curr}")
 
 
 def verify_campaign2_manifest(workspace_root: str = BASE_DIR) -> Tuple[bool, int]:
     """
-    STRICTLY READ-ONLY Verification across Category 1 (128 Git-tracked files) and Category 2 (1 Permitted External Artifact).
-    Rejects any unlisted, unexpected, missing, or symlinked files. Fail-closed.
-    Returns (True, 128).
+    STRICTLY READ-ONLY Verification of Preflight Manifest.
+    Verifies that campaign2_preflight_hashes.json exists, is a regular file with mode 0o444,
+    no path component is a symlink, contains all 128 Category 1 files, and every file SHA256 matches.
     """
+    _verify_exact_task_directories(workspace_root)
+
     manifest_path = os.path.join(workspace_root, "campaign2_preflight_hashes.json")
     if not os.path.exists(manifest_path):
-        raise FileNotFoundError(f"Campaign 2 manifest file missing: {manifest_path}")
+        raise FileNotFoundError(f"Missing preflight manifest: {manifest_path}")
+
+    _check_no_symlink_components(workspace_root, manifest_path)
+
+    if not os.path.isfile(manifest_path):
+        raise ValueError(f"Preflight manifest must be a regular file: {manifest_path}")
+
+    st_mode = stat.S_IMODE(os.stat(manifest_path).st_mode)
+    if st_mode != 0o444:
+        raise ValueError(f"Preflight manifest permission mode must be 0o444, got {oct(st_mode)}")
 
     with open(manifest_path, "r", encoding="utf-8") as f:
-        hashes = json.load(f)
+        try:
+            manifest_data = json.load(f)
+        except Exception as e:
+            raise ValueError(f"Invalid JSON in preflight manifest: {e}")
 
-    expected_inventory = set(get_expected_frozen_inventory())
-    manifest_keys = set(hashes.keys())
+    expected_inventory = get_expected_frozen_inventory(workspace_root)
+    if len(manifest_data) != len(expected_inventory):
+        raise ValueError(f"Manifest entry count mismatch: expected {len(expected_inventory)}, got {len(manifest_data)}")
 
-    # 1. Enforce Category 1 exact inventory match (128 files)
-    if manifest_keys != expected_inventory:
-        missing = expected_inventory - manifest_keys
-        extra = manifest_keys - expected_inventory
-        raise ValueError(
-            f"Manifest keys do not match preregistered 30-task inventory (128 files). "
-            f"Missing={sorted(list(missing))}, Extra={sorted(list(extra))}"
-        )
+    for rel_path in expected_inventory:
+        if rel_path not in manifest_data:
+            raise ValueError(f"Missing entry in preflight manifest: {rel_path}")
 
-    # 2. Check all 128 Category 1 files
-    for rel_path, expected_hash in hashes.items():
-        full_path = os.path.join(workspace_root, rel_path)
-        if not os.path.exists(full_path):
-            raise FileNotFoundError(f"Manifest entry missing on disk: {rel_path}")
-        actual_hash = _sha256_file(full_path, workspace_root)
+        abs_path = os.path.join(workspace_root, rel_path)
+
+        # Check symlink components for EVERY authenticated file path
+        _check_no_symlink_components(workspace_root, abs_path)
+
+        if not os.path.exists(abs_path):
+            raise FileNotFoundError(f"Missing file on disk: {rel_path}")
+
+        expected_hash = manifest_data[rel_path]
+        actual_hash = compute_file_sha256(abs_path)
         if actual_hash != expected_hash:
             raise ValueError(f"Hash mismatch for {rel_path}: expected {expected_hash}, got {actual_hash}")
 
-    # 3. Check Category 2 Permitted External Model Artifact
-    verify_external_model_artifact(workspace_root)
+    return True, len(manifest_data)
 
-    # 4. Enforce exact on-disk inventory & symlink check across directories
-    c2_dir = os.path.join(workspace_root, "campaign2")
-    bench_dir = os.path.join(workspace_root, "benchmarks", "campaign2")
-    models_dir = os.path.join(workspace_root, "models")
 
-    scanned_files = set()
-    for root_dir in [c2_dir, bench_dir, models_dir]:
-        if not os.path.exists(root_dir): continue
-        for root, dirs, files in os.walk(root_dir, followlinks=False):
-            _check_no_symlinks(root, workspace_root)
-            for dname in list(dirs):
-                if dname == "__pycache__":
-                    dirs.remove("__pycache__")
-                else:
-                    _check_no_symlinks(os.path.join(root, dname), workspace_root)
+def seal_campaign2_evidence_files(workspace_root: str = BASE_DIR):
+    """
+    Sets 0o444 read-only permissions on evidence files. Mode setting ONLY.
+    Does NOT write or overwrite content.
+    """
+    target_files = [
+        "campaign2_parity_matrix.json",
+        "campaign2_tier_assignment.json",
+        "campaign2_archive/proxy_calibration_qwen2_5_coder_0_5b_rejected.json",
+        "campaign2_archive/proxy_config_gpt_oss_unexecuted.json"
+    ]
+    for rel in target_files:
+        abs_p = os.path.join(workspace_root, rel)
+        if os.path.exists(abs_p) and not os.path.islink(abs_p):
+            os.chmod(abs_p, 0o444)
 
-            for fname in files:
-                if fname.endswith((".pyc", ".pyo")): continue
-                full_p = os.path.join(root, fname)
-                _check_no_symlinks(full_p, workspace_root)
-                rel_p = os.path.relpath(full_p, workspace_root)
-                # Ignore permitted external artifact GGUF file during Category 1 check
-                if rel_p == EXPECTED_EXTERNAL_MODEL_RELPATH:
-                    continue
-                scanned_files.add(rel_p)
 
-    unlisted = scanned_files - expected_inventory
-    if unlisted:
-        raise ValueError(f"Unlisted/unexpected scientific files found on disk: {sorted(list(unlisted))}")
+def generate_campaign2_evidence_manifest(workspace_root: str = BASE_DIR) -> str:
+    """Generates and writes sealed campaign2_evidence_hashes.json with mode 0o444."""
+    target_files = [
+        "campaign2_parity_matrix.json",
+        "campaign2_tier_assignment.json",
+        "campaign2_archive/proxy_calibration_qwen2_5_coder_0_5b_rejected.json",
+        "campaign2_archive/proxy_config_gpt_oss_unexecuted.json"
+    ]
 
-    return True, len(hashes)
+    manifest_data = {}
+    for rel in sorted(target_files):
+        abs_p = os.path.join(workspace_root, rel)
+        if not os.path.exists(abs_p):
+            raise FileNotFoundError(f"Missing required evidence file: {rel}")
+        manifest_data[rel] = compute_file_sha256(abs_p)
+
+    out_path = os.path.join(workspace_root, "campaign2_evidence_hashes.json")
+    if os.path.exists(out_path):
+        os.chmod(out_path, 0o644)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(manifest_data, f, indent=2, sort_keys=True)
+
+    os.chmod(out_path, 0o444)
+    return out_path
 
 
 def verify_campaign2_evidence_manifest(workspace_root: str = BASE_DIR) -> bool:
     """
-    STRICTLY READ-ONLY Verification of Sealed Scientific Evidence Manifest (campaign2_evidence_hashes.json).
-    Authenticates exact 6-file inventory, 64-char lowercase hex SHA256 hashes, symlink rejection, regular file type, and mode 0o444.
+    STRICTLY READ-ONLY Verification of Evidence Manifest.
+    Checks file permissions (0o444), regular file type, parent symlinks, and verifies hashes of all 4 evidence files.
     """
-    import stat
-    import re
     manifest_path = os.path.join(workspace_root, "campaign2_evidence_hashes.json")
     if not os.path.exists(manifest_path):
-        raise FileNotFoundError(f"Missing sealed evidence manifest: {manifest_path}")
+        raise FileNotFoundError(f"Missing evidence manifest: {manifest_path}")
 
-    _check_no_symlinks(manifest_path, workspace_root)
-    if not os.path.isfile(manifest_path) or os.path.islink(manifest_path):
-        raise ValueError(f"Evidence manifest must be a regular non-symlink file: {manifest_path}")
+    _check_no_symlink_components(workspace_root, manifest_path)
+
+    if not os.path.isfile(manifest_path):
+        raise ValueError(f"Evidence manifest must be a regular file: {manifest_path}")
 
     st_mode = stat.S_IMODE(os.stat(manifest_path).st_mode)
     if st_mode != 0o444:
@@ -249,46 +270,214 @@ def verify_campaign2_evidence_manifest(workspace_root: str = BASE_DIR) -> bool:
 
     with open(manifest_path, "r", encoding="utf-8") as f:
         try:
-            hashes = json.load(f)
+            manifest_data = json.load(f)
         except Exception as e:
             raise ValueError(f"Invalid JSON in evidence manifest: {e}")
 
-    if not isinstance(hashes, dict):
-        raise ValueError("Evidence manifest JSON must be a dictionary")
-
-    required_inventory = {
+    expected_files = [
         "campaign2_parity_matrix.json",
-        "campaign2_proxy_calibration_qwen2_5_coder_0_5b_rejected.json",
-        "campaign2_proxy_calibration_gpt_oss_20b.json",
-        "campaign2_proxy_adequacy.json",
-        "campaign2/proxy_config.json",
-        "models/model_descriptor.json"
-    }
+        "campaign2_tier_assignment.json",
+        "campaign2_archive/proxy_calibration_qwen2_5_coder_0_5b_rejected.json",
+        "campaign2_archive/proxy_config_gpt_oss_unexecuted.json"
+    ]
 
-    manifest_keys = set(hashes.keys())
-    if manifest_keys != required_inventory:
-        missing = sorted(list(required_inventory - manifest_keys))
-        extra = sorted(list(manifest_keys - required_inventory))
-        raise ValueError(f"Evidence manifest inventory mismatch. Missing: {missing}, Extra: {extra}")
+    if len(manifest_data) != len(expected_files):
+        raise ValueError(f"Evidence manifest count mismatch: expected {len(expected_files)}, got {len(manifest_data)}")
 
-    hex_pattern = re.compile(r"^[0-9a-f]{64}$")
+    for rel in expected_files:
+        if rel not in manifest_data:
+            raise ValueError(f"Missing entry in evidence manifest: {rel}")
 
-    for rel_path, expected_hash in hashes.items():
-        if not isinstance(expected_hash, str) or not hex_pattern.match(expected_hash):
-            raise ValueError(f"Invalid hash format for {rel_path}: '{expected_hash}' (must be 64 lowercase hex characters)")
+        abs_p = os.path.join(workspace_root, rel)
+        if not os.path.exists(abs_p):
+            raise FileNotFoundError(f"Missing evidence file on disk: {rel}")
 
-        full_path = os.path.join(workspace_root, rel_path)
-        _check_no_symlinks(full_path, workspace_root)
+        _check_no_symlink_components(workspace_root, abs_p)
 
-        if not os.path.isfile(full_path) or os.path.islink(full_path):
-            raise ValueError(f"Evidence entry must be a regular non-symlink file: {rel_path}")
+        file_mode = stat.S_IMODE(os.stat(abs_p).st_mode)
+        if file_mode != 0o444:
+            raise ValueError(f"Evidence file {rel} permission mode must be 0o444, got {oct(file_mode)}")
 
-        mode = stat.S_IMODE(os.stat(full_path).st_mode)
-        if mode != 0o444:
-            raise ValueError(f"Evidence file permission mode must be 0o444 for {rel_path}, got {oct(mode)}")
-
-        actual_hash = _sha256_file(full_path, workspace_root)
+        expected_hash = manifest_data[rel]
+        actual_hash = compute_file_sha256(abs_p)
         if actual_hash != expected_hash:
-            raise ValueError(f"Evidence hash mismatch for {rel_path}: expected {expected_hash}, got {actual_hash}")
+            raise ValueError(f"Evidence hash mismatch for {rel}: expected {expected_hash}, got {actual_hash}")
 
     return True
+
+
+def compute_campaign2_parity_matrix(workspace_root: str = BASE_DIR) -> Dict[str, Any]:
+    """
+    Pure, deterministic function to compute the complete 120-row Campaign 2 Parity Matrix.
+    Recomputes SHA256 hashes, direct evaluation scores, and sandboxed IPC evaluation scores for all 120 rows.
+    """
+    from campaign2.defects import load_task_module
+    from campaign2.proxy import evaluate_candidate_code_sandboxed
+
+    bench_dir = os.path.join(workspace_root, "benchmarks", "campaign2")
+    matrix = {}
+
+    all_tasks = []
+    for suite in ["suite_c", "suite_p"]:
+        s_dir = os.path.join(bench_dir, suite)
+        if os.path.exists(s_dir):
+            for t_id in sorted(os.listdir(s_dir)):
+                if os.path.isdir(os.path.join(s_dir, t_id)):
+                    all_tasks.append((suite, t_id, os.path.join(s_dir, t_id)))
+
+    for suite, task_id, task_dir in all_tasks:
+        sol_path = os.path.join(task_dir, "solution.py")
+        harness_path = os.path.join(task_dir, "test_harness.py")
+        defects_path = os.path.join(task_dir, "defects.py")
+
+        with open(sol_path, "r", encoding="utf-8") as f:
+            sol_code = f.read()
+        with open(harness_path, "r", encoding="utf-8") as f:
+            harness_code = f.read()
+        with open(defects_path, "r", encoding="utf-8") as f:
+            def_code = f.read()
+
+        harness_hash = hashlib.sha256(harness_code.encode("utf-8")).hexdigest()
+        ref_code_hash = hashlib.sha256(sol_code.encode("utf-8")).hexdigest()
+
+        sol_mod = load_task_module(task_dir, "solution")
+        harness_mod = load_task_module(task_dir, "test_harness")
+        defects_mod = load_task_module(task_dir, "defects")
+
+        # 1. Reference solution
+        direct_ref_earned, direct_ref_max = harness_mod.run_evaluation(sol_mod)
+        ipc_ref_earned, ipc_ref_max = evaluate_candidate_code_sandboxed(task_id, sol_code)
+        if (direct_ref_earned, direct_ref_max) != (10, 10) or (ipc_ref_earned, ipc_ref_max) != (10, 10):
+            raise RuntimeError(f"Reference solution for {task_id} failed 10/10 check")
+
+        matrix[f"ref_{task_id}"] = {
+            "task_id": task_id,
+            "type": "reference",
+            "rung": 0,
+            "variant": "reference_solution",
+            "code_hash": ref_code_hash,
+            "harness_hash": harness_hash,
+            "direct_earned_score": direct_ref_earned,
+            "direct_max_score": direct_ref_max,
+            "ipc_earned_score": ipc_ref_earned,
+            "ipc_max_score": ipc_ref_max,
+            "parity_verified": True
+        }
+
+        # 2. Defect rungs 1, 2, 3
+        callable_names = [attr for attr in dir(sol_mod) if not attr.startswith("__") and callable(getattr(sol_mod, attr)) and hasattr(getattr(sol_mod, attr), "__name__")]
+        defect_ladder = getattr(defects_mod, "DEFECT_LADDER", [])
+
+        for idx, rung_fn in enumerate(defect_ladder[:3], start=1):
+            class DummyModule: pass
+            d_mod = DummyModule()
+            for attr_name in dir(sol_mod):
+                if not attr_name.startswith("__"):
+                    val = getattr(sol_mod, attr_name)
+                    if callable(val) and hasattr(val, "__name__"):
+                        setattr(d_mod, attr_name, rung_fn)
+                    else:
+                        setattr(d_mod, attr_name, val)
+
+            direct_def_earned, direct_def_max = harness_mod.run_evaluation(d_mod)
+
+            aliases = "\n".join([f"{name} = {rung_fn.__name__}" for name in callable_names])
+            cand_code = sol_code + "\n\n" + def_code + "\n\n" + aliases + "\n"
+            def_code_hash = hashlib.sha256(cand_code.encode("utf-8")).hexdigest()
+
+            ipc_def_earned, ipc_def_max = evaluate_candidate_code_sandboxed(task_id, cand_code)
+            if (direct_def_earned, direct_def_max) != (ipc_def_earned, ipc_def_max):
+                raise RuntimeError(f"Defect rung {idx} for {task_id} score mismatch: direct={direct_def_earned}, ipc={ipc_def_earned}")
+
+            matrix[f"defect_{task_id}_rung_{idx}"] = {
+                "task_id": task_id,
+                "type": "defect",
+                "rung": idx,
+                "variant": f"defect_rung_{idx}",
+                "code_hash": def_code_hash,
+                "harness_hash": harness_hash,
+                "direct_earned_score": direct_def_earned,
+                "direct_max_score": direct_def_max,
+                "ipc_earned_score": ipc_def_earned,
+                "ipc_max_score": ipc_def_max,
+                "parity_verified": True
+            }
+
+    return matrix
+
+
+def generate_campaign2_parity_matrix(workspace_root: str = BASE_DIR) -> str:
+    """
+    Generates sealed campaign2_parity_matrix.json with mode 0o444 using pure compute_campaign2_parity_matrix.
+    """
+    matrix = compute_campaign2_parity_matrix(workspace_root)
+
+    out_path = os.path.join(workspace_root, "campaign2_parity_matrix.json")
+    if os.path.exists(out_path):
+        os.chmod(out_path, 0o644)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(matrix, f, indent=2, sort_keys=True)
+
+    os.chmod(out_path, 0o444)
+    return out_path
+
+
+def verify_campaign2_parity_matrix(workspace_root: str = BASE_DIR) -> bool:
+    """
+    STRICTLY READ-ONLY Verification of Sealed Parity Matrix (campaign2_parity_matrix.json).
+    Independently recomputes the complete 120-row expected matrix using compute_campaign2_parity_matrix,
+    and requires exact dictionary equality with the sealed artifact on disk (verifying all keys, order,
+    SHA256 hashes, direct scores, IPC scores, task identity, and permissions 0o444).
+    """
+    matrix_path = os.path.join(workspace_root, "campaign2_parity_matrix.json")
+    if not os.path.exists(matrix_path):
+        raise FileNotFoundError(f"Missing parity matrix artifact: {matrix_path}")
+
+    _check_no_symlink_components(workspace_root, matrix_path)
+
+    if not os.path.isfile(matrix_path):
+        raise ValueError(f"Parity matrix artifact must be a regular file: {matrix_path}")
+
+    st_mode = stat.S_IMODE(os.stat(matrix_path).st_mode)
+    if st_mode != 0o444:
+        raise ValueError(f"Parity matrix permission mode must be 0o444, got {oct(st_mode)}")
+
+    with open(matrix_path, "r", encoding="utf-8") as f:
+        try:
+            sealed_matrix = json.load(f)
+        except Exception as e:
+            raise ValueError(f"Invalid JSON in parity matrix: {e}")
+
+    if not isinstance(sealed_matrix, dict):
+        raise ValueError("Parity matrix JSON must be a dictionary")
+
+    if len(sealed_matrix) != 120:
+        raise ValueError(f"Parity matrix must contain EXACTLY 120 rows, got {len(sealed_matrix)}")
+
+    # Independently recompute complete expected structure
+    expected_matrix = compute_campaign2_parity_matrix(workspace_root)
+
+    if sealed_matrix != expected_matrix:
+        # Pinpoint discrepancy for clear error diagnostic
+        for k in expected_matrix:
+            if k not in sealed_matrix:
+                raise ValueError(f"Sealed parity matrix missing key: '{k}'")
+            if sealed_matrix[k] != expected_matrix[k]:
+                raise ValueError(f"Sealed parity matrix mismatch for key '{k}': expected {expected_matrix[k]}, got {sealed_matrix[k]}")
+        for k in sealed_matrix:
+            if k not in expected_matrix:
+                raise ValueError(f"Sealed parity matrix contains unauthorized extra key: '{k}'")
+        raise ValueError("Sealed parity matrix does not equal independently recomputed matrix")
+
+    return True
+
+
+if __name__ == "__main__":
+    generate_campaign2_parity_matrix()
+    generate_campaign2_manifest()
+    generate_campaign2_evidence_manifest()
+    verify_campaign2_manifest()
+    verify_campaign2_evidence_manifest()
+    verify_campaign2_parity_matrix()
+    print("Campaign 2 preflight and evidence manifests verified successfully.")

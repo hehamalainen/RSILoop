@@ -1,8 +1,24 @@
 # RSILoop: Host-Contained Recursive Self-Improvement Experiment
 
-A bi-level prompt-optimization harness that uses the local **Codex CLI** as both the candidate solution generator and the meta-optimizer. The harness evaluates candidate solutions in a macOS `sandbox-exec` jail, then feeds failure traces to the optimizer to mutate system prompts across three independent trials.
+A bi-level prompt-optimization harness that uses the local **Codex CLI** (remote API model inference) as both the candidate solution generator and the meta-optimizer. The harness evaluates candidate solutions in a macOS `sandbox-exec` jail, then feeds failure traces to the optimizer to mutate system prompts across three independent trials.
 
-**Status: research prototype, not production software.** The experiment has not yet produced a promoted result. The code is a containment harness first; any observed self-improvement is a hypothesis until the preflight run is complete and independently verified.
+## Current Status — Campaign 2 Work Order A-REV3
+
+**Status: Research Prototype — Not Production Software.**
+- **Active Branch & Commit**: Development is on branch `campaign2-work-order-a-rebuild` directly above pinned base commit `1abb708afc8dae8c90a2aa57e9f6d8a81a8a0bae`.
+- **No Confirmatory Run**: No confirmatory run has been executed yet.
+- **Model Inference**: Solution generation and prompt mutation use remote Codex model inference via API/CLI proxy harness.
+- **Evaluation Entry Points**: Campaign 2 candidate evaluation is currently reached via standalone test suite launchers (`python3 run_tests.py`, `evaluate_candidate_code_sandboxed`) and preflight manifest verifiers. It is not yet wired into the `rsi_loop.py` main CLI loop.
+
+**Operator Amendment — Legacy Model Deletion**:
+The 491 MB Qwen GGUF model (`models/Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf`) and active model calibration paths have been deleted as an explicit operator amendment. Model-based difficulty stratification is completely withdrawn and replaced with deterministic, machine-recomputable, family-blocked tier assignment (`campaign2_tier_assignment.json`). No local or cloud difficulty-proxy model is required.
+
+### Registered Report Language & Principles
+- Tier assignment is balanced by structural task FAMILY, not by measured difficulty. Families are not difficulty strata.
+- The primary comparison remains paired on the REALIZED confirmatory tasks; the pairing is unaffected by assignment.
+- Difficulty imbalance across tiers may reduce statistical power and complicates interpretation of a null result.
+- Generalization from the eight confirmatory tasks to the full 16-task population is limited.
+- The Qwen 0.5B proxy was inadequate; model proxies in general were not shown to be invalid.
 
 ---
 
@@ -11,40 +27,43 @@ A bi-level prompt-optimization harness that uses the local **Codex CLI** as both
 - **Process Isolation**: The candidate solution and the runner communication shim share a Python interpreter and process. Therefore, protocol authenticity is not guaranteed against active exploitation by candidate code (e.g., introspection to locate control descriptors).
 - **Correlation**: Request UUIDs provide stale-frame and accidental output pollution protection, not protocol cryptographic authenticity.
 - **Boundary**: The achieved boundary is **host containment** (preventing arbitrary filesystem writes, network operations, or process spawning on the host using macOS `sandbox-exec` and `setrlimit`).
+- **Resource Enforcement**: The Campaign 2 worker installs CPU (`RLIMIT_CPU`), file-descriptor (`RLIMIT_NOFILE`), file-size (`RLIMIT_FSIZE`), and core-dump (`RLIMIT_CORE`) limits before it reports readiness. The host rejects readiness unless the worker attests expected limits and confirms candidate import has not started.
+- **Residual Host-Availability Risk**: Process address-space ceilings (`RLIMIT_AS`) are unconstrained by `setrlimit` at the OS layer on the macOS XNU kernel. A memory-bound candidate process can create host memory pressure or stall before wall-clock supervision terminates the process. This residual availability risk is accepted for the frozen, non-adversarial benchmark population.
+- **Phase-Based Timeout & Exit Attribution**: Startup/readiness wall timeouts or process crashes are infrastructure failures. Candidate import and execution wall/CPU timeouts raise `CandidateTimeoutError`. Non-`SIGXCPU` worker process signal terminations or exits (`SIGKILL`, `SIGSEGV`, `SIGBUS`, `SIGABRT`) occurring during Candidate Import or Candidate Execution phases are attributed as `CandidateProcessError` scoring candidate failures 0/10.
+- **Source Policy**: Campaign 2 applies no AST denylist. Python semantics are not selectively biased by a hidden import/call policy; containment and budgets are enforced at runtime.
 
 ---
 
 ## Architecture
 
 ```
-evaluator.py  (host, unsandboxed — trusted supervisor)
-  └── candidate_runner.py  (under candidate.sb — deny-default macOS sandbox)
+campaign2/proxy.py host supervisor  (trusted)
+  └── generated worker.py + candidate.py  (deny-default macOS sandbox)
 ```
 
-> **Note on nested `sandbox-exec`**: macOS prohibits a sandboxed process from applying a new sandbox profile. The evaluator spawns `candidate_runner.py` directly.
+The worker completes its RLIMIT-backed READY handshake before the host sends the explicit `load_candidate` request.
 
 ### Key files
 
 ```
 ├── benchmarks/
-│   ├── circular_buffer/          # Optimization task
-│   ├── json_parser/              # Optimization task
-│   ├── run_length_encoding/      # Optimization task
-│   ├── huffman_coding/           # Optimization task (frozen spec, deterministic)
-│   └── validation/
-│       ├── string_calculator/    # Validation only — never used in mutation feedback
-│       └── matrix_operations/    # Validation only — never used in mutation feedback
-├── prompt_templates/
-│   ├── inner_agent_baseline.txt  # Frozen baseline (hashed before optimization)
-│   └── meta_optimizer.txt        # Meta-optimizer system prompt
+│   ├── campaign2/                # Campaign 2 30-task benchmark population
+│   │   ├── suite_c/              # 22 Suite C tasks (F1, F2, F3, F4)
+│   │   └── suite_p/              # 8 Suite P tasks (F1, F2, F3, F4)
+│   ├── circular_buffer/          # Legacy optimization task
+│   └── huffman_coding/           # Legacy optimization task
+├── campaign2/
+│   ├── proxy.py                  # Sandboxed candidate worker IPC & host supervisor
+│   ├── manifest.py               # Preflight manifest & sealed evidence verifier
+│   ├── tier_assignment.py        # SHA-256 rejection sampling family-blocked tier assignment
+│   ├── scorer.py                 # Task scoring & evaluation utilities
+│   └── defects.py                # Benchmark task defect ladder verifier
+├── campaign2_archive/            # Archived audit records (read-only 0o444)
+├── campaign2_parity_matrix.json  # 120-row sealed parity matrix (0o444)
+├── campaign2_tier_assignment.json# Family-blocked tier assignment artifact (0o444)
+├── campaign2_evidence_hashes.json# Sealed scientific evidence manifest (0o444)
 ├── evaluator.py                  # Host supervisor: RunnerProxy, MRO registry, class/instance caching
-├── candidate_runner.py           # Untrusted process: fd1→/dev/null, RLIMIT_*, UUID framing, object store
 ├── rsi_loop.py                   # Orchestrator: smoke+canary, three trials, promotion gate, RunContext
-├── candidate.sb.template         # macOS sandbox profile for candidate_runner.py (parameterized)
-├── generator.sb.template         # macOS sandbox profile for Codex generator (parameterized)
-├── preflight_hashes.json         # SHA-256 hashes of all task files (frozen before optimization)
-├── test_evaluator.py             # Containment, IPC, and reference solution tests
-├── test_rsi_loop.py              # Orchestrator, parser, and state validation tests
 └── run_tests.py                  # Strict combined test launcher (enforces zero skips, zero warnings)
 ```
 
@@ -56,15 +75,10 @@ evaluator.py  (host, unsandboxed — trusted supervisor)
 
 - macOS (sandbox-exec required)
 - Python 3.11+
-- [Codex CLI](https://github.com/openai/codex) installed and authenticated: `codex login`
 
-### Setup
+### Branch Topology & Verification
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install google-genai openai anthropic python-dotenv
-```
+The Campaign 2 implementation is maintained on branch `campaign2-work-order-a-rebuild` directly above pinned base commit `1abb708afc8dae8c90a2aa57e9f6d8a81a8a0bae`.
 
 ### Run the test suite
 
@@ -73,75 +87,3 @@ Run the strict test launcher from outside any sandbox (sandbox-exec calls requir
 ```bash
 python3 run_tests.py
 ```
-
-### Run the optimization loop
-
-A clean Git status is verified, and matching approved Git commit hash is checked against the lock file:
-1. Commits are done locally.
-2. The approved HEAD SHA is verified by an operator.
-3. `experiment.lock` is created with:
-   ```json
-   { "approved_commit_sha": "<HEAD_SHA>" }
-   ```
-4. Run:
-   ```bash
-   python3 rsi_loop.py
-   ```
-
-The loop will:
-1. Run a `codex --version` smoke test and one canary API call inside `generator.sb`.
-2. Evaluate the frozen baseline against all four optimization tasks.
-3. Run three independent trials (baseline eval → up to 3 mutations → best eval).
-4. Evaluate the three candidate prompts on two validation tasks.
-5. Apply the promotion gate; retain baseline if it fails.
-6. Write run-scoped manifests under `history/run_<id>/` (fsync + read-only permissions 0444).
-7. Root `best_manifest.json` acts as a verified pointer to the run manifest.
-
-Token ceiling: **50,000 output tokens** across all calls. Any breach immediately invalidates the run.
-
----
-
-## Containment limits
-
-| Property | Mechanism |
-|----------|-----------|
-| Candidate cannot write outside its dir | `candidate.sb`: `file-write*` limited to `{temp_dir}` |
-| Candidate cannot fork | `candidate.sb`: `(deny process-fork)` |
-| Candidate process exec limit | `candidate.sb`: `(allow process-exec)` limited strictly to resolved virtualenv, Python interpreter, prefix, base prefix, and Homebrew paths |
-| Candidate cannot reach network | `candidate.sb`: `(deny network-outbound)` |
-| Candidate cannot read repo or private benchmarks | `candidate.sb`: no allowlist entry for those paths |
-| Candidate output flood cannot deadlock host | Non-daemon drain thread; 10 KB retained, excess discarded |
-| Stranded drain thread invalidates evaluation | `assert_no_threads()` called in `finally` |
-| Shutdown trailing frames invalidate evaluation | Host reads runner stdout to EOF after shutdown_ok (checks shutdown_clean) |
-| Exception class identity is stable across evals | `(module, qualname)` keyed registry cleared per evaluation |
-| Generator cannot read private holdout | `generator.sb`: no path entry for `rsi_loop_private/` |
-| Codex credentials are isolated | `_build_codex_temp_home()`: 0700 dir, auth.json 0600 copy, `try/finally` cleanup |
-
----
-
-## Promotion gate
-
-A candidate prompt is promoted only when **all** of the following hold:
-
-1. Mean paired delta across three trials is positive (`mean_delta > 0`).
-2. At least one candidate prompt outperforms the baseline on the validation suite.
-3. The selected candidate prompt must differ from the baseline prompt, have its own positive optimization delta (`delta > 0`), and beat the baseline validation score.
-4. **Note**: Statistical significance is not established by the validation gate sampling.
-
-If the gate fails, baseline is retained, and pointer is updated only if no manifest exists.
-
----
-
-## No-Holdout Mode & Research Limitations
-
-For environments where the private holdout test suite (`simple_regex_matcher`) is unavailable (such as local testing or non-production environments), the harness supports a **No-Holdout Mode**.
-
-- **Enabling**: Set `ALLOW_NO_HOLDOUT=1` in the environment, and configure `"allow_no_holdout": true` inside the operator-approved `experiment.lock`. The harness enforces strict agreement between the environment and the lock file; any disagreement will abort the run immediately.
-- **Provenance Flag**: When No-Holdout Mode is active, any promoted manifest will record `"no_holdout_mode_active": true`.
-- **Research Limitations**: Without holdout validation, prompt optimization is susceptible to **overfitting** on the public/validation tasks. Promotion in this mode does not guarantee generalizable improvement and is intended solely for integration verification.
-
----
-
-## Credits
-
-Inspired by Weco AI's research on [AIDE²](https://weco.ai/blog): experimental evidence of consistent Level 1 recursive self-improvement in an AI research agent. The framing and bi-level structure draw from that work; this implementation does not reproduce or validate their findings.

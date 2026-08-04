@@ -1,0 +1,258 @@
+{
+  "all_tasks": [
+    "c_f1_01_log_stream_parser",
+    "c_f1_02_json_tokenizer_recovery",
+    "c_f1_03_csv_record_recovery",
+    "c_f1_04_http_chunked_decoder",
+    "c_f1_05_protobuf_varint_decoder",
+    "c_f2_01_dag_task_scheduler",
+    "c_f2_02_resource_limit_planner",
+    "c_f2_03_build_dependency_graph",
+    "c_f2_04_pipeline_stage_scheduler",
+    "c_f2_05_package_version_resolver",
+    "c_f3_01_lru_ttl_cache",
+    "c_f3_02_lfu_serialized_cache",
+    "c_f3_03_write_through_cache",
+    "c_f3_04_segmented_2tier_cache",
+    "c_f3_05_two_queue_cache",
+    "c_f3_06_tiered_storage_store",
+    "c_f4_01_raft_leader_election",
+    "c_f4_02_tcp_state_machine",
+    "c_f4_03_oauth2_flow_simulator",
+    "c_f4_04_websocket_frame_fsm",
+    "c_f4_05_saga_orchestrator_fsm",
+    "c_f4_06_dtls_handshake_fsm",
+    "p_f1_01_ndjson_stream_parser",
+    "p_f1_02_syslog_framing_decoder",
+    "p_f2_01_workflow_execution_engine",
+    "p_f2_02_k8s_pod_scheduler",
+    "p_f3_01_arc_adaptive_cache",
+    "p_f3_02_ring_buffer_cache",
+    "p_f4_01_bgp_peer_fsm",
+    "p_f4_02_sip_call_flow_fsm"
+  ],
+  "assignment_type": "family_blocked_rejection_sampling",
+  "base_commit_sha": "1abb708afc8dae8c90a2aa57e9f6d8a81a8a0bae",
+  "domain": "rsi_loop/campaign2",
+  "prng_algorithm": "SHA-256 rejection sampling uint32",
+  "quotas": {
+    "structural_holdout": {
+      "suite_c_f4": 6,
+      "suite_p_f4": 2
+    },
+    "suite_c": {
+      "f1": [
+        1,
+        1,
+        3
+      ],
+      "f2": [
+        1,
+        2,
+        2
+      ],
+      "f3": [
+        2,
+        1,
+        3
+      ]
+    },
+    "suite_p": {
+      "f1": [
+        1,
+        0,
+        1
+      ],
+      "f2": [
+        1,
+        1,
+        0
+      ],
+      "f3": [
+        0,
+        1,
+        1
+      ]
+    }
+  },
+  "rejection_sampling_transcript": [
+    {
+      "action": "accept",
+      "chosen_index": 4,
+      "range_n": 5,
+      "rejection_limit": 4294967295,
+      "stream_byte_offset": 0,
+      "uint32_val": 1723953694
+    },
+    {
+      "action": "accept",
+      "chosen_index": 1,
+      "range_n": 4,
+      "rejection_limit": 4294967296,
+      "stream_byte_offset": 4,
+      "uint32_val": 939215953
+    },
+    {
+      "action": "accept",
+      "chosen_index": 2,
+      "range_n": 3,
+      "rejection_limit": 4294967295,
+      "stream_byte_offset": 8,
+      "uint32_val": 2322813119
+    },
+    {
+      "action": "accept",
+      "chosen_index": 1,
+      "range_n": 2,
+      "rejection_limit": 4294967296,
+      "stream_byte_offset": 12,
+      "uint32_val": 664141389
+    },
+    {
+      "action": "accept",
+      "chosen_index": 3,
+      "range_n": 5,
+      "rejection_limit": 4294967295,
+      "stream_byte_offset": 16,
+      "uint32_val": 1811079643
+    },
+    {
+      "action": "accept",
+      "chosen_index": 3,
+      "range_n": 4,
+      "rejection_limit": 4294967296,
+      "stream_byte_offset": 20,
+      "uint32_val": 3210876627
+    },
+    {
+      "action": "accept",
+      "chosen_index": 2,
+      "range_n": 3,
+      "rejection_limit": 4294967295,
+      "stream_byte_offset": 24,
+      "uint32_val": 1068367466
+    },
+    {
+      "action": "accept",
+      "chosen_index": 0,
+      "range_n": 2,
+      "rejection_limit": 4294967296,
+      "stream_byte_offset": 28,
+      "uint32_val": 59801018
+    },
+    {
+      "action": "accept",
+      "chosen_index": 1,
+      "range_n": 6,
+      "rejection_limit": 4294967292,
+      "stream_byte_offset": 32,
+      "uint32_val": 582857107
+    },
+    {
+      "action": "accept",
+      "chosen_index": 0,
+      "range_n": 5,
+      "rejection_limit": 4294967295,
+      "stream_byte_offset": 36,
+      "uint32_val": 3754373945
+    },
+    {
+      "action": "accept",
+      "chosen_index": 3,
+      "range_n": 4,
+      "rejection_limit": 4294967296,
+      "stream_byte_offset": 40,
+      "uint32_val": 4087365275
+    },
+    {
+      "action": "accept",
+      "chosen_index": 2,
+      "range_n": 3,
+      "rejection_limit": 4294967295,
+      "stream_byte_offset": 44,
+      "uint32_val": 2590075907
+    },
+    {
+      "action": "accept",
+      "chosen_index": 0,
+      "range_n": 2,
+      "rejection_limit": 4294967296,
+      "stream_byte_offset": 48,
+      "uint32_val": 3163305400
+    },
+    {
+      "action": "accept",
+      "chosen_index": 1,
+      "range_n": 2,
+      "rejection_limit": 4294967296,
+      "stream_byte_offset": 52,
+      "uint32_val": 1832025131
+    },
+    {
+      "action": "accept",
+      "chosen_index": 1,
+      "range_n": 2,
+      "rejection_limit": 4294967296,
+      "stream_byte_offset": 56,
+      "uint32_val": 1177221497
+    },
+    {
+      "action": "accept",
+      "chosen_index": 0,
+      "range_n": 2,
+      "rejection_limit": 4294967296,
+      "stream_byte_offset": 60,
+      "uint32_val": 3503553778
+    }
+  ],
+  "set_assignments": {
+    "structural_holdout": [
+      "c_f4_01_raft_leader_election",
+      "c_f4_02_tcp_state_machine",
+      "c_f4_03_oauth2_flow_simulator",
+      "c_f4_04_websocket_frame_fsm",
+      "c_f4_05_saga_orchestrator_fsm",
+      "c_f4_06_dtls_handshake_fsm",
+      "p_f4_01_bgp_peer_fsm",
+      "p_f4_02_sip_call_flow_fsm"
+    ],
+    "suite_c": {
+      "confirmatory": [
+        "c_f1_01_log_stream_parser",
+        "c_f1_03_csv_record_recovery",
+        "c_f1_04_http_chunked_decoder",
+        "c_f2_01_dag_task_scheduler",
+        "c_f2_02_resource_limit_planner",
+        "c_f3_03_write_through_cache",
+        "c_f3_04_segmented_2tier_cache",
+        "c_f3_05_two_queue_cache"
+      ],
+      "optimization": [
+        "c_f1_05_protobuf_varint_decoder",
+        "c_f2_04_pipeline_stage_scheduler",
+        "c_f3_01_lru_ttl_cache",
+        "c_f3_02_lfu_serialized_cache"
+      ],
+      "selection": [
+        "c_f1_02_json_tokenizer_recovery",
+        "c_f2_03_build_dependency_graph",
+        "c_f2_05_package_version_resolver",
+        "c_f3_06_tiered_storage_store"
+      ]
+    },
+    "suite_p": {
+      "confirmatory": [
+        "p_f1_01_ndjson_stream_parser",
+        "p_f3_02_ring_buffer_cache"
+      ],
+      "optimization": [
+        "p_f1_02_syslog_framing_decoder",
+        "p_f2_02_k8s_pod_scheduler"
+      ],
+      "selection": [
+        "p_f2_01_workflow_execution_engine",
+        "p_f3_01_arc_adaptive_cache"
+      ]
+    }
+  }
+}
