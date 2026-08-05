@@ -67,7 +67,7 @@ class CandidateObjectProxy:
             "attr_name": name
         }
         res = self._client.send_request(req)
-        if self._client.candidate_exception_occurred:
+        if self._client.last_status == "exception":
             if isinstance(res, BaseException):
                 raise res
             raise AttributeError(name)
@@ -87,7 +87,7 @@ class CandidateObjectProxy:
                     "kwargs": enc_kwargs
                 }
                 m_res = self._client.send_request(m_req)
-                if self._client.candidate_exception_occurred:
+                if self._client.last_status == "exception":
                     if isinstance(m_res, BaseException):
                         raise m_res
                     raise RuntimeError(str(m_res))
@@ -124,7 +124,7 @@ class CandidateObjectProxy:
             "value": enc_val
         }
         res = self._client.send_request(req)
-        if self._client.candidate_exception_occurred:
+        if self._client.last_status == "exception":
             if isinstance(res, BaseException):
                 raise res
             raise RuntimeError(str(res))
@@ -164,7 +164,7 @@ class CandidateModuleProxy:
                     "kwargs": enc_kwargs
                 }
                 res_cls = self._client.send_request(req_cls)
-                if self._client.candidate_exception_occurred:
+                if self._client.last_status == "exception":
                     if isinstance(res_cls, BaseException):
                         raise res_cls
                     raise RuntimeError(str(res_cls))
@@ -175,7 +175,7 @@ class CandidateModuleProxy:
                 self._client.object_cache[obj_id] = proxy_obj
                 return proxy_obj
 
-            if self._client.candidate_exception_occurred:
+            if self._client.last_status == "exception":
                 if isinstance(res_func, BaseException):
                     raise res_func
                 raise RuntimeError(str(res_func))
@@ -942,8 +942,6 @@ class WorkerIPCClient:
 
             self.last_status = resp.get("status")
             if self.last_status == "ok":
-                self.candidate_exception_occurred = False
-                self.last_exception_message = ""
                 return TaggedCodec.decode(resp.get("result"), self.make_host_callback_proxy, self.make_obj_proxy, None, None, lambda h_id: self.host_objects[h_id])
             elif self.last_status == "exception":
                 # P0 FIX: Distinguish between infrastructure origin and candidate/domain origin
@@ -954,11 +952,10 @@ class WorkerIPCClient:
 
                 self.candidate_exception_occurred = True
                 res_obj = TaggedCodec.decode(resp.get("result"), self.make_host_callback_proxy, self.make_obj_proxy, None, None, lambda h_id: self.host_objects[h_id])
-                self.last_exception_message = f"{type(res_obj).__name__}: {res_obj}" if res_obj else ""
+                if not self.last_exception_message:
+                    self.last_exception_message = f"{type(res_obj).__name__}: {res_obj}" if res_obj else ""
                 return res_obj
             elif self.last_status in ("no_func", "no_class"):
-                self.candidate_exception_occurred = False
-                self.last_exception_message = ""
                 return None
             else:
                 err = InfrastructureError(f"Worker returned error status '{self.last_status}': {resp.get('error')}")
@@ -1150,8 +1147,7 @@ def evaluate_candidate_code_sandboxed(task_id: str, candidate_code: str, timeout
         if getattr(harness_mod, "_sticky_infrastructure_error", None):
             raise harness_mod._sticky_infrastructure_error
 
-        err_trace = f"CandidateException: {ipc_client.last_exception_message}" if ipc_client.candidate_exception_occurred else ""
-        return int(earned), int(max_s), True, err_trace
+        return int(earned), int(max_s), True, ""
     except CandidateTimeoutError:
         # A live worker that stops producing protocol output is not attributable
         # to a scored candidate outcome. Registered Limitation 10 makes this a

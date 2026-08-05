@@ -342,26 +342,26 @@ class Campaign2Orchestrator:
                 raise OrchestratorError(f"Generation call {call_id} failed on attempt {attempt}: {e}") from e
 
         evaluation = self.evaluator.evaluate(task_id, code)
-        if isinstance(evaluation, tuple) and len(evaluation) == 4:
-            earned, max_s, is_valid, error_trace = evaluation
-        elif isinstance(evaluation, tuple) and len(evaluation) == 2:
-            earned, max_s = evaluation
-            is_valid = True
-            error_trace = ""
-        elif isinstance(evaluation, tuple) and len(evaluation) == 3:
-            earned, max_s, is_valid = evaluation
-            error_trace = ""
-        else:
+        if type(evaluation) is not tuple or len(evaluation) != 4:
             raise OrchestratorError(
                 "Task evaluator must return (earned: int, max_s: int, is_valid: bool, error_trace: str)"
             )
 
-        if not isinstance(is_valid, bool):
-            raise OrchestratorError(f"is_valid field must be a boolean, got {type(is_valid)}")
+        earned, max_s, is_valid, error_trace = evaluation
 
-        earned = int(earned)
-        max_s = int(max_s)
-        error_trace = str(error_trace)
+        if type(earned) is not int:
+            raise OrchestratorError(f"earned field must be an exact int, got {type(earned)}")
+        if type(max_s) is not int:
+            raise OrchestratorError(f"max_s field must be an exact int, got {type(max_s)}")
+        if type(is_valid) is not bool:
+            raise OrchestratorError(f"is_valid field must be a boolean, got {type(is_valid)}")
+        if type(error_trace) is not str:
+            raise OrchestratorError(f"error_trace field must be a string, got {type(error_trace)}")
+
+        if max_s < 0 or earned < 0 or earned > max_s:
+            raise OrchestratorError(
+                f"Evaluator score out of range: earned={earned}, max_s={max_s}"
+            )
 
         self.exploratory.record_generation(tokens, is_valid)
 

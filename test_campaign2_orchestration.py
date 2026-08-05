@@ -60,6 +60,8 @@ from campaign2.launch_lock import (
 from campaign2.attempt_lifecycle import (
     publish_scientific_start,
     verify_stage_scientific_start,
+    publish_sealed_invalidation,
+    is_sealed_invalidated,
     check_and_resume,
     classify_call_fault,
     AttemptLedger,
@@ -256,12 +258,12 @@ class TestWinnerSelectionEqualTaskWeighting(unittest.TestCase):
         class UnequalMaxEvaluator:
             def evaluate(self, task_id, candidate_code):
                 if "gen_baseline_" in candidate_code:
-                    return 0, 1
+                    return 0, 1, True, ""
                 if "gen_slot_a_" in candidate_code:
-                    return (1000, 1000) if task_id == task_ids[0] else (0, 1)
+                    return (1000, 1000, True, "") if task_id == task_ids[0] else (0, 1, True, "")
                 if "gen_slot_b_" in candidate_code:
-                    return (0, 1000) if task_id == task_ids[0] else (1, 1)
-                return 0, 1
+                    return (0, 1000, True, "") if task_id == task_ids[0] else (1, 1, True, "")
+                return 0, 1, True, ""
 
         reg_mod = dict(self.reg_data)
         reg_mod["arm_assignment_vectors"] = [+1, -1]
@@ -1230,6 +1232,107 @@ class TestCandidateRlimits(unittest.TestCase):
         self.assertEqual(rlimits["fsize_bytes"], 1048576)
         self.assertEqual(rlimits["core_bytes"], 0)
         self.assertEqual(rlimits["cpu_seconds"], 15)
+
+
+class TestStrictEvaluatorContract(unittest.TestCase):
+    """Test strict 4-tuple requirement with exact types in orchestrator."""
+
+    def test_evaluator_strict_contract_rejections(self):
+        class InvalidEvaluator:
+            def __init__(self, return_val):
+                self.return_val = return_val
+            def evaluate(self, task_id, code):
+                return self.return_val
+
+        with tempfile.TemporaryDirectory() as workspace:
+            generate_master_registration(workspace)
+            reg = verify_master_registration(workspace)
+            assignment = generate_family_blocked_assignment(reg["base_commit_sha"])
+
+            invalid_returns = [
+                (5, 10),  # 2-tuple
+                (5, 10, True),  # 3-tuple
+                (5, 10, True, "", "extra"),  # 5-tuple
+                (5.5, 10, True, ""),  # float score
+                ("5", 10, True, ""),  # string score
+                (True, 10, True, ""),  # bool as int score
+                (5, 10.0, True, ""),  # float max_s
+                (5, 10, "True", ""),  # non-bool validity
+                (5, 10, True, 123),  # non-string error trace
+                (15, 10, True, ""),  # score > max_s
+                (-1, 10, True, ""),  # score < 0
+            ]
+
+            for ret in invalid_returns:
+                orch = Campaign2Orchestrator(
+                    MockModelProvider(), InvalidEvaluator(ret), assignment, reg,
+                    suite="suite_p", workspace_root=workspace,
+                )
+                with self.assertRaises(OrchestratorError):
+                    orch._generate_and_evaluate("p_f1_02_syslog_framing_decoder", "body", "slot_a", 2, 0)
+
+            # Valid 4-tuple with exact types
+            valid_eval = InvalidEvaluator((5, 10, True, ""))
+            orch_valid = Campaign2Orchestrator(
+                MockModelProvider(), valid_eval, assignment, reg,
+                suite="suite_p", workspace_root=workspace,
+            )
+            earned, max_s, _toks, _rec = orch_valid._generate_and_evaluate(
+                "p_f1_02_syslog_framing_decoder", "body", "slot_a", 2, 0
+            )
+            self.assertEqual((earned, max_s), (5, 10))
+
+
+class TestSealedInvalidationSecurity(unittest.TestCase):
+    """Test sealed invalidation marker publication, mode 0o444, non-symlink path containment, and identity authentication."""
+
+    def test_sealed_invalidation_authentication_and_containment(self):
+        with tempfile.TemporaryDirectory() as base_tmp:
+            run_dir = os.path.realpath(os.path.join(base_tmp, "run_inv_test"))
+            os.makedirs(run_dir)
+
+            marker_path = publish_sealed_invalidation(run_dir, "pilot", "att_123", "Corrupt ledger")
+            self.assertTrue(os.path.exists(marker_path))
+            self.assertTrue(is_sealed_invalidated(run_dir, "pilot"))
+
+            # Exact mode 0o444
+            mode = stat.S_IMODE(os.stat(marker_path).st_mode)
+            self.assertEqual(mode, 0o444)
+
+            # Symlink marker rejection
+            sym_dir = os.path.realpath(os.path.join(base_tmp, "run_sym_test"))
+            os.makedirs(sym_dir)
+            target = os.path.join(sym_dir, "campaign2_pilot_invalidated.json")
+            real_file = os.path.join(sym_dir, "real_target.json")
+            with open(real_file, "w") as f:
+                f.write('{"record_type": "terminal_classification", "stage": "pilot", "classification": "invalidated"}\n')
+            os.chmod(real_file, 0o444)
+            os.symlink(real_file, target)
+            self.assertFalse(is_sealed_invalidated(sym_dir, "pilot"))
+
+            # Tampered marker (wrong mode)
+            tampered_dir = os.path.realpath(os.path.join(base_tmp, "run_tamp_mode"))
+            os.makedirs(tampered_dir)
+            t_path = publish_sealed_invalidation(tampered_dir, "pilot", "att_123", "reason")
+            os.chmod(t_path, 0o644)
+            self.assertFalse(is_sealed_invalidated(tampered_dir, "pilot"))
+
+            # Tampered marker (non-dict JSON)
+            tamp_dict_dir = os.path.realpath(os.path.join(base_tmp, "run_tamp_dict"))
+            os.makedirs(tamp_dict_dir)
+            td_path = os.path.join(tamp_dict_dir, "campaign2_pilot_invalidated.json")
+            with open(td_path, "w") as f:
+                f.write("[]\n")
+            os.chmod(td_path, 0o444)
+            self.assertFalse(is_sealed_invalidated(tamp_dict_dir, "pilot"))
+
+    def test_non_dict_json_ledger_lines_raise_lifecycle_error(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger_p = os.path.join(tmp_dir, "ledger.jsonl")
+            with open(ledger_p, "w") as f:
+                f.write("[]\n")
+            with self.assertRaises(AttemptLifecycleError):
+                AttemptLedger(ledger_p)
 
 
 if __name__ == "__main__":

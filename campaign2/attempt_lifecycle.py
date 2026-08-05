@@ -189,10 +189,21 @@ def publish_sealed_invalidation(run_dir: str, stage: str, attempt_id: str, reaso
     """
     Publish an independently sealed invalidation marker file when ledger is corrupted or invalid.
     Prevents mutating an unparseable ledger file while ensuring permanent trial invalidation.
+    Uses the frozen durability sequence: atomic temp file write, fchmod(0o444), file fsync,
+    atomic os.replace, and parent directory fsync.
     """
+    real_run_dir = os.path.realpath(run_dir)
     path = os.path.join(run_dir, f"campaign2_{stage}_invalidated.json")
-    if os.path.exists(path):
-        return path
+    real_path = os.path.realpath(path)
+
+    if os.path.lexists(path):
+        if os.path.islink(path):
+            raise AttemptLifecycleError(f"Invalidated marker path exists as a symlink: {path}")
+        if os.path.dirname(real_path) != real_run_dir:
+            raise AttemptLifecycleError(f"Invalidated marker path traverses outside run_dir: {path}")
+        if is_sealed_invalidated(run_dir, stage):
+            return path
+
     data = {
         "record_type": "terminal_classification",
         "stage": stage,
@@ -201,24 +212,83 @@ def publish_sealed_invalidation(run_dir: str, stage: str, attempt_id: str, reaso
         "reason": reason,
         "timestamp": time.time(),
     }
-    content = json.dumps(data, indent=2, sort_keys=True) + "\n"
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-        f.flush()
-        os.fsync(f.fileno())
-    os.chmod(path, 0o444)
+    content_bytes = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+    tmp_path = path + ".tmp"
+    if os.path.lexists(tmp_path):
+        if not os.path.islink(tmp_path):
+            os.chmod(tmp_path, 0o600)
+        os.unlink(tmp_path)
+
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        view = memoryview(content_bytes)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise AttemptLifecycleError(f"Short write while sealing invalidation marker {path}")
+            view = view[written:]
+        os.fchmod(fd, 0o444)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+    os.replace(tmp_path, path)
+
     dir_fd = os.open(run_dir, os.O_RDONLY)
     try:
         os.fsync(dir_fd)
     finally:
         os.close(dir_fd)
+
     return path
 
 
 def is_sealed_invalidated(run_dir: str, stage: str) -> bool:
-    """Check if an independently sealed invalidation marker exists in run_dir."""
+    """
+    Check and strictly authenticate an independently sealed invalidation marker in run_dir.
+    Validates:
+    - Non-symlink path containment within run_dir
+    - Regular file type (not directory or symlink)
+    - Exact 0o444 file permissions mode
+    - Valid JSON object matching required identity fields:
+      record_type == "terminal_classification", stage == stage, classification == "invalidated".
+    Returns True only if all checks pass.
+    """
     path = os.path.join(run_dir, f"campaign2_{stage}_invalidated.json")
-    return os.path.exists(path)
+    if not os.path.lexists(path) or os.path.islink(path):
+        return False
+
+    real_run_dir = os.path.realpath(run_dir)
+    real_path = os.path.realpath(path)
+    if os.path.dirname(real_path) != real_run_dir:
+        return False
+
+    st = os.stat(path)
+    if not stat.S_ISREG(st.st_mode):
+        return False
+
+    mode = stat.S_IMODE(st.st_mode)
+    if mode != 0o444:
+        return False
+
+    try:
+        with open(path, "rb") as f:
+            data = json.loads(f.read().decode("utf-8"))
+    except Exception:
+        return False
+
+    if not isinstance(data, dict):
+        return False
+
+    if data.get("record_type") != "terminal_classification":
+        return False
+    if data.get("stage") != stage:
+        return False
+    if data.get("classification") != "invalidated":
+        return False
+
+    return True
 
 
 class AttemptLedger:
@@ -241,6 +311,8 @@ class AttemptLedger:
                     continue
                 try:
                     entry = json.loads(line)
+                    if not isinstance(entry, dict):
+                        raise ValueError("Ledger line JSON is not an object/dict")
                 except Exception as e:
                     raise AttemptLifecycleError(f"Ledger file is corrupted (invalid JSON line): {self.ledger_path}") from e
 
