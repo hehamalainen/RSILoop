@@ -114,11 +114,11 @@ def sandboxed_worker(candidate_code, cpu_timeout=2):
 class TestCampaign2(unittest.TestCase):
     # Finding 4 [P1] FIX: No setUp() or chmod mutations. All verification runs strictly read-only on committed disk files.
 
-    def test_01_all_128_benchmark_files_exist_and_match_hashes(self):
-        """Verifies Category 1: 128 Git-tracked frozen files exist and pass SHA256 preflight manifest."""
+    def test_01_all_141_category1_files_exist_and_match_hashes(self):
+        """Verifies all 141 Git-tracked Category 1 files pass the SHA-256 preflight manifest."""
         ok, count = verify_campaign2_manifest(BASE_DIR)
         self.assertTrue(ok)
-        self.assertGreaterEqual(count, 128)
+        self.assertEqual(count, 141)
 
     def test_02_task_defects_structure_and_monotonicity(self):
         """Verifies strict monotonicity of defect ladders (ref > rung1 > rung2 > rung3) across all 30 tasks."""
@@ -154,11 +154,10 @@ class TestCampaign2(unittest.TestCase):
             client.send_request({"id": "load_candidate", "op": "load_candidate"})
             client.set_phase("candidate_execution", time.time() + 4)
             proxy = CandidateModuleProxy(client)
-            with self.assertRaises(CandidateTimeoutError) as ctx:
+            with self.assertRaises(CandidateProcessError) as ctx:
                 proxy.parse_log_stream("input")
             proc.wait(timeout=2)
             self.assertIn(proc.returncode, (-signal.SIGXCPU, 128 + signal.SIGXCPU))
-            self.assertIn("RLIMIT_CPU", str(ctx.exception))
 
     def test_05_sandboxed_ipc_isolation(self):
         """Proves repository, system-file, and live loopback network access are denied."""
@@ -213,10 +212,10 @@ def parse_log_stream(stream):
                 self.assertEqual(max_s, 10)
 
     def test_07_preflight_manifest_verification(self):
-        """Verifies campaign2_preflight_hashes.json authenticates all 128 Category 1 files."""
+        """Verifies campaign2_preflight_hashes.json authenticates the full Category 1 inventory."""
         ok, count = verify_campaign2_manifest(BASE_DIR)
         self.assertTrue(ok)
-        self.assertGreaterEqual(count, 128)
+        self.assertEqual(count, 141)
 
     def test_08_production_parity_matrix_verification(self):
         """Finding 1 [P0] FIX: Verifies campaign2_parity_matrix.json recomputes code and harness hashes for all 120 rows on disk."""
@@ -324,11 +323,10 @@ def parse_log_stream(stream):
         client_cpu = WorkerIPCClient(in_fd=r_fd3, out_fd=w_fd3, deadline=time.time()+5, worker_proc=mock_proc_cpu)
         client_cpu.set_phase("candidate_execution", time.time() + 5)
         os.close(w_fd3)
-        with self.assertRaises(CandidateTimeoutError) as ctx:
+        with self.assertRaises(CandidateProcessError) as ctx:
             client_cpu._read_exact(4)
         client_cpu.selector.close()
         os.close(r_fd3)
-        self.assertIn("RLIMIT_CPU", str(ctx.exception))
 
         # The same unconfirmed wall wait is infrastructure during startup and
         # a candidate failure once candidate import/execution has begun.
@@ -513,8 +511,8 @@ def parse_log_stream(stream, cb=None):
         earned, max_s = evaluate_candidate_code_sandboxed(task_id, bad_import_cand)
         self.assertEqual((earned, max_s), (0, 10))
 
-    def test_25_no_hidden_ast_policy_and_waits_are_candidate_failures(self):
-        """Candidate semantics are unbiased; residual waits are phase-attributed candidate failures."""
+    def test_25_no_hidden_ast_policy_and_waits_invalidate_attempt(self):
+        """Candidate semantics are unbiased; unattributed residual waits are campaign-fatal."""
         from campaign2 import proxy as proxy_module
 
         self.assertFalse(hasattr(proxy_module, "BindingAwareASTPrescreener"))
@@ -538,18 +536,14 @@ def parse_log_stream(stream, cb=None):
         ]
         for candidate_code in wait_candidates:
             started = time.monotonic()
-            self.assertEqual(
-                evaluate_candidate_code_sandboxed(task_id, candidate_code, timeout_seconds=0.4),
-                (0, 10),
-            )
+            with self.assertRaises(proxy_module.CandidateTimeoutError):
+                evaluate_candidate_code_sandboxed(task_id, candidate_code, timeout_seconds=0.4)
             self.assertLess(time.monotonic() - started, 2.5)
 
         import_wait = "import time\ntime.sleep(2)\ndef parse_log_stream(s): return []"
         started = time.monotonic()
-        self.assertEqual(
-            evaluate_candidate_code_sandboxed(task_id, import_wait, timeout_seconds=0.4),
-            (0, 10),
-        )
+        with self.assertRaises(proxy_module.CandidateTimeoutError):
+            evaluate_candidate_code_sandboxed(task_id, import_wait, timeout_seconds=0.4)
         self.assertLess(time.monotonic() - started, 2.5)
 
     def test_26_production_ipc_architecture_and_pathologies(self):
@@ -712,7 +706,7 @@ def parse_log_stream(stream, cb=None):
         """P1 FIX: Workspace with an unauthorized extra task directory is rejected by preflight manifest verification."""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Copy Category 1 static files & benchmark tree
-            for static_file in ["README.md", "run_tests.py"]:
+            for static_file in ["README.md", "run_tests.py", "rsi_loop.py"]:
                 shutil.copy2(os.path.join(BASE_DIR, static_file), os.path.join(tmpdir, static_file))
             os.makedirs(os.path.join(tmpdir, "docs"))
             shutil.copy2(os.path.join(BASE_DIR, "docs", "walkthrough.md"), os.path.join(tmpdir, "docs", "walkthrough.md"))
@@ -737,7 +731,7 @@ def parse_log_stream(stream, cb=None):
         """P1 FIX: Symlinked benchmark tree is rejected during manifest verification."""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Copy static files
-            for static_file in ["README.md", "run_tests.py"]:
+            for static_file in ["README.md", "run_tests.py", "rsi_loop.py"]:
                 shutil.copy2(os.path.join(BASE_DIR, static_file), os.path.join(tmpdir, static_file))
             os.makedirs(os.path.join(tmpdir, "docs"))
             shutil.copy2(os.path.join(BASE_DIR, "docs", "walkthrough.md"), os.path.join(tmpdir, "docs", "walkthrough.md"))

@@ -50,6 +50,7 @@ class MockModelProvider(ModelProvider):
     """
 
     def __init__(self, base_score_numerator: int = 5, max_score: int = 10):
+        self.is_mock = True
         self.base_score_numerator = base_score_numerator
         self.max_score = max_score
         self.call_log = []  # Records all calls for test verification
@@ -111,19 +112,23 @@ class MockTaskEvaluator:
         """Override score for a specific task_id (all code variants)."""
         self._score_overrides[task_id] = (earned, max_score)
 
-    def evaluate(self, task_id: str, candidate_code: str) -> Tuple[int, int]:
+    def evaluate(self, task_id: str, candidate_code: str) -> Tuple[int, int, bool, str]:
         code_hash = hashlib.sha256(candidate_code.encode('utf-8')).hexdigest()[:16]
         if task_id in self._score_overrides:
             earned, max_s = self._score_overrides[task_id]
         else:
             earned, max_s = self.default_earned, self.default_max
+        is_valid = True
+        error_trace = ""
         self.eval_log.append({
             'task_id': task_id,
             'code_hash': code_hash,
             'earned': earned,
-            'max': max_s
+            'max': max_s,
+            'is_valid': is_valid,
+            'error_trace': error_trace,
         })
-        return earned, max_s
+        return earned, max_s, is_valid, error_trace
 
 
 class SolModelProvider(ModelProvider):
@@ -131,6 +136,12 @@ class SolModelProvider(ModelProvider):
     Production model provider for gpt-5.6-sol via Codex CLI.
     NOT IMPLEMENTED in Work Order B — requires Work Order C.
     """
+
+    def __init__(self):
+        raise NotImplementedError(
+            "SolModelProvider requires Work Order C implementation. "
+            "Use MockModelProvider for testing."
+        )
 
     def generate_candidate(self, task_id: str, effective_prompt: str,
                            call_id: str) -> Tuple[str, int]:

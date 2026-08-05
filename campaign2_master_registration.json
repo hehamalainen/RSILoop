@@ -101,7 +101,7 @@
   "base_commit_sha": "96e04c94ef44b974301bbe9e4fedd2ba4281022d",
   "campaign_id": "campaign_2_gpt5_6_sol",
   "exploratory_secondaries": [
-    "score-improving mutations per model call",
+    "score-improving mutations per optimizer mutation call",
     "improvement per 1,000 output tokens",
     "valid-candidate rate",
     "mutation depth producing each new best"
@@ -109,32 +109,32 @@
   "frozen_trio_orderings": [
     [
       "baseline",
-      "optimizer_winner",
-      "control_winner"
+      "slot_a_winner",
+      "slot_b_winner"
     ],
     [
       "baseline",
-      "control_winner",
-      "optimizer_winner"
+      "slot_b_winner",
+      "slot_a_winner"
     ],
     [
-      "optimizer_winner",
+      "slot_a_winner",
       "baseline",
-      "control_winner"
+      "slot_b_winner"
     ],
     [
-      "optimizer_winner",
-      "control_winner",
+      "slot_a_winner",
+      "slot_b_winner",
       "baseline"
     ],
     [
-      "control_winner",
+      "slot_b_winner",
       "baseline",
-      "optimizer_winner"
+      "slot_a_winner"
     ],
     [
-      "control_winner",
-      "optimizer_winner",
+      "slot_b_winner",
+      "slot_a_winner",
       "baseline"
     ]
   ],
@@ -148,9 +148,17 @@
     "Claims cover the eight fixed preregistered confirmatory tasks, not unseen tasks generally.",
     "Tiers balanced by structural task FAMILY, not measured difficulty; families are not difficulty strata.",
     "MacBook memory availability is not a production containment guarantee; accepted for this non-adversarial research campaign.",
-    "A candidate that blocks without consuming CPU will eventually hit the wall-clock supervisor timeout and be classified as a candidate failure scoring (0, 10). This is phase-attributed correctly but consumes real wall-clock time from the trial budget, potentially causing downstream timeouts if many candidates exhibit this behavior.",
+    "A candidate that blocks without consuming CPU produces an unattributed wall-clock timeout and invalidates the attempt; phase-based exit attribution does not cover non-exiting processes.",
     "A >= 0.05 is an observed practical gate, not inferential proof of absolute improvement."
   ],
+  "prompt_envelope": {
+    "control_reformulation_hash": "fb2de030ad977acc9e1cb4029bfc7ed4fd293d38733f502680f04adde32b7e99",
+    "control_reformulation_text": "Rewrite the strategy section of this prompt using different wording.\nDo not change the meaning or intent. Keep it concise.",
+    "delimiter": "\n\n---STRATEGY---\n\n",
+    "delimiter_hash": "c5f2943f6707e5cf44dd6541a2fb70f11c8836389e187f9dbf2ca042d4712bc5",
+    "immutable_contract": "You are an expert Python coder. Your job is to solve the programming task described in the input.\nYou must output ONLY valid Python code inside a markdown block starting with ```python and ending with ```.\nDo not write explanations, markdown text, or any formatting outside the code block.\nWrite the code to implement the requested functions or classes exactly as specified.\nIf any exceptions are requested, define them as standard Exception subclasses.\nWrite clean, correct, and self-contained code.",
+    "immutable_contract_hash": "439071a42a077d413ac7be2f4008ec1b636b666a68d8aa339886e962ba0dbd3c"
+  },
   "schema_version": "3",
   "trio_ordering_derivation": {
     "algorithm": "SHA-256 rejection sampling uint32",

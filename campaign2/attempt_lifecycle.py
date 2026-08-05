@@ -1,295 +1,350 @@
 """
-Campaign 2 Attempt Lifecycle & Ledger Module.
+Campaign 2 Attempt Lifecycle & Audit Ledger Module.
 
-P0-2 & P0-7 — LIFECYCLE, RETRY, & LEDGER ENFORCEMENT:
-1. SCIENTIFIC_START published at runtime with read-only permission (0o444).
-2. Append-only JSONL ledger (.jsonl) flushed line-by-line with os.fsync.
-3. Fail-closed fault classification requiring explicit bytes_sent == 0 evidence for retryability.
-4. Intent-before-completion ordering verification.
+Manages call fault classification, retryability assessment, append-only audit ledger,
+and stage-global scientific start claim markers.
 """
 
 import os
 import json
 import stat
 import time
-from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCIENTIFIC_START_REL = "campaign2_scientific_start.json"
+LEDGER_SCHEMA_VERSION = "1"
 
 
 class AttemptLifecycleError(RuntimeError):
-    """Raised when attempt lifecycle state is invalid or unrecoverable."""
+    """Base exception for attempt lifecycle errors."""
     pass
 
 
 class AttemptInvalidatedError(AttemptLifecycleError):
-    """Raised when the attempt is invalidated and cannot proceed."""
+    """Raised when an attempt is invalidated due to pre-commit, transport, or one-shot claim failure."""
     pass
 
 
-# ---- Fault Classification ----
-
-class CallFault:
-    """Classified fault from a model call."""
-    __slots__ = ('fault_type', 'retryable', 'detail', 'exception_type', 'bytes_sent', 'bytes_received', 'timestamp')
-
-    def __init__(
-        self,
-        fault_type: str,
-        retryable: bool,
-        detail: str,
-        exception_type: str,
-        bytes_sent: int = -1,
-        bytes_received: int = -1,
-    ):
-        self.fault_type = fault_type
-        self.retryable = retryable
-        self.detail = detail
-        self.exception_type = exception_type
-        self.bytes_sent = bytes_sent
-        self.bytes_received = bytes_received
-        self.timestamp = time.time()
-
-    def to_dict(self) -> dict:
-        return {k: getattr(self, k) for k in self.__slots__}
-
-
-def classify_call_fault(
-    exception: Exception,
-    bytes_sent: int = -1,
-    bytes_received: int = -1,
-) -> CallFault:
+def publish_scientific_start(stage: str, attempt_id: str, workspace_root: str = BASE_DIR) -> str:
     """
-    Classify a model call fault with strict evidence requirements.
-
-    P0-7 APPROVED RETRY TAXONOMY:
-    - Connection failure BEFORE request bytes cross boundary (bytes_sent == 0) -> RETRYABLE.
-    - If bytes_sent > 0 or bytes_sent is unconfirmed (-1) -> NON-RETRYABLE (fail-closed).
-    - Generic TimeoutError, TimeoutExpired, CalledProcessError, JSONDecodeError -> NON-RETRYABLE.
+    Publish stage-global scientific start claim marker file with descriptor fchmod, fsync, and parent dir fsync.
+    Stored at history/campaign2_{stage}_scientific_start.json.
+    Raises AttemptInvalidatedError if another attempt has already claimed scientific start for this stage.
     """
-    exc_type = type(exception).__name__
+    history_dir = os.path.join(workspace_root, "history")
+    if not os.path.exists(history_dir):
+        os.makedirs(history_dir, exist_ok=True)
 
-    # Network connection failure: retryable ONLY IF bytes_sent == 0
-    if isinstance(exception, (ConnectionRefusedError, ConnectionError, OSError)):
-        if "DNS" in str(exception).upper() or "REFUSED" in str(exception).upper() or "RESET" in str(exception).upper():
-            if bytes_sent == 0:
-                return CallFault("connection_pre_request", True, str(exception), exc_type, bytes_sent, bytes_received)
-            else:
-                return CallFault("connection_post_request", False,
-                                 f"Connection error after {bytes_sent} bytes sent: {exception}",
-                                 exc_type, bytes_sent, bytes_received)
+    stage_start_p = os.path.join(history_dir, f"campaign2_{stage}_scientific_start.json")
 
-    # Subprocess / Timeout / Execution errors — non-retryable (fail-closed)
-    import subprocess
-    if isinstance(exception, subprocess.TimeoutExpired):
-        return CallFault("subprocess_timeout", False, f"Timeout after {exception.timeout}s", exc_type, bytes_sent, bytes_received)
-    if isinstance(exception, subprocess.CalledProcessError):
-        return CallFault("subprocess_error", False, f"CLI exit code {exception.returncode}", exc_type, bytes_sent, bytes_received)
-    if isinstance(exception, TimeoutError):
-        return CallFault("timeout", False, str(exception), exc_type, bytes_sent, bytes_received)
-    if isinstance(exception, (json.JSONDecodeError, ValueError, KeyError)):
-        return CallFault("parse_error", False, str(exception), exc_type, bytes_sent, bytes_received)
+    if os.path.exists(stage_start_p):
+        verify_stage_scientific_start(stage, attempt_id, workspace_root)
+        return stage_start_p
 
-    from campaign2.proxy import InfrastructureError
-    if isinstance(exception, InfrastructureError):
-        return CallFault("infrastructure", False, str(exception), exc_type, bytes_sent, bytes_received)
-
-    # Unknown - fail-closed
-    return CallFault("unknown", False, str(exception), exc_type, bytes_sent, bytes_received)
-
-
-# ---- Append-Only JSONL Attempt Ledger ----
-
-class AttemptLedger:
-    """
-    Append-only JSONL call ledger (.jsonl) with line-by-line fsync durability.
-    Enforces that every completion event MUST be preceded by a matching intent event.
-    """
-
-    def __init__(self, ledger_path: str):
-        self.ledger_path = ledger_path
-        if not ledger_path.endswith(".jsonl"):
-            self.ledger_path = ledger_path + ".jsonl"
-        self._seen_intents = set()
-        self._completed_calls = set()
-
-        # If file exists, load existing index
-        if os.path.exists(self.ledger_path):
-            self._load_existing()
-
-    def _load_existing(self):
-        with open(self.ledger_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                entry = json.loads(line)
-                if entry.get("event") == "intent":
-                    self._seen_intents.add(entry["call_id"])
-                elif entry.get("event") == "completion":
-                    self._completed_calls.add(entry["call_id"])
-
-    def record_intent(
-        self, call_id: str, call_type: str, arm: str, phase: int,
-        task_id: str = "", metadata: dict = None
-    ):
-        """Record intent to make a model call BEFORE the call."""
-        entry = {
-            "event": "intent",
-            "call_id": call_id,
-            "call_type": call_type,
-            "arm": arm,
-            "phase": phase,
-            "task_id": task_id,
-            "timestamp_iso": datetime.now(timezone.utc).isoformat(),
-        }
-        if metadata:
-            entry["metadata"] = metadata
-
-        self._append_entry(entry)
-        self._seen_intents.add(call_id)
-
-    def record_completion(
-        self, call_id: str, success: bool, tokens: int = 0,
-        fault: Optional[CallFault] = None
-    ):
-        """Record completion of a model call AFTER the call."""
-        if call_id not in self._seen_intents:
-            raise AttemptLifecycleError(
-                f"Ledger completion recorded for call_id '{call_id}' without prior intent record"
-            )
-
-        entry = {
-            "event": "completion",
-            "call_id": call_id,
-            "success": success,
-            "tokens": tokens,
-            "timestamp_iso": datetime.now(timezone.utc).isoformat(),
-        }
-        if fault:
-            entry["fault"] = fault.to_dict()
-
-        self._append_entry(entry)
-        self._completed_calls.add(call_id)
-
-    def _append_entry(self, entry: dict):
-        """Append single JSON line to ledger file with os.fsync."""
-        line = json.dumps(entry, sort_keys=True) + "\n"
-        with open(self.ledger_path, "a", encoding="utf-8") as f:
-            f.write(line)
-            f.flush()
-            os.fsync(f.fileno())
-
-    def verify_intent_before_completion(self) -> bool:
-        """Verify line-by-line that every completion has a prior intent."""
-        seen = set()
-        if not os.path.exists(self.ledger_path):
-            return True
-        with open(self.ledger_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                entry = json.loads(line)
-                if entry.get("event") == "intent":
-                    seen.add(entry["call_id"])
-                elif entry.get("event") == "completion":
-                    if entry["call_id"] not in seen:
-                        return False
-        return True
-
-    def get_entries(self) -> List[dict]:
-        """Read all ledger entries from disk."""
-        if not os.path.exists(self.ledger_path):
-            return []
-        entries = []
-        with open(self.ledger_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    entries.append(json.loads(line))
-        return entries
-
-
-# ---- Scientific Start Marker ----
-
-def publish_scientific_start(stage: str, workspace_root: str = BASE_DIR) -> str:
-    """
-    Publish SCIENTIFIC_START marker at runtime with mode 0o444.
-    Returns path to the marker file.
-    """
-    marker_path = os.path.join(workspace_root, SCIENTIFIC_START_REL)
-
-    if os.path.exists(marker_path):
-        raise AttemptLifecycleError(
-            f"SCIENTIFIC_START marker already exists at {marker_path}. "
-            "Use check_and_resume() to handle existing markers."
-        )
-
-    marker_data = {
-        "schema_version": "3",
+    data = {
         "stage": stage,
-        "status": "published",
-        "timestamp_iso": datetime.now(timezone.utc).isoformat(),
+        "attempt_id": attempt_id,
+        "timestamp": time.time(),
+        "status": "started"
     }
+    content_bytes = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
-    content = json.dumps(marker_data, indent=2, sort_keys=True) + "\n"
-    with open(marker_path, "w", encoding="utf-8") as f:
-        f.write(content)
-        f.flush()
-        os.fsync(f.fileno())
-    os.chmod(marker_path, 0o444)
+    tmp_p = f"{stage_start_p}_{os.getpid()}.tmp"
+    fd = os.open(tmp_p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        os.write(fd, content_bytes)
+        os.fchmod(fd, 0o444)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
-    dir_fd = os.open(workspace_root, os.O_RDONLY)
+    try:
+        os.link(tmp_p, stage_start_p)
+    except FileExistsError:
+        pass
+    except Exception as exc:
+        raise AttemptInvalidatedError(f"Stage scientific start claim link failed: {exc}") from exc
+    finally:
+        if os.path.lexists(tmp_p):
+            try:
+                os.unlink(tmp_p)
+            except OSError:
+                pass
+
+    dir_fd = os.open(history_dir, os.O_RDONLY)
     try:
         os.fsync(dir_fd)
     finally:
         os.close(dir_fd)
 
-    return marker_path
+    verify_stage_scientific_start(stage, attempt_id, workspace_root)
+    return stage_start_p
 
 
-def check_and_resume(
-    stage: str,
-    checkpoint_path: str,
-    workspace_root: str = BASE_DIR,
-) -> Optional[Dict[str, Any]]:
-    """
-    Check for existing SCIENTIFIC_START marker and handle resume/invalidation.
-
-    Returns:
-    - None if no marker exists (fresh start)
-    - checkpoint data dict if marker exists AND valid checkpoint exists
-    Raises:
-    - AttemptInvalidatedError if marker exists but checkpoint is corrupt or missing
-    """
-    marker_path = os.path.join(workspace_root, SCIENTIFIC_START_REL)
-
-    if not os.path.exists(marker_path):
-        return None
-
-    if not os.path.exists(checkpoint_path):
-        raise AttemptInvalidatedError(
-            f"SCIENTIFIC_START exists at {marker_path} but checkpoint "
-            f"is missing at {checkpoint_path}. Attempt is invalidated."
-        )
-
+def verify_stage_scientific_start(stage: str, attempt_id: str, workspace_root: str = BASE_DIR) -> bool:
+    """Verify existing stage-global scientific start claim marker on resume."""
+    stage_start_p = os.path.join(workspace_root, "history", f"campaign2_{stage}_scientific_start.json")
+    if not os.path.exists(stage_start_p):
+        raise AttemptInvalidatedError(f"Missing stage-global scientific start claim marker for stage '{stage}'")
+    if os.path.islink(stage_start_p) or not os.path.isfile(stage_start_p):
+        raise AttemptInvalidatedError(f"Scientific start marker must be a regular non-symlink file: '{stage_start_p}'")
+    st_mode = stat.S_IMODE(os.stat(stage_start_p).st_mode)
+    if st_mode != 0o444:
+        raise AttemptInvalidatedError(f"Scientific start marker mode must be 0o444, got {oct(st_mode)}")
     try:
-        with open(checkpoint_path, "r", encoding="utf-8") as f:
-            checkpoint_data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
+        with open(stage_start_p, "rb") as f:
+            content_bytes = f.read()
+        data = json.loads(content_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise AttemptInvalidatedError(f"Corrupted scientific start marker: {exc}") from exc
+
+    if data.get("stage") != stage:
+        raise AttemptInvalidatedError(f"Scientific start marker stage mismatch: '{data.get('stage')}' vs '{stage}'")
+    if data.get("status") != "started":
+        raise AttemptInvalidatedError(f"Scientific start marker status invalid: '{data.get('status')}'")
+    if data.get("attempt_id") != attempt_id:
         raise AttemptInvalidatedError(
-            f"SCIENTIFIC_START exists at {marker_path} but checkpoint "
-            f"at {checkpoint_path} is corrupt: {e}. Attempt is invalidated."
+            f"Stage scientific start claim attempt_id mismatch: marker has '{data.get('attempt_id')}', "
+            f"resuming attempt has '{attempt_id}'"
         )
 
-    ckpt_stage = checkpoint_data.get("stage", "")
-    if ckpt_stage != stage:
-        raise AttemptInvalidatedError(
-            f"Checkpoint stage '{ckpt_stage}' does not match requested stage '{stage}'. "
-            "Attempt is invalidated."
-        )
+    expected_bytes = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if content_bytes != expected_bytes:
+        raise AttemptInvalidatedError(f"Scientific start marker is not canonically formatted JSON bytes: '{stage_start_p}'")
 
-    return checkpoint_data
+    return True
+
+
+def check_and_resume(stage: str, ckpt_path: str, workspace_root: str = BASE_DIR) -> Optional[dict]:
+    """Check if stage-global scientific start file and checkpoint exist for resumption."""
+    stage_start_p = os.path.join(workspace_root, "history", f"campaign2_{stage}_scientific_start.json")
+    if os.path.exists(stage_start_p) and os.path.exists(ckpt_path):
+        with open(ckpt_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+class CallFault:
+    """Classifies a call failure for retryability and audit logging."""
+    __slots__ = ('fault_type', 'retryable', 'detail', 'bytes_sent', 'bytes_received')
+
+    def __init__(self, fault_type: str, retryable: bool, detail: str, bytes_sent: int = -1, bytes_received: int = -1):
+        self.fault_type = fault_type
+        self.retryable = retryable
+        self.detail = detail
+        self.bytes_sent = bytes_sent
+        self.bytes_received = bytes_received
+
+    def to_dict(self) -> dict:
+        return {k: getattr(self, k) for k in self.__slots__}
+
+
+def classify_call_fault(exc: Exception, bytes_sent: int = -1, bytes_received: int = -1) -> CallFault:
+    """
+    Classify a call fault for retryability using complete pre-request transport evidence.
+
+    POLICY:
+    1. Unknown evidence (bytes_received == -1): NON-RETRYABLE (fail-closed).
+    2. HTTP 429 / 503 Rate Limit or Service Unavailable:
+       - Retryable ONLY IF bytes_received == 0 (explicitly verified zero response-body bytes).
+       - If bytes_received > 0 (body bytes received) or -1 (unknown), NON-RETRYABLE (fail-closed).
+    3. Socket / DNS / TLS / Subprocess Spawn Errors:
+       - Retryable ONLY IF bytes_sent == 0 AND bytes_received == 0.
+       - If bytes_sent > 0 or unconfirmed (-1), NON-RETRYABLE (fail-closed).
+    """
+    msg = str(exc).lower()
+    exc_type = type(exc).__name__.lower()
+
+    # 1. HTTP 429 Rate Limit / HTTP 503 Service Unavailable
+    if "429" in msg or "rate limit" in msg or "too many requests" in msg:
+        if bytes_received == 0:
+            return CallFault("rate_limit_pre_request", True, f"HTTP 429 Rate Limit (zero body): {exc}", bytes_sent, 0)
+        return CallFault("rate_limit_with_body", False, f"HTTP 429 Rate Limit with response body ({bytes_received} bytes): {exc}", bytes_sent, bytes_received)
+
+    if "503" in msg or "service unavailable" in msg:
+        if bytes_received == 0:
+            return CallFault("service_unavailable_pre_request", True, f"HTTP 503 Service Unavailable (zero body): {exc}", bytes_sent, 0)
+        return CallFault("service_unavailable_with_body", False, f"HTTP 503 Service Unavailable with response body ({bytes_received} bytes): {exc}", bytes_sent, bytes_received)
+
+    # 2. Pre-request Socket / Connection Refused / DNS / TLS / Subprocess Spawn
+    if bytes_sent == 0 and bytes_received == 0:
+        if "connection refused" in msg or "socket" in exc_type or "connect" in exc_type:
+            return CallFault("connection_pre_request", True, f"Pre-request socket error: {exc}", 0, 0)
+        if "dns" in msg or "gai_error" in msg or "name resolution" in msg or "ssl" in msg or "tls" in msg:
+            return CallFault("dns_tls_pre_request", True, f"Pre-request DNS/TLS error: {exc}", 0, 0)
+        if "oserror" in exc_type or "filenotfounderror" in exc_type or "permissionerror" in exc_type or "spawn" in msg:
+            return CallFault("spawn_failure", True, f"Pre-exec subprocess spawn failure: {exc}", 0, 0)
+
+    # Default fallback: non-retryable (fail-closed)
+    return CallFault(
+        "unconfirmed_transport_failure",
+        False,
+        f"Unconfirmed transport failure (bytes_sent={bytes_sent}, bytes_received={bytes_received}): {exc}",
+        bytes_sent,
+        bytes_received
+    )
+
+
+class AttemptLedger:
+    """Append-only audit ledger tracking attempt lifecycle, call intents, and completions."""
+
+    def __init__(self, ledger_path: str):
+        self.ledger_path = ledger_path
+        self._max_call_counter = 0
+        self.cumulative_calls = 0
+        self.cumulative_tokens = 0
+        self.unknown_usage_count = 0
+        self._load_ledger()
+
+    def _load_ledger(self):
+        if not os.path.exists(self.ledger_path):
+            return
+        with open(self.ledger_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                    rec_type = entry.get("record_type")
+                    if rec_type == "completion":
+                        self.cumulative_calls += 1
+                        toks = entry.get("tokens", 0)
+                        if toks > 0:
+                            self.cumulative_tokens += toks
+                        if "unknown_usage_count" in entry:
+                            self.unknown_usage_count = entry["unknown_usage_count"]
+                        elif toks == 0:
+                            fault_dict = entry.get("fault") or {}
+                            bs = fault_dict.get("bytes_sent", -1)
+                            br = fault_dict.get("bytes_received", -1)
+                            is_pre_req = (bs == 0 and br == 0)
+                            if not is_pre_req:
+                                self.unknown_usage_count += 1
+                    elif rec_type in ("terminal_classification", "attempt_start"):
+                        if "unknown_usage_count" in entry:
+                            self.unknown_usage_count = entry["unknown_usage_count"]
+                    call_id = entry.get("call_id", "")
+                    if "_" in call_id:
+                        parts = call_id.split("_")
+                        if parts[-1].isdigit():
+                            num = int(parts[-1])
+                            if num > self._max_call_counter:
+                                self._max_call_counter = num
+                except Exception:
+                    pass
+
+    def record_attempt_start(self, attempt_id: str, stage: str, metadata: Optional[dict] = None):
+        entry = {
+            "record_type": "attempt_start",
+            "attempt_id": attempt_id,
+            "stage": stage,
+            "timestamp": time.time(),
+            "metadata": metadata or {},
+        }
+        self._append(entry)
+
+    def record_terminal_classification(self, attempt_id: str, classification: str, reason: str, metadata: Optional[dict] = None):
+        entry = {
+            "record_type": "terminal_classification",
+            "attempt_id": attempt_id,
+            "classification": classification,
+            "reason": reason,
+            "cumulative_calls": self.cumulative_calls,
+            "cumulative_tokens": self.cumulative_tokens,
+            "unknown_usage_count": self.unknown_usage_count,
+            "timestamp": time.time(),
+            "metadata": metadata or {},
+        }
+        self._append(entry)
+
+    def record_intent(self, call_id: str, call_type: str, arm: str, phase: int, task_id: str = "", metadata: Optional[dict] = None):
+        entry = {
+            "record_type": "intent",
+            "call_id": call_id,
+            "call_type": call_type,
+            "arm": arm,
+            "phase": phase,
+            "task_id": task_id,
+            "timestamp": time.time(),
+            "metadata": metadata or {},
+        }
+        self._append(entry)
+
+    def record_completion(self, call_id: str, success: bool, tokens: int = 0, fault: Optional[CallFault] = None, metadata: Optional[dict] = None):
+        self.cumulative_calls += 1
+        is_pre_request = fault and fault.bytes_sent == 0 and fault.bytes_received == 0
+        if tokens > 0:
+            self.cumulative_tokens += tokens
+        elif not is_pre_request:
+            self.unknown_usage_count += 1
+
+        entry = {
+            "record_type": "completion",
+            "call_id": call_id,
+            "success": success,
+            "tokens": tokens,
+            "fault": fault.to_dict() if fault else None,
+            "cumulative_calls": self.cumulative_calls,
+            "cumulative_tokens": self.cumulative_tokens,
+            "unknown_usage_count": self.unknown_usage_count,
+            "timestamp": time.time(),
+            "metadata": metadata or {},
+        }
+        self._append(entry)
+
+    def _append(self, entry: dict):
+        line = json.dumps(entry) + "\n"
+        with open(self.ledger_path, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
+
+    def get_entries(self) -> List[dict]:
+        if not os.path.exists(self.ledger_path):
+            return []
+        entries = []
+        with open(self.ledger_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    entries.append(json.loads(line))
+        return entries
+
+    def verify_intent_before_completion(self) -> bool:
+        intents = set()
+        for entry in self.get_entries():
+            if entry.get("record_type") == "intent":
+                intents.add(entry["call_id"])
+            elif entry.get("record_type") == "completion":
+                if entry["call_id"] not in intents:
+                    raise AttemptLifecycleError(f"Completion recorded without intent for call_id: {entry['call_id']}")
+        return True
+
+    def verify_all_intents_completed(self) -> bool:
+        intents = {}
+        completions = {}
+        for entry in self.get_entries():
+            cid = entry.get("call_id")
+            if entry.get("record_type") == "intent":
+                intents[cid] = intents.get(cid, 0) + 1
+            elif entry.get("record_type") == "completion":
+                completions[cid] = completions.get(cid, 0) + 1
+
+        all_keys = set(intents.keys()) | set(completions.keys())
+        for cid in all_keys:
+            i_count = intents.get(cid, 0)
+            c_count = completions.get(cid, 0)
+            if c_count != i_count:
+                raise AttemptLifecycleError(
+                    f"Intent/completion multiplicity mismatch for call_id '{cid}': "
+                    f"intents={i_count}, completions={c_count}"
+                )
+        return True
+
+    def verify_resume_admission(self) -> bool:
+        for entry in self.get_entries():
+            if entry.get("record_type") == "terminal_classification":
+                raise AttemptLifecycleError(
+                    f"Attempt is already terminal (classified as '{entry.get('classification')}' - "
+                    f"'{entry.get('reason')}') and cannot be resumed"
+                )
+        return self.verify_all_intents_completed()

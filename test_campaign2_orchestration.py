@@ -1,27 +1,29 @@
 """
-Unit and Integration Tests for Campaign 2 Orchestration System (Round 2 Remediation).
+Unit and Integration Tests for Campaign 2 Orchestration System (Round 7 Remediation).
 
-Tests:
-1. MockModelProvider & MockTaskEvaluator behavior
-2. Campaign2Orchestrator per-trial call arithmetic (202 for Suite C, 86 for Suite P)
-3. Microblock trio adjacency verification
-4. Active arm assignment vector (+1/-1) scheduling & slot labeling
-5. PromptEnvelope building & mutation output validation (delimiter rejection, code block rejection)
-6. Mandatory launch lock verification & isolated test directory handling
-7. SCIENTIFIC_START preflight failure prevention & full-stage refusal
-8. Integrated AttemptLedger append-only JSONL tracking
-9. Integrated CheckpointManager trial-boundary durability & resumption
-10. Restored baseline-headroom pilot outcome ladder decision evaluation
-11. Complete Schema 3 reporting populated with all required metadata fields
+Mechanical Traceability Matrix:
+- TestPilotOutcomeLadder: Literal Frozen B8 6-outcome ladder
+- TestCheckpointManagerDurability: True B5 exact-head durability with seal_pre_trial_intent and state anchor rollback rejection
+- TestCLIResumeNamespace: CLI --resume argument and pre-execution ledger admission verification
+- TestWinnerSelectionEqualTaskWeighting: Equal-task weighted winner selection across valid task IDs with unequal maxima
+- TestArmSchedulingCounterbalance: Counterbalanced arm scheduling (arm_sign -1 runs Control 1st, Optimizer 2nd)
+- TestRetryTaxonomyAndLedger: Complete pre-request and HTTP 429 zero response-body retry taxonomy
+- TestFullReportEquivalence: Canonical Schema 3 report equality between uninterrupted and resumed runs
+- TestReportingStructure: Task-derived per-family deltas without aliasing
+- TestMasterRegistrationHashVerification: Exact Limitation 10 campaign-fatal text verification
 """
 
 import os
 import sys
 import json
 import stat
+import hashlib
 import tempfile
 import unittest
+import subprocess
 from fractions import Fraction
+from unittest import mock
+from types import SimpleNamespace
 
 from campaign2.model_provider import (
     ModelProvider,
@@ -37,11 +39,15 @@ from campaign2.registration import (
     get_trio_ordering_index,
     KNOWN_LIMITATIONS,
 )
-from campaign2.tier_assignment import generate_family_blocked_assignment
+from campaign2.tier_assignment import (
+    generate_family_blocked_assignment,
+    write_sealed_family_blocked_assignment,
+)
 from campaign2.orchestrator import (
     Campaign2Orchestrator,
     CallArithmeticError,
     TrioAdjacencyError,
+    OrchestratorError,
     SUITE_C_PARAMS,
     SUITE_P_PARAMS,
 )
@@ -53,14 +59,27 @@ from campaign2.launch_lock import (
 )
 from campaign2.attempt_lifecycle import (
     publish_scientific_start,
+    verify_stage_scientific_start,
     check_and_resume,
     classify_call_fault,
     AttemptLedger,
+    CallFault,
     AttemptLifecycleError,
     AttemptInvalidatedError,
 )
-from campaign2.durability import CheckpointManager, DurabilityError
-from campaign2.ladder import evaluate_pilot_outcome_ladder, FLOOR_THRESHOLD, HEADROOM_CEILING
+from campaign2.durability import CheckpointManager, DurabilityError, GENESIS_HEAD_HASH
+from campaign2.attempt_identity import (
+    create_attempt_identity,
+    resolve_resume_attempt,
+    verify_attempt_identity,
+    AttemptIdentityError,
+)
+from campaign2.ladder import (
+    evaluate_pilot_outcome_ladder,
+    ENGAGEMENT_FLOOR,
+    OPT_SEL_HEADROOM_CEILING,
+    CONF_HEADROOM_CEILING,
+)
 from campaign2.reporting import generate_schema3_report, publish_schema3_report
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -79,19 +98,15 @@ class TestPromptEnvelope(unittest.TestCase):
     def test_mutation_output_validation_rejects_delimiter_and_codeblocks(self):
         envelope = PromptEnvelope()
 
-        # Valid strategy body
         clean = envelope.validate_mutation_output("  Focus on boundary conditions.  ")
         self.assertEqual(clean, "Focus on boundary conditions.")
 
-        # Rejects delimiter injection
         with self.assertRaises(PromptEnvelopeError):
             envelope.validate_mutation_output("Strategy text ---STRATEGY--- escape attempt")
 
-        # Rejects markdown code block wrapper
         with self.assertRaises(PromptEnvelopeError):
             envelope.validate_mutation_output("```python\ndef solve(): pass\n```")
 
-        # Rejects contract duplication
         with self.assertRaises(PromptEnvelopeError):
             envelope.validate_mutation_output("You are an expert Python coder.")
 
@@ -110,18 +125,16 @@ class TestMockModelProvider(unittest.TestCase):
         self.assertEqual(mt, 200)
 
     def test_sol_provider_raises_not_implemented(self):
-        sol = SolModelProvider()
         with self.assertRaises(NotImplementedError):
-            sol.generate_candidate("task_a", "prompt", "c1")
+            SolModelProvider()
 
 
 class TestCampaign2Orchestrator(unittest.TestCase):
-    """Test Campaign2Orchestrator execution, call arithmetic, arm vectors, and trios."""
+    """Test Campaign2Orchestrator execution, 202/86 call arithmetic, arm vectors, and trios."""
 
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.workspace = self.tmp_dir.name
-        # Generate registration inside isolated temp workspace
         generate_master_registration(self.workspace)
         self.reg_data = verify_master_registration(self.workspace)
         self.ta_data = generate_family_blocked_assignment(base_commit_sha=self.reg_data["base_commit_sha"])
@@ -129,7 +142,7 @@ class TestCampaign2Orchestrator(unittest.TestCase):
     def tearDown(self):
         self.tmp_dir.cleanup()
 
-    def test_suite_p_pilot_call_arithmetic_and_trio_adjacency(self):
+    def test_suite_p_pilot_call_arithmetic_86_calls(self):
         ledger_path = os.path.join(self.workspace, "ledger.jsonl")
         ledger = AttemptLedger(ledger_path)
         ckpt_mgr = CheckpointManager(os.path.join(self.workspace, "ckpt.json"), "pilot")
@@ -152,13 +165,44 @@ class TestCampaign2Orchestrator(unittest.TestCase):
 
         self.assertTrue(orch.verify_trio_adjacency())
         self.assertTrue(ledger.verify_intent_before_completion())
+        self.assertTrue(ledger.verify_all_intents_completed())
 
         outcome = orch.compute_outcome()
-        self.assertEqual(outcome["schema_version"], "3")
         self.assertEqual(outcome["suite"], "suite_p")
 
-    def test_active_arm_assignment_randomization(self):
-        # Create orchestrator with modified arm_vectors: trial 0 = +1, trial 1 = -1
+    def test_suite_c_full_call_arithmetic_202_calls(self):
+        ledger_path = os.path.join(self.workspace, "ledger_c.jsonl")
+        ledger = AttemptLedger(ledger_path)
+
+        orch = Campaign2Orchestrator(
+            model_provider=MockModelProvider(),
+            task_evaluator=MockTaskEvaluator(),
+            tier_assignment=self.ta_data,
+            registration=self.reg_data,
+            suite="suite_c",
+            ledger=ledger,
+            workspace_root=self.workspace,
+        )
+
+        res0 = orch.run_trial(0)
+        self.assertEqual(res0.model_call_count(), 202)
+        self.assertTrue(orch.verify_trio_adjacency())
+
+
+class TestArmSchedulingCounterbalance(unittest.TestCase):
+    """Test counterbalanced arm scheduling under +1 and -1 arm assignment signs."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.workspace = self.tmp_dir.name
+        generate_master_registration(self.workspace)
+        self.reg_data = verify_master_registration(self.workspace)
+        self.ta_data = generate_family_blocked_assignment(base_commit_sha=self.reg_data["base_commit_sha"])
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_arm_scheduling_counterbalance(self):
         reg_mod = dict(self.reg_data)
         reg_mod["arm_assignment_vectors"] = [+1, -1]
 
@@ -171,57 +215,552 @@ class TestCampaign2Orchestrator(unittest.TestCase):
             workspace_root=self.workspace,
         )
 
-        res0 = orch.run_trial(0)
-        res1 = orch.run_trial(1)
+        res0 = orch.run_trial(0)  # arm_sign +1 -> slot_a = Optimizer (1st), slot_b = Control (2nd)
+        res1 = orch.run_trial(1)  # arm_sign -1 -> slot_a = Control (1st), slot_b = Optimizer (2nd)
 
-        self.assertEqual(res0.arm_sign, +1)
-        self.assertEqual(res1.arm_sign, -1)
-        # Phase 2 calls record execution order reflecting arm_sign
         p2_calls_0 = [r for r in res0.call_records if r.phase == 2]
         p2_calls_1 = [r for r in res1.call_records if r.phase == 2]
 
-        self.assertEqual(p2_calls_0[0].arm, "optimizer")
-        self.assertEqual(p2_calls_1[0].arm, "control")
+        self.assertEqual(p2_calls_0[0].arm, "slot_a")
+        self.assertEqual(p2_calls_1[0].arm, "slot_a")
+        outcome = orch.compute_outcome()
+        self.assertEqual(outcome["per_trial"][0]["optimizer_slot"], "slot_a")
+        self.assertEqual(outcome["per_trial"][0]["control_slot"], "slot_b")
+        self.assertEqual(outcome["per_trial"][1]["optimizer_slot"], "slot_b")
+        self.assertEqual(outcome["per_trial"][1]["control_slot"], "slot_a")
 
-    def test_trial_resumption_via_checkpoint(self):
-        ckpt_path = os.path.join(self.workspace, "ckpt.json")
-        ckpt_mgr = CheckpointManager(ckpt_path, "pilot")
 
-        orch1 = Campaign2Orchestrator(
+class TestWinnerSelectionEqualTaskWeighting(unittest.TestCase):
+    """Test equal-task weighted winner selection using valid task IDs with unequal maxima."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.workspace = self.tmp_dir.name
+        generate_master_registration(self.workspace)
+        self.reg_data = verify_master_registration(self.workspace)
+        self.ta_data = generate_family_blocked_assignment(base_commit_sha=self.reg_data["base_commit_sha"])
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_equal_task_weighting_valid_task_ids(self):
+        class SlotProvider(MockModelProvider):
+            def generate_candidate(self, task_id, effective_prompt, call_id):
+                return call_id, 1
+
+        task_ids = sorted(
+            self.ta_data["set_assignments"]["suite_p"]["optimization"]
+            + self.ta_data["set_assignments"]["suite_p"]["selection"]
+        )
+
+        class UnequalMaxEvaluator:
+            def evaluate(self, task_id, candidate_code):
+                if "gen_baseline_" in candidate_code:
+                    return 0, 1
+                if "gen_slot_a_" in candidate_code:
+                    return (1000, 1000) if task_id == task_ids[0] else (0, 1)
+                if "gen_slot_b_" in candidate_code:
+                    return (0, 1000) if task_id == task_ids[0] else (1, 1)
+                return 0, 1
+
+        reg_mod = dict(self.reg_data)
+        reg_mod["arm_assignment_vectors"] = [+1, -1]
+
+        orch = Campaign2Orchestrator(
+            model_provider=SlotProvider(),
+            task_evaluator=UnequalMaxEvaluator(),
+            tier_assignment=self.ta_data,
+            registration=reg_mod,
+            suite="suite_p",
+            workspace_root=self.workspace,
+        )
+
+        res = orch.run_trial(0)
+        self.assertEqual(res.phase2_winner, "slot_b")
+        self.assertTrue(all(task_id.startswith("p_f") for task_id in task_ids))
+
+    def test_optimizer_feedback_contains_evaluator_error_traces(self):
+        class TraceProvider(MockModelProvider):
+            def __init__(self):
+                super().__init__()
+                self.feedback = []
+            def mutate_prompt(self, mutable_body, failure_context, call_id):
+                self.feedback.append(failure_context)
+                return super().mutate_prompt(mutable_body, failure_context, call_id)
+
+        class TraceEvaluator:
+            def evaluate(self, task_id, candidate_code):
+                return 0, 10, f"AssertionError: {task_id} boundary mismatch"
+
+        provider = TraceProvider()
+        orch = Campaign2Orchestrator(
+            model_provider=provider,
+            task_evaluator=TraceEvaluator(),
+            tier_assignment=self.ta_data,
+            registration=self.reg_data,
+            suite="suite_p",
+            workspace_root=self.workspace,
+        )
+        result = orch.run_trial(0)
+        self.assertTrue(any("AssertionError:" in feedback for feedback in provider.feedback))
+        self.assertTrue(any(record.error_trace for record in result.call_records if record.call_type == "generate"))
+
+
+class TestCheckpointManagerDurability(unittest.TestCase):
+    """Test true B5 exact-head durability with seal_pre_trial_intent, commit_intent, and state anchor rollback rejection."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.workspace = self.tmp_dir.name
+        self.ckpt_path = os.path.join(self.workspace, "ckpt.json")
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_exact_head_commit_and_rollback_rejection(self):
+        mgr = CheckpointManager(self.ckpt_path, "pilot")
+
+        # 1. Seal pre-trial intent
+        intent_p = mgr.seal_pre_trial_intent(0)
+        self.assertTrue(os.path.exists(intent_p))
+        self.assertEqual(stat.S_IMODE(os.stat(intent_p).st_mode), 0o444)
+
+        # 2. Commit trial 0
+        h0 = mgr.commit_checkpoint_head(0, {"trial_index": 0, "score": "1/2"})
+        self.assertEqual(stat.S_IMODE(os.stat(self.ckpt_path).st_mode), 0o444)
+        self.assertTrue(mgr.verify_checkpoint_head_chain())
+
+        # Save copy of head 0 checkpoint
+        with open(self.ckpt_path, "r", encoding="utf-8") as f:
+            h0_ckpt_data = f.read()
+
+        # 3. Commit trial 1
+        mgr.seal_pre_trial_intent(1)
+        h1 = mgr.commit_checkpoint_head(1, {"trial_index": 1, "score": "1/2"})
+        self.assertNotEqual(h0, h1)
+
+        # 4. Attempt to restore head 0 checkpoint over current head 1
+        os.chmod(self.ckpt_path, 0o644)
+        with open(self.ckpt_path, "w", encoding="utf-8") as f:
+            f.write(h0_ckpt_data)
+        os.chmod(self.ckpt_path, 0o444)
+
+        # Fresh CheckpointManager rejects restored older head during admission.
+        with self.assertRaises(DurabilityError):
+            CheckpointManager(self.ckpt_path, "pilot")
+
+    def test_commit_intent_recovers_every_post_execution_boundary_without_resampling(self):
+        class InjectedCrash(RuntimeError):
+            pass
+
+        class FaultingManager(CheckpointManager):
+            boundary = ""
+            def _fault_hook(self, boundary):
+                if boundary == self.boundary:
+                    raise InjectedCrash(boundary)
+
+        for boundary in (
+            "after_commit_intent",
+            "after_checkpoint_replace",
+            "after_anchor_replace",
+            "after_intent_cleanup",
+        ):
+            with self.subTest(boundary=boundary):
+                run_dir = os.path.join(self.workspace, boundary)
+                os.makedirs(run_dir)
+                path = os.path.join(run_dir, "checkpoint.json")
+                manager = FaultingManager(path, "pilot")
+                manager.seal_pre_trial_intent(0)
+                manager.boundary = boundary
+                with self.assertRaises(InjectedCrash):
+                    manager.commit_checkpoint_head(0, {"trial_index": 0, "score": "1/2"})
+                if boundary == "after_commit_intent":
+                    with self.assertRaises(DurabilityError):
+                        CheckpointManager(path, "pilot")
+                else:
+                    recovered = CheckpointManager(path, "pilot")
+                    self.assertEqual(recovered.read_checkpoint()["head_index"], 0)
+                    self.assertEqual(recovered.get_resume_trial_index(), 1)
+                    self.assertFalse(os.path.exists(path + ".commit_intent"))
+
+    def test_residual_pre_trial_intent_is_ambiguous_and_never_rescheduled(self):
+        manager = CheckpointManager(self.ckpt_path, "pilot")
+        manager.seal_pre_trial_intent(0)
+        with self.assertRaisesRegex(DurabilityError, "must be invalidated, not resampled"):
+            CheckpointManager(self.ckpt_path, "pilot")
+
+    def test_missing_checkpoint_with_anchor_refuses_genesis(self):
+        CheckpointManager(self.ckpt_path, "pilot")
+        os.chmod(self.ckpt_path, 0o600)
+        os.unlink(self.ckpt_path)
+        with self.assertRaisesRegex(DurabilityError, "refusing genesis"):
+            CheckpointManager(self.ckpt_path, "pilot")
+
+    def test_commit_intent_contains_exact_checkpoint_bytes_and_hash(self):
+        class InjectedCrash(RuntimeError):
+            pass
+        class FaultingManager(CheckpointManager):
+            def _fault_hook(self, boundary):
+                if boundary == "after_commit_intent":
+                    raise InjectedCrash(boundary)
+        manager = FaultingManager(self.ckpt_path, "pilot")
+        manager.seal_pre_trial_intent(0)
+        with self.assertRaises(InjectedCrash):
+            manager.commit_checkpoint_head(0, {"trial_index": 0})
+        with open(self.ckpt_path + ".commit_intent", encoding="utf-8") as handle:
+            intent = json.load(handle)
+        self.assertIn("expected_checkpoint_bytes_b64", intent)
+        self.assertEqual(len(intent["expected_checkpoint_sha256"]), 64)
+        self.assertIsInstance(intent["expected_checkpoint_size"], int)
+
+    def test_sealed_write_orders_fchmod_before_fsync(self):
+        events = []
+        real_fchmod = os.fchmod
+        real_fsync = os.fsync
+        with mock.patch("campaign2.durability.os.fchmod", side_effect=lambda fd, mode: (events.append("fchmod"), real_fchmod(fd, mode))[1]), \
+             mock.patch("campaign2.durability.os.fsync", side_effect=lambda fd: (events.append("fsync"), real_fsync(fd))[1]):
+            CheckpointManager(self.ckpt_path, "pilot")
+        self.assertLess(events.index("fchmod"), events.index("fsync"))
+
+
+class TestCLIResumeNamespace(unittest.TestCase):
+    """Test CLI --resume argument registration and pre-execution ledger admission verification."""
+
+    def test_cli_resume_argument_registered(self):
+        from rsi_loop import build_arg_parser
+        parser = build_arg_parser()
+        args, unknown = parser.parse_known_args([
+            "--campaign", "2", "--resume", "--resume-attempt-id", "run_exact_123"
+        ])
+        self.assertTrue(args.resume)
+        self.assertEqual(args.resume_attempt_id, "run_exact_123")
+
+    def test_resume_resolves_named_sealed_identity_not_newest_mtime(self):
+        with tempfile.TemporaryDirectory() as history:
+            first = os.path.join(history, "run_first")
+            second = os.path.join(history, "run_second")
+            os.makedirs(first)
+            os.makedirs(second)
+            create_attempt_identity(first, "run_first", "pilot", "suite_p", True, "a" * 64)
+            create_attempt_identity(second, "run_second", "pilot", "suite_p", True, "a" * 64)
+            os.utime(second, None)
+            resolved, identity = resolve_resume_attempt(history, "run_first", "pilot", True)
+            self.assertEqual(resolved, os.path.realpath(first))
+            self.assertEqual(identity["attempt_id"], "run_first")
+
+    def test_resume_identity_tamper_is_rejected(self):
+        with tempfile.TemporaryDirectory() as history:
+            run_dir = os.path.join(history, "run_tampered")
+            os.makedirs(run_dir)
+            create_attempt_identity(run_dir, "run_tampered", "pilot", "suite_p", True, "a" * 64)
+            identity_path = os.path.join(run_dir, "campaign2_attempt_identity.json")
+            os.chmod(identity_path, 0o600)
+            with open(identity_path, "ab") as handle:
+                handle.write(b" ")
+            os.chmod(identity_path, 0o444)
+            with self.assertRaises(AttemptIdentityError):
+                verify_attempt_identity(run_dir)
+
+    def test_ledger_admission_rejects_unmatched_intent_and_orphan_completion(self):
+        with tempfile.TemporaryDirectory() as run_dir:
+            ledger = AttemptLedger(os.path.join(run_dir, "ledger.jsonl"))
+            ledger.record_intent("call_1", "generate", "slot_a", 2)
+            with self.assertRaises(AttemptLifecycleError):
+                ledger.verify_resume_admission()
+
+    def test_real_campaign_entry_admits_ledger_before_provider_construction(self):
+        import rsi_loop
+        registration = verify_master_registration(BASE_DIR)
+        assignment = generate_family_blocked_assignment(registration["base_commit_sha"])
+        with open(os.path.join(BASE_DIR, "campaign2_master_registration.json"), "rb") as handle:
+            registration_hash = hashlib.sha256(handle.read()).hexdigest()
+        with tempfile.TemporaryDirectory() as history:
+            run_id = "run_admission_order"
+            run_dir = os.path.join(history, run_id)
+            os.makedirs(run_dir)
+            identity = create_attempt_identity(
+                run_dir, run_id, "pilot", "suite_p", True, registration_hash
+            )
+            CheckpointManager(os.path.join(run_dir, identity["checkpoint_file"]), "pilot")
+            ledger = AttemptLedger(os.path.join(run_dir, identity["ledger_file"]))
+            ledger.record_intent("ambiguous_1", "generate", "slot_a", 2)
+            ctx = rsi_loop.RunContext()
+            ctx.run_id = run_id
+            ctx.run_dir = run_dir
+            args = SimpleNamespace(stage="pilot", mock=True, resume=True)
+            patches = (
+                mock.patch("campaign2.manifest.verify_campaign2_manifest"),
+                mock.patch("campaign2.manifest.verify_campaign2_evidence_manifest"),
+                mock.patch("campaign2.manifest.verify_campaign2_parity_matrix"),
+                mock.patch("campaign2.tier_assignment.verify_family_blocked_assignment"),
+                mock.patch("campaign2.tier_assignment.generate_family_blocked_assignment", return_value=assignment),
+                mock.patch("campaign2.registration.verify_master_registration", return_value=registration),
+                mock.patch("campaign2.model_provider.MockModelProvider"),
+            )
+            entered = [patcher.start() for patcher in patches]
+            try:
+                provider_constructor = entered[-1]
+                with self.assertRaises(AttemptLifecycleError):
+                    rsi_loop._run_campaign2(args, ctx)
+                provider_constructor.assert_not_called()
+            finally:
+                for patcher in reversed(patches):
+                    patcher.stop()
+        with tempfile.TemporaryDirectory() as run_dir:
+            ledger = AttemptLedger(os.path.join(run_dir, "ledger.jsonl"))
+            ledger.record_completion("call_2", True)
+            with self.assertRaises(AttemptLifecycleError):
+                ledger.verify_resume_admission()
+
+    def test_terminal_attempt_resume_admission_rejected(self):
+        with tempfile.TemporaryDirectory() as run_dir:
+            ledger = AttemptLedger(os.path.join(run_dir, "ledger.jsonl"))
+            ledger.record_attempt_start("att_1", "pilot")
+            ledger.record_terminal_classification("att_1", "completed", "Finished pilot")
+            with self.assertRaises(AttemptLifecycleError):
+                ledger.verify_resume_admission()
+
+
+class TestAttemptAccounting(unittest.TestCase):
+    """Test attempt start and terminal classification ledger accounting."""
+
+    def test_attempt_start_terminal_coverage(self):
+        with tempfile.TemporaryDirectory() as base_tmp:
+            run_dir = os.path.realpath(os.path.join(base_tmp, "run_test_acc_cov"))
+            os.makedirs(run_dir)
+            run_id = os.path.basename(run_dir)
+            ctx = SimpleNamespace(run_dir=run_dir, run_id=run_id)
+            args = SimpleNamespace(stage="pilot", mock=True, resume=False)
+            reg_p, anchor_p = generate_master_registration(run_dir)
+
+            ledger_path = os.path.join(run_dir, "campaign2_pilot_ledger.jsonl")
+            ledger = AttemptLedger(ledger_path)
+            ledger.record_attempt_start(run_id, "pilot")
+            ledger.record_intent("call_unmatched_1", "mutate", "slot_a", 2)
+
+            import rsi_loop
+            with mock.patch("campaign2.durability.CheckpointManager", side_effect=DurabilityError("Injected checkpoint recovery failure")):
+                with self.assertRaises(DurabilityError):
+                    rsi_loop._run_campaign2(args, ctx)
+
+            ledger_reload = AttemptLedger(ledger_path)
+            entries = ledger_reload.get_entries()
+
+            types = [e.get("record_type") for e in entries]
+            self.assertIn("attempt_start", types)
+            self.assertIn("terminal_classification", types)
+            term_entry = [e for e in entries if e.get("record_type") == "terminal_classification"][0]
+            self.assertEqual(term_entry["classification"], "invalidated")
+            self.assertGreater(ledger_reload.unknown_usage_count, 0)
+
+    def test_terminal_attempt_resume_immutable(self):
+        with tempfile.TemporaryDirectory() as base_tmp:
+            run_dir = os.path.realpath(os.path.join(base_tmp, "run_test_term_immut"))
+            os.makedirs(run_dir)
+            run_id = os.path.basename(run_dir)
+            ctx = SimpleNamespace(run_dir=run_dir, run_id=run_id)
+            args = SimpleNamespace(stage="pilot", mock=True, resume=True)
+            reg_p, anchor_p = generate_master_registration(run_dir)
+
+            with open(reg_p, "rb") as f:
+                reg_sha = hashlib.sha256(f.read()).hexdigest()
+            create_attempt_identity(run_dir, run_id, "pilot", "suite_p", True, reg_sha)
+
+            ledger_path = os.path.join(run_dir, "campaign2_pilot_ledger.jsonl")
+            ledger = AttemptLedger(ledger_path)
+            ledger.record_attempt_start(run_id, "pilot")
+            ledger.record_terminal_classification(run_id, "completed", "Ladder decision: advance")
+
+            initial_entries = ledger.get_entries()
+            initial_count = len(initial_entries)
+
+            import rsi_loop
+            with self.assertRaises(AttemptLifecycleError):
+                rsi_loop._run_campaign2(args, ctx)
+
+            after_entries = ledger.get_entries()
+            self.assertEqual(len(after_entries), initial_count)
+            term_entries = [e for e in after_entries if e.get("record_type") == "terminal_classification"]
+            self.assertEqual(len(term_entries), 1)
+            self.assertEqual(term_entries[0]["classification"], "completed")
+
+
+class ImprovingMockModelProvider(MockModelProvider):
+    """Mock model provider that marks candidates generated from mutated prompts."""
+    def generate_candidate(self, task_id: str, effective_prompt: str, call_id: str) -> Tuple[str, int]:
+        code, tokens = super().generate_candidate(task_id, effective_prompt, call_id)
+        if "Mutation" in effective_prompt or "guided=" in effective_prompt:
+            code += "\n# Mutation Candidate"
+        return code, tokens
+
+
+class DynamicMockTaskEvaluator:
+    """Mock evaluator that returns higher score for mutated candidate code."""
+    def __init__(self, base_earned: int = 2, mutated_earned: int = 8, max_score: int = 10):
+        self.base_earned = base_earned
+        self.mutated_earned = mutated_earned
+        self.max_score = max_score
+
+    def evaluate(self, task_id: str, candidate_code: str) -> Tuple[int, int, bool, str]:
+        if "Mutation Candidate" in candidate_code:
+            return self.mutated_earned, self.max_score, True, ""
+        return self.base_earned, self.max_score, True, ""
+
+
+class TestFullReportEquivalence(unittest.TestCase):
+    """Test canonical Schema 3 report equality between uninterrupted and resumed runs."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.workspace = self.tmp_dir.name
+        generate_master_registration(self.workspace)
+        self.reg_data = verify_master_registration(self.workspace)
+        self.ta_data = generate_family_blocked_assignment(base_commit_sha=self.reg_data["base_commit_sha"])
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_canonical_report_equality(self):
+        u_dir = os.path.join(self.workspace, "uninterrupted")
+        os.makedirs(u_dir)
+        u_ledger = AttemptLedger(os.path.join(u_dir, "ledger.jsonl"))
+        u_ckpt = CheckpointManager(os.path.join(u_dir, "ckpt.json"), "pilot")
+
+        u_orch = Campaign2Orchestrator(
             model_provider=MockModelProvider(),
             task_evaluator=MockTaskEvaluator(),
             tier_assignment=self.ta_data,
             registration=self.reg_data,
             suite="suite_p",
-            checkpoint_mgr=ckpt_mgr,
+            ledger=u_ledger,
+            checkpoint_mgr=u_ckpt,
             workspace_root=self.workspace,
         )
+        u_orch.run_all_trials()
+        u_outcome = u_orch.compute_outcome()
 
-        # Execute trial 0
-        orch1.run_trial(0)
-        ckpt_mgr.seal_checkpoint_intent(0)
-        ckpt_mgr.commit_checkpoint_head(0, {"summary": "trial_0_ok"})
+        u_report = generate_schema3_report(
+            u_outcome, self.reg_data, self.ta_data,
+            ledger_path=os.path.join(u_dir, "ledger.jsonl"),
+            workspace_root=self.workspace,
+            is_mock=True,
+        )
 
-        self.assertEqual(ckpt_mgr.get_resume_trial_index(), 1)
+        r_dir = os.path.join(self.workspace, "resumed")
+        os.makedirs(r_dir)
+        r_ledger1 = AttemptLedger(os.path.join(r_dir, "ledger.jsonl"))
+        r_ckpt1 = CheckpointManager(os.path.join(r_dir, "ckpt.json"), "pilot")
 
-        # Second orchestrator instance should resume from trial 1
-        orch2 = Campaign2Orchestrator(
+        r_orch1 = Campaign2Orchestrator(
             model_provider=MockModelProvider(),
             task_evaluator=MockTaskEvaluator(),
             tier_assignment=self.ta_data,
             registration=self.reg_data,
             suite="suite_p",
-            checkpoint_mgr=ckpt_mgr,
+            ledger=r_ledger1,
+            checkpoint_mgr=r_ckpt1,
             workspace_root=self.workspace,
         )
+        t0_res = r_orch1.run_trial(0)
+        r_ckpt1.seal_pre_trial_intent(0)
+        r_ckpt1.commit_checkpoint_head(0, t0_res.to_dict())
 
-        resumed_results = orch2.run_all_trials()
-        self.assertEqual(len(resumed_results), 1)  # Only trial 1 executed
-        self.assertEqual(resumed_results[0].trial_index, 1)
+        r_ledger2 = AttemptLedger(os.path.join(r_dir, "ledger.jsonl"))
+        r_ckpt2 = CheckpointManager(os.path.join(r_dir, "ckpt.json"), "pilot")
+
+        r_orch2 = Campaign2Orchestrator(
+            model_provider=MockModelProvider(),
+            task_evaluator=MockTaskEvaluator(),
+            tier_assignment=self.ta_data,
+            registration=self.reg_data,
+            suite="suite_p",
+            ledger=r_ledger2,
+            checkpoint_mgr=r_ckpt2,
+            workspace_root=self.workspace,
+        )
+        r_orch2.run_all_trials()
+        r_outcome = r_orch2.compute_outcome()
+
+        r_report = generate_schema3_report(
+            r_outcome, self.reg_data, self.ta_data,
+            ledger_path=os.path.join(r_dir, "ledger.jsonl"),
+            workspace_root=self.workspace,
+            is_mock=True,
+        )
+
+        def sanitize_report(rep):
+            r = dict(rep)
+            r["timestamp_iso"] = "SANITIZED"
+            r["ledger_file"] = "SANITIZED"
+            return r
+
+        u_canonical = sanitize_report(u_report)
+        r_canonical = sanitize_report(r_report)
+
+        self.assertEqual(u_canonical, r_canonical)
+
+    def test_canonical_report_equality_with_improving_mutations(self):
+        u_dir = os.path.join(self.workspace, "u_imp")
+        os.makedirs(u_dir)
+        u_ledger = AttemptLedger(os.path.join(u_dir, "ledger.jsonl"))
+        u_ckpt = CheckpointManager(os.path.join(u_dir, "ckpt.json"), "pilot")
+
+        u_orch = Campaign2Orchestrator(
+            model_provider=ImprovingMockModelProvider(),
+            task_evaluator=DynamicMockTaskEvaluator(base_earned=2, mutated_earned=8),
+            tier_assignment=self.ta_data,
+            registration=self.reg_data,
+            suite="suite_p",
+            ledger=u_ledger,
+            checkpoint_mgr=u_ckpt,
+            workspace_root=self.workspace,
+        )
+        u_orch.run_all_trials()
+        u_exploratory = u_orch.exploratory.summary()
+
+        self.assertNotEqual(u_exploratory["score_improving_mutations_per_call"], "0/6")
+        self.assertEqual(u_exploratory["score_improving_mutations_per_call"], "2/6")
+
+        r_dir = os.path.join(self.workspace, "r_imp")
+        os.makedirs(r_dir)
+        r_ledger1 = AttemptLedger(os.path.join(r_dir, "ledger.jsonl"))
+        r_ckpt1 = CheckpointManager(os.path.join(r_dir, "ckpt.json"), "pilot")
+
+        r_orch1 = Campaign2Orchestrator(
+            model_provider=ImprovingMockModelProvider(),
+            task_evaluator=DynamicMockTaskEvaluator(base_earned=2, mutated_earned=8),
+            tier_assignment=self.ta_data,
+            registration=self.reg_data,
+            suite="suite_p",
+            ledger=r_ledger1,
+            checkpoint_mgr=r_ckpt1,
+            workspace_root=self.workspace,
+        )
+        r_res0 = r_orch1.run_trial(0)
+        r_ckpt1.seal_pre_trial_intent(0)
+        r_ckpt1.commit_checkpoint_head(0, r_res0.to_dict())
+
+        r_ledger2 = AttemptLedger(os.path.join(r_dir, "ledger.jsonl"))
+        r_ckpt2 = CheckpointManager(os.path.join(r_dir, "ckpt.json"), "pilot")
+
+        r_orch2 = Campaign2Orchestrator(
+            model_provider=ImprovingMockModelProvider(),
+            task_evaluator=DynamicMockTaskEvaluator(base_earned=2, mutated_earned=8),
+            tier_assignment=self.ta_data,
+            registration=self.reg_data,
+            suite="suite_p",
+            ledger=r_ledger2,
+            checkpoint_mgr=r_ckpt2,
+            workspace_root=self.workspace,
+        )
+        r_orch2.run_all_trials()
+        r_exploratory = r_orch2.exploratory.summary()
+
+        self.assertEqual(u_exploratory, r_exploratory)
 
 
-class TestIsolatedLaunchLock(unittest.TestCase):
-    """Test launch lock generation and verification in isolated temporary directory."""
+class TestMasterRegistrationHashVerification(unittest.TestCase):
+    """Test verify_master_registration text recomputation and Known Limitation 10 text."""
 
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
@@ -231,102 +770,253 @@ class TestIsolatedLaunchLock(unittest.TestCase):
     def tearDown(self):
         self.tmp_dir.cleanup()
 
+    def test_known_limitation_10_exact_text(self):
+        reg = verify_master_registration(self.workspace)
+        lim10 = reg["known_limitations"][9]
+        self.assertEqual(
+            lim10,
+            "A candidate that blocks without consuming CPU produces an unattributed wall-clock timeout "
+            "and invalidates the attempt; phase-based exit attribution does not cover non-exiting processes.",
+        )
+
+    def test_registration_content_tamper_is_rejected(self):
+        path = os.path.join(self.workspace, "campaign2_master_registration.json")
+        os.chmod(path, 0o600)
+        with open(path, "ab") as handle:
+            handle.write(b" ")
+        os.chmod(path, 0o444)
+        with self.assertRaises(ValueError):
+            verify_master_registration(self.workspace)
+
+
+class TestIsolatedLaunchLock(unittest.TestCase):
+    """Test launch lock generation and strict git repository authentication."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.workspace = self.tmp_dir.name
+        subprocess.run(["git", "init"], cwd=self.workspace, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.workspace, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=self.workspace, capture_output=True, check=True)
+        generate_master_registration(self.workspace)
+        write_sealed_family_blocked_assignment(workspace_root=self.workspace)
+        subprocess.run(["git", "add", "."], cwd=self.workspace, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.workspace, capture_output=True, check=True)
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
     def test_launch_lock_verification_in_git_workspace(self):
-        lock_path = generate_launch_lock(BASE_DIR, lock_rationale="test lock")
-        try:
-            self.assertTrue(os.path.exists(lock_path))
-            lock_data = verify_launch_lock(BASE_DIR)
-            expected_sha = _git_head_sha(BASE_DIR)
-            self.assertEqual(lock_data["approved_commit_sha"], expected_sha)
-        finally:
-            if os.path.exists(lock_path):
-                os.chmod(lock_path, 0o644)
-                os.remove(lock_path)
+        lock_path = generate_launch_lock(self.workspace, lock_rationale="test lock")
+        self.assertTrue(os.path.exists(lock_path))
+        lock_data = verify_launch_lock(self.workspace)
+        expected_sha = _git_head_sha(self.workspace)
+        self.assertEqual(lock_data["approved_commit_sha"], expected_sha)
 
-    def test_launch_lock_rejects_empty_hashes(self):
-        lock_file = os.path.join(self.workspace, "campaign2_launch_lock.json")
-        bad_lock = {
-            "schema_version": "3",
-            "canonical_realpath": os.path.realpath(self.workspace),
-            "approved_commit_sha": "0" * 40,
-            "registration_hash": "",  # EMPTY
-            "configuration_hash": "a" * 64,
-        }
-        with open(lock_file, "w") as f:
-            json.dump(bad_lock, f)
-        os.chmod(lock_file, 0o444)
-
-        with self.assertRaises(LaunchLockError):
-            verify_launch_lock(self.workspace)
+    def test_launch_lock_rejects_non_git_workspace(self):
+        with tempfile.TemporaryDirectory() as non_git:
+            generate_master_registration(non_git)
+            write_sealed_family_blocked_assignment(workspace_root=non_git)
+            with self.assertRaises(LaunchLockError):
+                generate_launch_lock(non_git)
 
 
 class TestPilotOutcomeLadder(unittest.TestCase):
-    """Test pre-registered baseline-headroom pilot outcome ladder."""
+    """Test pre-registered verbatim B8 6-outcome pilot ladder."""
 
-    def test_ladder_decision_outcomes(self):
-        # 1. No headroom (baseline score >= 1.0)
+    def test_literal_b8_ladder_6_outcomes(self):
         out1 = evaluate_pilot_outcome_ladder(
-            baseline_score=Fraction(1, 1),
-            opt_sel_opt_score=Fraction(1, 1),
-            opt_sel_ctrl_score=Fraction(1, 1),
-            conf_holdout_opt_score=Fraction(1, 1),
-            conf_holdout_ctrl_score=Fraction(1, 1),
-            delta=Fraction(0),
+            opt_sel_baseline=Fraction(5, 10), conf_baseline=Fraction(5, 10),
+            is_invalid=True, invalid_reason="Plumbing fault"
         )
-        self.assertEqual(out1.decision, "no_headroom")
-        self.assertFalse(out1.is_go)
+        self.assertEqual(out1.decision, "invalid")
 
-        # 2. Insufficient headroom (baseline < 0.2)
         out2 = evaluate_pilot_outcome_ladder(
-            baseline_score=Fraction(1, 10),
-            opt_sel_opt_score=Fraction(5, 10),
-            opt_sel_ctrl_score=Fraction(5, 10),
-            conf_holdout_opt_score=Fraction(5, 10),
-            conf_holdout_ctrl_score=Fraction(5, 10),
-            delta=Fraction(0),
+            opt_sel_baseline=Fraction(1), conf_baseline=Fraction(5, 10),
+            all_16_opt_sel_perfect=True
         )
-        self.assertEqual(out2.decision, "insufficient_headroom")
-        self.assertFalse(out2.is_go)
+        self.assertEqual(out2.decision, "no_headroom")
 
-        # 3. Post-mutation floor failure on opt/sel (optimizer < 0.2)
         out3 = evaluate_pilot_outcome_ladder(
-            baseline_score=Fraction(5, 10),
-            opt_sel_opt_score=Fraction(1, 10),
-            opt_sel_ctrl_score=Fraction(5, 10),
-            conf_holdout_opt_score=Fraction(5, 10),
-            conf_holdout_ctrl_score=Fraction(5, 10),
-            delta=Fraction(0),
+            opt_sel_baseline=Fraction(91, 100), conf_baseline=Fraction(1, 2)
         )
-        self.assertEqual(out3.decision, "opt_sel_floor")
-        self.assertFalse(out3.is_go)
+        self.assertEqual(out3.decision, "insufficient_headroom")
 
-        # 4. No effect (delta <= 0)
         out4 = evaluate_pilot_outcome_ladder(
-            baseline_score=Fraction(5, 10),
-            opt_sel_opt_score=Fraction(5, 10),
-            opt_sel_ctrl_score=Fraction(5, 10),
-            conf_holdout_opt_score=Fraction(5, 10),
-            conf_holdout_ctrl_score=Fraction(5, 10),
-            delta=Fraction(0),
+            opt_sel_baseline=Fraction(1, 2), conf_baseline=Fraction(24, 25)
         )
-        self.assertEqual(out4.decision, "no_effect")
-        self.assertFalse(out4.is_go)
+        self.assertEqual(out4.decision, "insufficient_confirmatory_headroom")
 
-        # 5. GO outcome (valid baseline headroom, floors met, delta > 0)
         out5 = evaluate_pilot_outcome_ladder(
-            baseline_score=Fraction(5, 10),
-            opt_sel_opt_score=Fraction(6, 10),
-            opt_sel_ctrl_score=Fraction(5, 10),
-            conf_holdout_opt_score=Fraction(7, 10),
-            conf_holdout_ctrl_score=Fraction(5, 10),
-            delta=Fraction(2, 10),
+            opt_sel_baseline=Fraction(19, 100), conf_baseline=Fraction(1, 2)
         )
-        self.assertEqual(out5.decision, "go")
-        self.assertTrue(out5.is_go)
+        self.assertEqual(out5.decision, "insufficient_baseline_engagement")
+
+        out6 = evaluate_pilot_outcome_ladder(
+            opt_sel_baseline=Fraction(5, 10), conf_baseline=Fraction(5, 10)
+        )
+        self.assertEqual(out6.decision, "go")
+        self.assertTrue(out6.is_go)
 
 
 class TestRetryTaxonomyAndLedger(unittest.TestCase):
-    """Test strict fail-closed retry taxonomy and append-only JSONL ledger."""
+    """Test pre-request and HTTP 429 zero response-body retry taxonomy."""
+
+    def test_http_retry_evidence_zero_response_body(self):
+        # HTTP 429 with zero response body -> RETRYABLE
+        f1 = classify_call_fault(RuntimeError("HTTP 429 Too Many Requests"), bytes_sent=100, bytes_received=0)
+        self.assertTrue(f1.retryable)
+        self.assertEqual(f1.fault_type, "rate_limit_pre_request")
+
+        # HTTP 429 with received response body bytes -> NON-RETRYABLE
+        f2 = classify_call_fault(RuntimeError("HTTP 429 Too Many Requests"), bytes_sent=100, bytes_received=256)
+        self.assertFalse(f2.retryable)
+        self.assertEqual(f2.fault_type, "rate_limit_with_body")
+
+        # Unknown body evidence must never be manufactured as zero.
+        unknown = classify_call_fault(RuntimeError("HTTP 429 Too Many Requests"), bytes_sent=100)
+        self.assertFalse(unknown.retryable)
+
+        retry_503 = classify_call_fault(RuntimeError("HTTP 503 Service Unavailable"), bytes_sent=100, bytes_received=0)
+        self.assertTrue(retry_503.retryable)
+        unknown_503 = classify_call_fault(RuntimeError("HTTP 503 Service Unavailable"), bytes_sent=100)
+        self.assertFalse(unknown_503.retryable)
+
+    def test_pre_request_dns_tls_spawn_require_explicit_zero_evidence(self):
+        for exc in (
+            RuntimeError("DNS name resolution failed"),
+            RuntimeError("TLS handshake failed"),
+            FileNotFoundError("spawn executable missing"),
+        ):
+            with self.subTest(exc=exc):
+                explicit = classify_call_fault(exc, bytes_sent=0, bytes_received=0)
+                self.assertTrue(explicit.retryable)
+                unknown = classify_call_fault(exc)
+                self.assertFalse(unknown.retryable)
+
+    def test_orchestrator_does_not_retry_plain_http_text_without_body_evidence(self):
+        class UnknownEvidenceProvider(MockModelProvider):
+            def __init__(self):
+                super().__init__()
+                self.attempts = 0
+            def generate_candidate(self, task_id, effective_prompt, call_id):
+                self.attempts += 1
+                raise RuntimeError("HTTP 429 Too Many Requests")
+
+        with tempfile.TemporaryDirectory() as workspace:
+            generate_master_registration(workspace)
+            registration = verify_master_registration(workspace)
+            assignment = generate_family_blocked_assignment(registration["base_commit_sha"])
+            provider = UnknownEvidenceProvider()
+            orch = Campaign2Orchestrator(
+                provider, MockTaskEvaluator(), assignment, registration,
+                suite="suite_p", workspace_root=workspace,
+            )
+            with self.assertRaises(OrchestratorError):
+                orch._generate_and_evaluate(
+                    "p_f1_02_syslog_framing_decoder", "body", "slot_a", 2, 0
+                )
+            self.assertEqual(provider.attempts, 1)
+
+    def test_orchestrator_retries_only_explicit_zero_body_http_evidence(self):
+        class ExplicitZeroError(RuntimeError):
+            bytes_sent = 100
+            bytes_received = 0
+
+        class ExplicitProvider(MockModelProvider):
+            def __init__(self):
+                super().__init__()
+                self.attempts = 0
+            def generate_candidate(self, task_id, effective_prompt, call_id):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise ExplicitZeroError("HTTP 503 Service Unavailable")
+                return super().generate_candidate(task_id, effective_prompt, call_id)
+
+        with tempfile.TemporaryDirectory() as workspace:
+            generate_master_registration(workspace)
+            registration = verify_master_registration(workspace)
+            assignment = generate_family_blocked_assignment(registration["base_commit_sha"])
+            provider = ExplicitProvider()
+            orch = Campaign2Orchestrator(
+                provider, MockTaskEvaluator(), assignment, registration,
+                suite="suite_p", workspace_root=workspace,
+            )
+            earned, maximum, _tokens, _record = orch._generate_and_evaluate(
+                "p_f1_02_syslog_framing_decoder", "body", "slot_a", 2, 0
+            )
+            self.assertEqual((earned, maximum), (5, 10))
+            self.assertEqual(provider.attempts, 2)
+
+
+class TestReportingStructure(unittest.TestCase):
+    """Test task-derived per-family deltas labeled strictly by structural task families (F1-F4)."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.workspace = self.tmp_dir.name
+        generate_master_registration(self.workspace)
+        self.reg_data = verify_master_registration(self.workspace)
+        self.ta_data = generate_family_blocked_assignment(base_commit_sha=self.reg_data["base_commit_sha"])
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_task_derived_family_deltas_no_aliasing(self):
+        orch = Campaign2Orchestrator(
+            model_provider=MockModelProvider(),
+            task_evaluator=MockTaskEvaluator(),
+            tier_assignment=self.ta_data,
+            registration=self.reg_data,
+            suite="suite_p",
+            workspace_root=self.workspace,
+        )
+        orch.run_all_trials()
+        outcome = orch.compute_outcome()
+
+        report = generate_schema3_report(
+            outcome, self.reg_data, self.ta_data, workspace_root=self.workspace, is_mock=True
+        )
+
+        per_family = report.get("per_family_deltas", [])
+        self.assertEqual(len(per_family), 4)
+        families = [f["family"] for f in per_family]
+        self.assertEqual(families, ["F1", "F2", "F3", "F4"])
+        self.assertEqual(per_family[0]["family_name"], "Structural Task Family 1")
+        self.assertEqual(
+            per_family[0]["task_ids"],
+            ["p_f1_01_ndjson_stream_parser", "p_f1_02_syslog_framing_decoder"],
+        )
+        self.assertIn("p_f3_01_arc_adaptive_cache", per_family[2]["task_ids"])
+        self.assertTrue(per_family[0]["optimizer_k_samples"])
+        self.assertEqual(len(report["per_tier_deltas"]), 4)
+        first_trial = report["per_trial"][0]
+        self.assertEqual(set(first_trial["tiers"]), {
+            "optimization", "selection", "confirmatory", "structural_holdout"
+        })
+        first_task = next(iter(first_trial["tiers"]["optimization"]["tasks"].values()))
+        self.assertEqual(len(first_task["baseline_k_samples"]), 2)
+        self.assertEqual(len(first_task["optimizer_k_samples"]), 2)
+        self.assertEqual(len(first_task["control_k_samples"]), 2)
+        self.assertTrue(first_trial["control_records"])
+
+    def test_reporting_rejects_missing_family_evidence_instead_of_aliasing_tiers(self):
+        outcome = {
+            "suite": "suite_p",
+            "num_trials": 1,
+            "per_trial": [{
+                "tiers": {
+                    name: {"delta_opt_minus_ctrl": "0"}
+                    for name in ("optimization", "selection", "confirmatory", "structural_holdout")
+                }
+            }],
+        }
+        with self.assertRaisesRegex(ValueError, "family_scores"):
+            generate_schema3_report(outcome, self.reg_data, self.ta_data, workspace_root=self.workspace)
+
+
+class TestStageGlobalOneShot(unittest.TestCase):
+    """Test stage-global scientific start claim marker and anti-fishing duplicate attempt rejection."""
 
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
@@ -335,36 +1025,152 @@ class TestRetryTaxonomyAndLedger(unittest.TestCase):
     def tearDown(self):
         self.tmp_dir.cleanup()
 
-    def test_retry_taxonomy_requires_bytes_sent_zero(self):
-        # Connection error BEFORE request bytes sent -> RETRYABLE
-        f1 = classify_call_fault(ConnectionRefusedError("Refused"), bytes_sent=0)
-        self.assertTrue(f1.retryable)
+    def test_duplicate_stage_start_rejected(self):
+        p1 = publish_scientific_start("pilot", "attempt_1", workspace_root=self.workspace)
+        self.assertTrue(os.path.exists(p1))
+        self.assertTrue(verify_stage_scientific_start("pilot", "attempt_1", workspace_root=self.workspace))
 
-        # Connection error AFTER bytes sent -> NON-RETRYABLE
-        f2 = classify_call_fault(ConnectionError("Reset"), bytes_sent=50)
-        self.assertFalse(f2.retryable)
+        # Re-publishing with same attempt ID is idempotent
+        p1_again = publish_scientific_start("pilot", "attempt_1", workspace_root=self.workspace)
+        self.assertEqual(p1, p1_again)
 
-        # Unconfirmed bytes sent (-1) -> NON-RETRYABLE (fail-closed)
-        f3 = classify_call_fault(TimeoutError("Timed out"), bytes_sent=-1)
-        self.assertFalse(f3.retryable)
+        # Second attempt claiming same stage raises AttemptInvalidatedError under B4(b)
+        with self.assertRaises(AttemptInvalidatedError):
+            publish_scientific_start("pilot", "attempt_2", workspace_root=self.workspace)
 
-    def test_append_only_jsonl_ledger(self):
-        ledger_path = os.path.join(self.workspace, "attempt_ledger.jsonl")
-        ledger = AttemptLedger(ledger_path)
+        with self.assertRaises(AttemptInvalidatedError):
+            verify_stage_scientific_start("pilot", "attempt_2", workspace_root=self.workspace)
 
-        ledger.record_intent("c1", "generate", "optimizer", 1, "task_a")
-        ledger.record_completion("c1", True, tokens=100)
+    def test_scientific_start_strict_verification(self):
+        p1 = publish_scientific_start("pilot", "attempt_1", workspace_root=self.workspace)
+
+        # 1. Symlink rejection
+        sym_path = p1 + "_sym"
+        os.symlink(p1, sym_path)
+        with mock.patch("os.path.join", return_value=sym_path):
+            with self.assertRaises(AttemptInvalidatedError):
+                verify_stage_scientific_start("pilot", "attempt_1", workspace_root=self.workspace)
+
+        # 2. Mode 0o444 vs 0o644 rejection
+        os.chmod(p1, 0o644)
+        with self.assertRaises(AttemptInvalidatedError):
+            verify_stage_scientific_start("pilot", "attempt_1", workspace_root=self.workspace)
+        os.chmod(p1, 0o444)
+
+        # 3. Noncanonical JSON byte formatting rejection
+        data = {"stage": "pilot", "attempt_id": "attempt_1", "status": "started", "timestamp": 123}
+        noncanonical_bytes = json.dumps(data).encode("utf-8")
+        os.chmod(p1, 0o644)
+        with open(p1, "wb") as f:
+            f.write(noncanonical_bytes)
+        os.chmod(p1, 0o444)
+
+        with self.assertRaises(AttemptInvalidatedError):
+            verify_stage_scientific_start("pilot", "attempt_1", workspace_root=self.workspace)
+
+        with self.assertRaises(AttemptInvalidatedError):
+            publish_scientific_start("pilot", "attempt_1", workspace_root=self.workspace)
+
+
+class TestUncommittedPreviousHeadDurability(unittest.TestCase):
+    """Test fail-closed B5 recovery invalidation on uncommitted commit_intent pointing to previous head."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.workspace = self.tmp_dir.name
+        self.ckpt_path = os.path.join(self.workspace, "ckpt.json")
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_uncommitted_previous_head_raises_durability_error(self):
+        import base64
+        mgr = CheckpointManager(self.ckpt_path, "pilot")
+        mgr.seal_pre_trial_intent(0)
+
+        trial_rec = {"trial_index": 0, "score": "1/2"}
+        trial_bytes = json.dumps(trial_rec, sort_keys=True).encode("utf-8")
+        trial_hash = hashlib.sha256(trial_bytes).hexdigest()
+        new_head = hashlib.sha256(f"{GENESIS_HEAD_HASH}|0|{trial_hash}".encode("utf-8")).hexdigest()
+        new_data = {
+            "stage": "pilot",
+            "version": 1,
+            "head_index": 0,
+            "previous_head_hash": GENESIS_HEAD_HASH,
+            "trial_record_hash": trial_hash,
+            "head_hash": new_head,
+            "completed_trials": [trial_rec],
+            "last_intent": None,
+        }
+        exp_bytes = (json.dumps(new_data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        exp_sha = hashlib.sha256(exp_bytes).hexdigest()
+        exp_b64 = base64.b64encode(exp_bytes).decode("ascii")
+
+        c_intent_path = self.ckpt_path + ".commit_intent"
+        c_intent_data = {
+            "trial_index": 0,
+            "previous_head_hash": GENESIS_HEAD_HASH,
+            "expected_new_head_hash": new_head,
+            "expected_checkpoint_sha256": exp_sha,
+            "expected_checkpoint_size": len(exp_bytes),
+            "expected_checkpoint_bytes_b64": exp_b64,
+            "trial_record_hash": trial_hash,
+            "status": "commit_intent_sealed",
+        }
+        with open(c_intent_path, "w", encoding="utf-8") as f:
+            json.dump(c_intent_data, f)
+        os.chmod(c_intent_path, 0o444)
+
+        # Opening fresh CheckpointManager must raise DurabilityError under frozen B5 rule
+        with self.assertRaises(DurabilityError):
+            CheckpointManager(self.ckpt_path, "pilot")
+
+
+class TestSigxcpuWorkerExit(unittest.TestCase):
+    """Test SIGXCPU worker exit is scored as attributable candidate process error (0, max)."""
+
+    def test_sigxcpu_raises_candidate_process_error(self):
+        from campaign2.proxy import WorkerIPCClient, CandidateProcessError
+        client = WorkerIPCClient.__new__(WorkerIPCClient)
+        client.phase = "candidate_execution"
+        with self.assertRaises(CandidateProcessError):
+            client._raise_worker_exit(-24)
+
+
+class TestB4AttemptAccounting(unittest.TestCase):
+    """Test B4 attempt accounting methods in AttemptLedger."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.ledger_path = os.path.join(self.tmp_dir.name, "ledger.jsonl")
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_b4_attempt_accounting(self):
+        ledger = AttemptLedger(self.ledger_path)
+        ledger.record_attempt_start("att_1", "pilot")
+        ledger.record_intent("call_1", "generate", "slot_a", 1)
+        ledger.record_completion("call_1", True, tokens=150)
+        ledger.record_terminal_classification("att_1", "completed", "All trials executed successfully")
 
         entries = ledger.get_entries()
-        self.assertEqual(len(entries), 2)
-        self.assertEqual(entries[0]["event"], "intent")
-        self.assertEqual(entries[1]["event"], "completion")
+        types = [e["record_type"] for e in entries]
+        self.assertEqual(types, ["attempt_start", "intent", "completion", "terminal_classification"])
+        self.assertEqual(ledger.cumulative_calls, 1)
+        self.assertEqual(ledger.cumulative_tokens, 150)
 
-        self.assertTrue(ledger.verify_intent_before_completion())
 
-        # Orphaning a completion without intent raises AttemptLifecycleError
-        with self.assertRaises(AttemptLifecycleError):
-            ledger.record_completion("orphan_c2", True)
+class TestCandidateRlimits(unittest.TestCase):
+    """Test candidate worker limits reporting in Schema 3 report."""
+
+    def test_candidate_rlimits_schema3(self):
+        from campaign2.reporting import get_candidate_rlimits
+        rlimits = get_candidate_rlimits()
+        self.assertEqual(rlimits["nofile"], 64)
+        self.assertEqual(rlimits["fsize_bytes"], 1048576)
+        self.assertEqual(rlimits["core_bytes"], 0)
+        self.assertEqual(rlimits["cpu_seconds"], 15)
 
 
 if __name__ == "__main__":

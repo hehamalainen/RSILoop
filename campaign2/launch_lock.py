@@ -1,84 +1,71 @@
 """
 Campaign 2 Launch Lock Module.
 
-B1 — CANONICAL ROOT LAUNCH LOCK:
-- Operator-sealed launch lock (0o444) containing:
-  canonical repository REALPATH, approved commit SHA, registration hash,
-  configuration hash.
-- Phase 0 computes its own root realpath and REFUSES execution if it differs.
-- The lock is NOT committed in source — it is created by the operator after
-  the implementation commit has been reviewed.
-- Verification reads `git rev-parse HEAD` to authenticate the running commit.
-
-Rationale: /Users/.../Documents/RSILoop holds an independent clone plus a dirty
-builder_worktree at 5d5af00 and is an operator-identity hazard.
+P0-1 — MANDATORY LAUNCH LOCK & GIT AUTHENTICATION:
+- Generates campaign2_launch_lock.json capturing git HEAD commit SHA.
+- Strictly authenticates that workspace_root is a valid Git repository root.
+- Requires non-empty registration and configuration hashes.
+- Sets file mode to read-only 0o444 and prevents overwriting sealed lock files.
 """
 
 import os
 import sys
 import json
 import stat
-import hashlib
 import subprocess
+import hashlib
+from typing import Dict, Any
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOCK_FILE_REL = "campaign2_launch_lock.json"
 
 
-class LaunchLockError(RuntimeError):
-    """Raised when launch lock validation fails."""
+class LaunchLockError(ValueError):
+    """Raised when launch lock generation, verification, or authentication fails."""
     pass
 
 
-def _git_head_sha(workspace_root: str) -> str:
-    """Read the current HEAD commit SHA from git with direct filesystem fallback."""
-    # Attempt 1: git rev-parse HEAD subprocess
+def _git_head_sha(workspace_root: str = BASE_DIR) -> str:
+    """Retrieve git HEAD commit SHA for workspace_root. Strictly requires workspace_root to be a Git root."""
+    workspace_realpath = os.path.realpath(workspace_root)
     try:
-        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        result = subprocess.run(
+        res_top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=workspace_root,
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if res_top.returncode == 0:
+            top_dir = os.path.realpath(res_top.stdout.strip())
+            if top_dir != workspace_realpath:
+                raise LaunchLockError(
+                    f"Workspace root '{workspace_root}' is not the root of a Git repository "
+                    f"(found parent git root '{top_dir}')"
+                )
+        else:
+            raise LaunchLockError(f"Workspace root is not a Git repository: {workspace_root}")
+    except Exception as e:
+        if isinstance(e, LaunchLockError):
+            raise
+        raise LaunchLockError(f"Workspace root is not a Git repository: {workspace_root}") from e
+
+    try:
+        res = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=workspace_root,
             capture_output=True,
             text=True,
-            timeout=10,
-            env=env,
+            check=False
         )
-        if result.returncode == 0:
-            sha = result.stdout.strip()
+        if res.returncode == 0:
+            sha = res.stdout.strip()
             if len(sha) == 40 and all(c in '0123456789abcdef' for c in sha):
                 return sha
     except Exception:
         pass
 
-    # Attempt 2: Direct .git file parsing fallback
-    try:
-        git_dir = os.path.join(workspace_root, ".git")
-        if os.path.isfile(git_dir):
-            with open(git_dir, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-            if content.startswith("gitdir:"):
-                git_dir = content.split("gitdir:", 1)[1].strip()
-                if not os.path.isabs(git_dir):
-                    git_dir = os.path.realpath(os.path.join(workspace_root, git_dir))
-
-        head_file = os.path.join(git_dir, "HEAD")
-        if os.path.isfile(head_file):
-            with open(head_file, "r", encoding="utf-8") as f:
-                head_content = f.read().strip()
-            if head_content.startswith("ref:"):
-                ref_path = head_content.split("ref:", 1)[1].strip()
-                ref_file = os.path.join(git_dir, ref_path)
-                if os.path.isfile(ref_file):
-                    with open(ref_file, "r", encoding="utf-8") as f:
-                        sha = f.read().strip()
-                    if len(sha) == 40 and all(c in '0123456789abcdef' for c in sha):
-                        return sha
-            elif len(head_content) == 40 and all(c in '0123456789abcdef' for c in head_content):
-                return head_content
-    except Exception:
-        pass
-
-    raise LaunchLockError(f"Could not determine git HEAD SHA for workspace: {workspace_root}")
+    raise LaunchLockError(f"Cannot determine git HEAD SHA for workspace: {workspace_root}")
 
 
 def _compute_file_hash(path: str) -> str:
@@ -126,6 +113,9 @@ def generate_launch_lock(
 
     lock_path = os.path.join(workspace_root, LOCK_FILE_REL)
     if os.path.exists(lock_path):
+        st_mode = stat.S_IMODE(os.stat(lock_path).st_mode)
+        if st_mode == 0o444:
+            raise LaunchLockError("Sealed launch lock already exists (0o444). Unseal or remove before regenerating.")
         os.chmod(lock_path, 0o644)
 
     lock_content = json.dumps(lock_data, indent=2, sort_keys=True) + "\n"
@@ -158,68 +148,68 @@ def verify_launch_lock(workspace_root: str = BASE_DIR) -> dict:
     Returns the parsed lock data on success.
     """
     lock_path = os.path.join(workspace_root, LOCK_FILE_REL)
-
     if not os.path.exists(lock_path):
-        raise LaunchLockError(f"Launch lock file not found: {lock_path}")
+        raise LaunchLockError(f"Missing launch lock file: {lock_path}")
     if os.path.islink(lock_path):
-        raise LaunchLockError(f"Launch lock must not be a symlink: {lock_path}")
+        raise LaunchLockError(f"Launch lock file must not be a symlink: {lock_path}")
     if not os.path.isfile(lock_path):
-        raise LaunchLockError(f"Launch lock must be a regular file: {lock_path}")
+        raise LaunchLockError(f"Launch lock file must be a regular file: {lock_path}")
 
     st_mode = stat.S_IMODE(os.stat(lock_path).st_mode)
     if st_mode != 0o444:
-        raise LaunchLockError(
-            f"Launch lock permission mode must be 0o444, got {oct(st_mode)}"
-        )
+        raise LaunchLockError(f"Launch lock permission mode must be 0o444, got {oct(st_mode)}")
 
-    with open(lock_path, "r", encoding="utf-8") as f:
-        lock_data = json.load(f)
+    try:
+        with open(lock_path, "r", encoding="utf-8") as f:
+            lock_data = json.load(f)
+    except Exception as e:
+        raise LaunchLockError(f"Failed to parse launch lock JSON: {e}")
 
     if lock_data.get("schema_version") != "3":
-        raise LaunchLockError(
-            f"Launch lock schema_version must be '3', got '{lock_data.get('schema_version')}'"
-        )
+        raise LaunchLockError(f"Launch lock schema_version must be '3', got {lock_data.get('schema_version')}")
 
-    # Verify canonical realpath
+    # Check canonical realpath
     expected_realpath = os.path.realpath(workspace_root)
-    if lock_data.get("canonical_realpath") != expected_realpath:
+    actual_realpath = lock_data.get("canonical_realpath", "")
+    if actual_realpath != expected_realpath:
         raise LaunchLockError(
-            f"Launch lock canonical_realpath mismatch: "
-            f"lock has '{lock_data.get('canonical_realpath')}', "
-            f"expected '{expected_realpath}'"
+            f"Launch lock canonical realpath mismatch: expected '{expected_realpath}', "
+            f"got '{actual_realpath}'"
         )
 
-    # Verify running commit matches lock's approved SHA
+    # Check running commit SHA against lock
     head_sha = _git_head_sha(workspace_root)
-    if lock_data.get("approved_commit_sha") != head_sha:
+    approved_sha = lock_data.get("approved_commit_sha", "")
+    if not approved_sha:
+        raise LaunchLockError("Launch lock approved_commit_sha is empty")
+    if head_sha != approved_sha:
         raise LaunchLockError(
-            f"Launch lock commit mismatch: lock approves "
-            f"'{lock_data.get('approved_commit_sha')}', "
-            f"but HEAD is '{head_sha}'"
+            f"Launch lock commit SHA mismatch: approved commit is '{approved_sha}', "
+            f"currently running git HEAD is '{head_sha}'"
         )
 
-    # Verify non-empty registration hash
-    reg_hash = lock_data.get("registration_hash", "")
-    if not reg_hash:
-        raise LaunchLockError("Launch lock registration_hash is empty")
+    # Verify registration hash
     reg_path = os.path.join(workspace_root, "campaign2_master_registration.json")
     actual_reg_hash = _compute_file_hash(reg_path)
-    if reg_hash != actual_reg_hash:
+    expected_reg_hash = lock_data.get("registration_hash", "")
+    if not expected_reg_hash:
+        raise LaunchLockError("Launch lock registration_hash is empty")
+    if actual_reg_hash != expected_reg_hash:
         raise LaunchLockError(
-            f"Launch lock registration_hash mismatch: "
-            f"lock has '{reg_hash}', disk has '{actual_reg_hash}'"
+            f"Master Registration hash mismatch: lock has '{expected_reg_hash}', "
+            f"disk has '{actual_reg_hash}'"
         )
 
-    # Verify non-empty configuration hash
-    config_hash = lock_data.get("configuration_hash", "")
-    if not config_hash:
-        raise LaunchLockError("Launch lock configuration_hash is empty")
+    # Verify configuration hash
     config_path = os.path.join(workspace_root, "campaign2_tier_assignment.json")
     actual_config_hash = _compute_file_hash(config_path)
-    if config_hash != actual_config_hash:
+    expected_config_hash = lock_data.get("configuration_hash", "")
+    if not expected_config_hash:
+        raise LaunchLockError("Launch lock configuration_hash is empty")
+    if actual_config_hash != expected_config_hash:
         raise LaunchLockError(
-            f"Launch lock configuration_hash mismatch: "
-            f"lock has '{config_hash}', disk has '{actual_config_hash}'"
+            f"Tier Assignment hash mismatch: lock has '{expected_config_hash}', "
+            f"disk has '{actual_config_hash}'"
         )
 
     return lock_data

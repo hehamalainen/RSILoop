@@ -23,8 +23,14 @@ IMMUTABLE_CONTRACT = (
 
 DELIMITER = "\n\n---STRATEGY---\n\n"
 
+CONTROL_REFORMULATION_TEXT = (
+    "Rewrite the strategy section of this prompt using different wording.\n"
+    "Do not change the meaning or intent. Keep it concise."
+)
+
 IMMUTABLE_CONTRACT_HASH = hashlib.sha256(IMMUTABLE_CONTRACT.encode("utf-8")).hexdigest()
 DELIMITER_HASH = hashlib.sha256(DELIMITER.encode("utf-8")).hexdigest()
+CONTROL_REFORMULATION_HASH = hashlib.sha256(CONTROL_REFORMULATION_TEXT.encode("utf-8")).hexdigest()
 
 
 class PromptEnvelopeError(ValueError):
@@ -35,17 +41,38 @@ class PromptEnvelopeError(ValueError):
 class PromptEnvelope:
     """
     Constructs effective prompts and validates meta-optimizer mutation outputs.
+    Consumes verified master registration data to bind prompt components and hashes.
     """
 
     def __init__(
         self,
+        master_registration_data: Optional[dict] = None,
         immutable_contract: str = IMMUTABLE_CONTRACT,
         delimiter: str = DELIMITER,
+        control_reformulation_text: str = CONTROL_REFORMULATION_TEXT,
     ):
-        self.immutable_contract = immutable_contract
-        self.delimiter = delimiter
-        self.immutable_contract_hash = hashlib.sha256(immutable_contract.encode("utf-8")).hexdigest()
-        self.delimiter_hash = hashlib.sha256(delimiter.encode("utf-8")).hexdigest()
+        if master_registration_data and "prompt_envelope" in master_registration_data:
+            pe_data = master_registration_data["prompt_envelope"]
+            self.immutable_contract = pe_data["immutable_contract"]
+            self.delimiter = pe_data["delimiter"]
+            self.control_reformulation_text = pe_data["control_reformulation_text"]
+            self.immutable_contract_hash = pe_data["immutable_contract_hash"]
+            self.delimiter_hash = pe_data["delimiter_hash"]
+            self.control_reformulation_hash = pe_data["control_reformulation_hash"]
+        else:
+            self.immutable_contract = immutable_contract
+            self.delimiter = delimiter
+            self.control_reformulation_text = control_reformulation_text
+            self.immutable_contract_hash = hashlib.sha256(self.immutable_contract.encode("utf-8")).hexdigest()
+            self.delimiter_hash = hashlib.sha256(self.delimiter.encode("utf-8")).hexdigest()
+            self.control_reformulation_hash = hashlib.sha256(self.control_reformulation_text.encode("utf-8")).hexdigest()
+
+        if self.immutable_contract_hash != IMMUTABLE_CONTRACT_HASH:
+            raise PromptEnvelopeError("Immutable contract does not match registered constant hash")
+        if self.delimiter_hash != DELIMITER_HASH:
+            raise PromptEnvelopeError("Delimiter does not match registered constant hash")
+        if self.control_reformulation_hash != CONTROL_REFORMULATION_HASH:
+            raise PromptEnvelopeError("Control reformulation text does not match registered constant hash")
 
     def build_effective_prompt(self, mutable_body: str) -> Tuple[str, str]:
         """

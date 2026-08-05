@@ -4,9 +4,9 @@ A bi-level prompt-optimization harness that uses the local **Codex CLI** (remote
 
 ## Current Status — Campaign 2 Work Order B (Orchestration & Launch Preflight)
 
-**Status: Research Prototype — Executable Vertical Slice Ready.**
+**Status: NO-GO pending adversarial review and an operator-issued launch lock. No Sol calls are authorized.**
 - **Active Base Commit**: Pinned to base commit `96e04c94ef44b974301bbe9e4fedd2ba4281022d`.
-- **CLI Integration**: Wired directly into `rsi_loop.py` via `python3 rsi_loop.py --campaign 2 [--stage pilot|full] [--mock]`.
+- **CLI Integration**: Wired into `rsi_loop.py`; resume requires both `--resume` and an exact sealed `--resume-attempt-id run_<id>`.
 - **Model Interface**: Pluggable `ModelProvider` architecture supporting `MockModelProvider` (vertical slice testing) and `SolModelProvider` (Work Order C production stub).
 - **Per-Trial Call Arithmetic**: Fully enforced per-trial call counts (202 for Suite C full-run, 86 for Suite P pilot) across baseline, mutation, winner selection, and post-selection microblock trios.
 
@@ -29,7 +29,7 @@ The 491 MB Qwen GGUF model (`models/Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf`) an
 - **Boundary**: The achieved boundary is **host containment** (preventing arbitrary filesystem writes, network operations, or process spawning on the host using macOS `sandbox-exec` and `setrlimit`).
 - **Resource Enforcement**: The Campaign 2 worker installs CPU (`RLIMIT_CPU`), file-descriptor (`RLIMIT_NOFILE`), file-size (`RLIMIT_FSIZE`), and core-dump (`RLIMIT_CORE`) limits before it reports readiness. The host rejects readiness unless the worker attests expected limits and confirms candidate import has not started.
 - **Residual Host-Availability Risk**: Process address-space ceilings (`RLIMIT_AS`) are unconstrained by `setrlimit` at the OS layer on the macOS XNU kernel. A memory-bound candidate process can create host memory pressure or stall before wall-clock supervision terminates the process. This residual availability risk is accepted for the frozen, non-adversarial benchmark population.
-- **Phase-Based Timeout & Exit Attribution**: Startup/readiness wall timeouts or process crashes are infrastructure failures. Candidate import and execution wall/CPU timeouts raise `CandidateTimeoutError`. Non-`SIGXCPU` worker process signal terminations or exits (`SIGKILL`, `SIGSEGV`, `SIGBUS`, `SIGABRT`) occurring during Candidate Import or Candidate Execution phases are attributed as `CandidateProcessError` scoring candidate failures 0/10.
+- **Phase-Based Timeout & Exit Attribution**: Startup/readiness wall timeouts or process crashes are infrastructure failures. A non-exiting candidate import/execution wall timeout raises `CandidateTimeoutError` and invalidates the campaign attempt because it is not attributable to a scored outcome. Explicit worker exits and signals during candidate phases remain phase-attributed candidate failures.
 - **Source Policy**: Campaign 2 applies no AST denylist. Python semantics are not selectively biased by a hidden import/call policy; containment and budgets are enforced at runtime.
 
 ---
@@ -55,6 +55,9 @@ The worker completes its RLIMIT-backed READY handshake before the host sends the
 ├── campaign2/
 │   ├── proxy.py                  # Sandboxed candidate worker IPC & host supervisor
 │   ├── manifest.py               # Preflight manifest & sealed evidence verifier
+│   ├── attempt_identity.py       # Sealed exact-attempt resume identity
+│   ├── durability.py             # Crash-recoverable exact-head checkpoints
+│   ├── orchestrator.py           # Randomized trials and task-labelled Schema 3 evidence
 │   ├── tier_assignment.py        # SHA-256 rejection sampling family-blocked tier assignment
 │   ├── scorer.py                 # Task scoring & evaluation utilities
 │   └── defects.py                # Benchmark task defect ladder verifier
@@ -78,7 +81,7 @@ The worker completes its RLIMIT-backed READY handshake before the host sends the
 
 ### Branch Topology & Verification
 
-The Campaign 2 implementation is maintained on branch `campaign2-work-order-a-rebuild` directly above pinned base commit `1abb708afc8dae8c90a2aa57e9f6d8a81a8a0bae`.
+Scientific launch remains blocked until an operator-reviewed launch lock authenticates the exact final Git commit.
 
 ### Run the test suite
 

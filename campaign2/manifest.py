@@ -1,7 +1,7 @@
 """
 Campaign 2 Manifest & Evidence Integrity Verification Module.
 
-Provides preflight manifest generation and verification for 128 Git-tracked Category 1 files,
+Provides preflight manifest generation and verification for 141 Git-tracked Category 1 files,
 sealed evidence manifest verification (4 required files), and strict read-only parity matrix verification.
 """
 
@@ -80,11 +80,12 @@ def _verify_exact_task_directories(workspace_root: str = BASE_DIR) -> None:
 
 def get_expected_frozen_inventory(workspace_root: str = BASE_DIR) -> List[str]:
     """
-    Returns list of exact 128 Category 1 Git-tracked files comprising frozen Campaign 2 benchmark & harness.
+    Returns the exact Category 1 Git-tracked files comprising the frozen Campaign 2 benchmark and runtime.
     Derived exclusively from hardcoded task IDs — no filesystem discovery.
     """
     inventory = [
         "README.md",
+        "rsi_loop.py",
         "run_tests.py",
         "docs/walkthrough.md",
         "campaign2/proxy.py",
@@ -97,6 +98,7 @@ def get_expected_frozen_inventory(workspace_root: str = BASE_DIR) -> List[str]:
         "campaign2/orchestrator.py",
         "campaign2/launch_lock.py",
         "campaign2/attempt_lifecycle.py",
+        "campaign2/attempt_identity.py",
         "campaign2/durability.py",
         "campaign2/reporting.py",
         "campaign2/ladder.py",
@@ -172,7 +174,7 @@ def verify_campaign2_manifest(workspace_root: str = BASE_DIR) -> Tuple[bool, int
     """
     STRICTLY READ-ONLY Verification of Preflight Manifest.
     Verifies that campaign2_preflight_hashes.json exists, is a regular file with mode 0o444,
-    no path component is a symlink, contains all 128 Category 1 files, and every file SHA256 matches.
+    no path component is a symlink, contains all 141 Category 1 files, and every file SHA256 matches.
     """
     _verify_exact_task_directories(workspace_root)
 
@@ -359,7 +361,7 @@ def compute_campaign2_parity_matrix(workspace_root: str = BASE_DIR) -> Dict[str,
 
         # 1. Reference solution
         direct_ref_earned, direct_ref_max = harness_mod.run_evaluation(sol_mod)
-        ipc_ref_earned, ipc_ref_max = evaluate_candidate_code_sandboxed(task_id, sol_code)
+        ipc_ref_earned, ipc_ref_max = evaluate_candidate_code_sandboxed(task_id, sol_code)[:2]
         if (direct_ref_earned, direct_ref_max) != (10, 10) or (ipc_ref_earned, ipc_ref_max) != (10, 10):
             raise RuntimeError(f"Reference solution for {task_id} failed 10/10 check")
 
@@ -398,7 +400,7 @@ def compute_campaign2_parity_matrix(workspace_root: str = BASE_DIR) -> Dict[str,
             cand_code = sol_code + "\n\n" + def_code + "\n\n" + aliases + "\n"
             def_code_hash = hashlib.sha256(cand_code.encode("utf-8")).hexdigest()
 
-            ipc_def_earned, ipc_def_max = evaluate_candidate_code_sandboxed(task_id, cand_code)
+            ipc_def_earned, ipc_def_max = evaluate_candidate_code_sandboxed(task_id, cand_code)[:2]
             if (direct_def_earned, direct_def_max) != (ipc_def_earned, ipc_def_max):
                 raise RuntimeError(f"Defect rung {idx} for {task_id} score mismatch: direct={direct_def_earned}, ipc={ipc_def_earned}")
 

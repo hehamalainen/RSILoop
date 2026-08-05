@@ -1,53 +1,47 @@
 """
-Campaign 2 Experiment Orchestrator Module.
+Campaign 2 Orchestrator Module.
 
-P0-3, P0-4, P0-6 — EXPERIMENT ORCHESTRATION ENGINE:
-- Complete per-trial execution loop with exact call arithmetic (202 for Suite C, 86 for Suite P).
-- Active arm assignment vector (+1/-1) wiring altering scheduling order and slot labeling.
-- Integrated AttemptLedger (intent-before-completion recording per model call).
-- Integrated CheckpointManager (trial-boundary intent sealing and completed head commits).
-- Resumption support starting at checkpoint resume_trial_index.
-- PromptEnvelope validation on all effective prompts and mutation outputs.
-- Trio adjacency verification across all Phase 3 microblock trios.
+Manages two-arm randomized strategy search across optimization, selection,
+confirmatory, and structural holdout task tiers.
+Integrates durability checkpointing, attempt ledger, prompt envelope protection,
+exact rational outcome arithmetic, equal-task weighted winner selection,
+and observable retries.
 """
 
 import os
-import sys
-import json
 import time
-import hashlib
-from fractions import Fraction
+import json
+import re
 from typing import Dict, Any, List, Tuple, Optional
-from datetime import datetime, timezone
+from fractions import Fraction
 
 from campaign2.model_provider import ModelProvider
 from campaign2.envelope import PromptEnvelope, PromptEnvelopeError
-from campaign2.scorer import (
-    task_score_fraction,
-    task_mean_over_k,
-    aggregate_tasks_equal_weight,
-    ScorerValidationError,
-)
-from campaign2.registration import (
-    verify_master_registration,
-    FROZEN_TRIO_ORDERINGS,
-    get_trio_ordering_index,
-)
-from campaign2.tier_assignment import (
-    EXPECTED_SUITE_C_TASK_IDS,
-    EXPECTED_SUITE_P_TASK_IDS,
-)
-from campaign2.attempt_lifecycle import AttemptLedger, CallFault
+from campaign2.attempt_lifecycle import AttemptLedger, classify_call_fault, CallFault
 from campaign2.durability import CheckpointManager
+from campaign2.registration import get_trio_ordering_index
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Suite parameters
+
+class OrchestratorError(RuntimeError):
+    """Base exception for orchestrator execution failures."""
+    pass
+
+
+class CallArithmeticError(OrchestratorError):
+    """Raised when call count arithmetic fails."""
+    pass
+
+
+class TrioAdjacencyError(OrchestratorError):
+    """Raised when microblock trio adjacency requirements are violated."""
+    pass
+
+
 SUITE_C_PARAMS = {
-    "name": "suite_c",
     "num_trials": 10,
-    "k": 2,
-    "mutation_rounds": 3,
+    "mutations_per_arm": 3,
     "expected_phase1_calls": 16,
     "expected_phase2_calls": 102,
     "expected_phase3_calls": 84,
@@ -55,49 +49,31 @@ SUITE_C_PARAMS = {
 }
 
 SUITE_P_PARAMS = {
-    "name": "suite_p",
     "num_trials": 2,
-    "k": 2,
-    "mutation_rounds": 3,
+    "mutations_per_arm": 3,
     "expected_phase1_calls": 8,
     "expected_phase2_calls": 54,
     "expected_phase3_calls": 24,
     "expected_total_calls": 86,
 }
 
-INITIAL_MUTABLE_BODY = "Follow good software engineering practices. Handle edge cases carefully."
-
-CONTROL_REFORMULATION_TEXT = (
-    "Rewrite the strategy section of this prompt using different wording.\n"
-    "Do not change the meaning or intent. Keep it concise."
-)
-
-
-class OrchestratorError(RuntimeError):
-    """Raised when the orchestrator detects an invariant violation."""
-    pass
-
-
-class CallArithmeticError(OrchestratorError):
-    """Raised when per-trial call count does not match expected arithmetic."""
-    pass
-
-
-class TrioAdjacencyError(OrchestratorError):
-    """Raised when a microblock trio is interrupted by an unrelated call."""
-    pass
-
 
 class CallRecord:
-    """Record of a single model or evaluation call."""
-    __slots__ = ('call_id', 'call_type', 'arm', 'phase', 'task_id',
-                 'replicate', 'trio_slot', 'trio_position', 'tokens',
-                 'earned', 'max_score', 'timestamp', 'round_index', 'prompt_hash')
+    """Record of a single model call and its evaluation outcome."""
+    __slots__ = (
+        'call_id', 'call_type', 'arm', 'phase', 'task_id',
+        'replicate', 'trio_slot', 'trio_position', 'tokens',
+        'earned', 'max_score', 'round_index', 'prompt_hash', 'error_trace',
+        'was_improving', 'is_valid',
+    )
 
-    def __init__(self, call_id: str, call_type: str, arm: str, phase: int,
-                 task_id: str = "", replicate: int = -1, trio_slot: str = "",
-                 trio_position: int = -1, tokens: int = 0, earned: int = -1,
-                 max_score: int = -1, round_index: int = -1, prompt_hash: str = ""):
+    def __init__(
+        self, call_id: str, call_type: str, arm: str, phase: int,
+        task_id: str = "", replicate: int = -1, trio_slot: str = "",
+        trio_position: int = -1, tokens: int = 0, earned: int = -1,
+        max_score: int = -1, round_index: int = -1, prompt_hash: str = "",
+        error_trace: str = "", was_improving: bool = False, is_valid: bool = True,
+    ):
         self.call_id = call_id
         self.call_type = call_type
         self.arm = arm
@@ -109,9 +85,11 @@ class CallRecord:
         self.tokens = tokens
         self.earned = earned
         self.max_score = max_score
-        self.timestamp = time.time()
         self.round_index = round_index
         self.prompt_hash = prompt_hash
+        self.error_trace = error_trace
+        self.was_improving = was_improving
+        self.is_valid = is_valid
 
     def to_dict(self) -> dict:
         return {k: getattr(self, k) for k in self.__slots__}
@@ -123,21 +101,24 @@ class TrialResult:
     def __init__(self, trial_index: int, trial_id: str, arm_sign: int):
         self.trial_index = trial_index
         self.trial_id = trial_id
-        self.arm_sign = arm_sign  # +1 or -1
+        self.arm_sign = arm_sign
         self.call_records: List[CallRecord] = []
         self.phase1_scores: Dict[str, List[Tuple[int, int]]] = {}
         self.phase2_arm_scores: Dict[str, Dict[str, List[Tuple[int, int]]]] = {
-            "optimizer": {},
-            "control": {},
+            "slot_a": {},
+            "slot_b": {},
         }
         self.phase2_winner: str = ""
         self.phase3_trio_scores: Dict[str, Dict[str, List[Tuple[int, int]]]] = {
             "baseline": {},
-            "optimizer_winner": {},
-            "control_winner": {},
+            "slot_a_winner": {},
+            "slot_b_winner": {},
         }
+        self.slot_a_mutable_body: str = ""
+        self.slot_b_mutable_body: str = ""
         self.optimizer_mutable_body: str = ""
         self.control_mutable_body: str = ""
+        self.best_opt_depth: int = 0
         self.total_tokens: int = 0
         self.started_at: float = 0.0
         self.finished_at: float = 0.0
@@ -145,25 +126,105 @@ class TrialResult:
     def model_call_count(self) -> int:
         return len([r for r in self.call_records if r.call_type in ("generate", "mutate")])
 
+    def to_dict(self) -> dict:
+        return {
+            "trial_index": self.trial_index,
+            "trial_id": self.trial_id,
+            "arm_sign": self.arm_sign,
+            "call_records": [r.to_dict() for r in self.call_records],
+            "phase1_scores": {k: [list(p) for p in v] for k, v in self.phase1_scores.items()},
+            "phase2_arm_scores": {
+                arm: {k: [list(p) for p in v] for k, v in tasks.items()}
+                for arm, tasks in self.phase2_arm_scores.items()
+            },
+            "phase2_winner": self.phase2_winner,
+            "phase3_trio_scores": {
+                slot: {k: [list(p) for p in v] for k, v in tasks.items()}
+                for slot, tasks in self.phase3_trio_scores.items()
+            },
+            "slot_a_mutable_body": self.slot_a_mutable_body,
+            "slot_b_mutable_body": self.slot_b_mutable_body,
+            "optimizer_mutable_body": self.optimizer_mutable_body,
+            "control_mutable_body": self.control_mutable_body,
+            "best_opt_depth": self.best_opt_depth,
+            "total_tokens": self.total_tokens,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TrialResult":
+        res = cls(data["trial_index"], data["trial_id"], data["arm_sign"])
+        res.phase2_winner = data.get("phase2_winner", "")
+        res.slot_a_mutable_body = data.get("slot_a_mutable_body", "")
+        res.slot_b_mutable_body = data.get("slot_b_mutable_body", "")
+        res.optimizer_mutable_body = data.get("optimizer_mutable_body", "")
+        res.control_mutable_body = data.get("control_mutable_body", "")
+        res.best_opt_depth = data.get("best_opt_depth", 0)
+        res.total_tokens = data.get("total_tokens", 0)
+        res.started_at = data.get("started_at", 0.0)
+        res.finished_at = data.get("finished_at", 0.0)
+
+        res.phase1_scores = {
+            k: [tuple(p) for p in v]
+            for k, v in data.get("phase1_scores", {}).items()
+        }
+        res.phase2_arm_scores = {
+            arm: {k: [tuple(p) for p in v] for k, v in tasks.items()}
+            for arm, tasks in data.get("phase2_arm_scores", {}).items()
+        }
+        res.phase3_trio_scores = {
+            slot: {k: [tuple(p) for p in v] for k, v in tasks.items()}
+            for slot, tasks in data.get("phase3_trio_scores", {}).items()
+        }
+        for r_dict in data.get("call_records", []):
+            rec = CallRecord(
+                call_id=r_dict.get("call_id", ""),
+                call_type=r_dict.get("call_type", ""),
+                arm=r_dict.get("arm", ""),
+                phase=r_dict.get("phase", 0),
+                task_id=r_dict.get("task_id", ""),
+                replicate=r_dict.get("replicate", -1),
+                trio_slot=r_dict.get("trio_slot", ""),
+                trio_position=r_dict.get("trio_position", -1),
+                tokens=r_dict.get("tokens", 0),
+                earned=r_dict.get("earned", -1),
+                max_score=r_dict.get("max_score", -1),
+                round_index=r_dict.get("round_index", -1),
+                prompt_hash=r_dict.get("prompt_hash", ""),
+                error_trace=r_dict.get("error_trace", ""),
+                was_improving=r_dict.get("was_improving", False),
+                is_valid=r_dict.get("is_valid", True),
+            )
+            res.call_records.append(rec)
+        return res
+
 
 class ExploratoryTracker:
     """Tracks the 4 pre-registered exploratory secondary metrics."""
 
     def __init__(self):
-        self.mutations_total = 0
+        self.optimizer_mutations_total = 0
         self.score_improving_mutations = 0
         self.total_output_tokens = 0
         self.valid_candidates = 0
         self.total_candidates = 0
         self.best_depth_per_trial: List[int] = []
 
-    def record_mutation_outcome(self, improved: bool):
-        self.mutations_total += 1
+    def record_optimizer_mutation(self, improved: bool, tokens: int = 0):
+        self.optimizer_mutations_total += 1
         if improved:
             self.score_improving_mutations += 1
+        if tokens > 0:
+            self.total_output_tokens += tokens
+
+    def record_control_mutation(self, tokens: int = 0):
+        if tokens > 0:
+            self.total_output_tokens += tokens
 
     def record_generation(self, tokens: int, valid: bool):
-        self.total_output_tokens += tokens
+        if tokens > 0:
+            self.total_output_tokens += tokens
         self.total_candidates += 1
         if valid:
             self.valid_candidates += 1
@@ -174,8 +235,8 @@ class ExploratoryTracker:
     def summary(self) -> dict:
         return {
             "score_improving_mutations_per_call": (
-                f"{self.score_improving_mutations}/{self.mutations_total}"
-                if self.mutations_total > 0 else "0/0"
+                f"{self.score_improving_mutations}/{self.optimizer_mutations_total}"
+                if self.optimizer_mutations_total > 0 else "0/0"
             ),
             "improvement_per_1000_tokens": (
                 f"{self.score_improving_mutations / (self.total_output_tokens / 1000):.4f}"
@@ -192,7 +253,7 @@ class ExploratoryTracker:
 class Campaign2Orchestrator:
     """
     Full Campaign 2 experiment engine with integrated ledger, durability,
-    arm assignment randomization, and prompt envelope validation.
+    arm assignment randomization, and prompt envelope protection.
     """
 
     def __init__(
@@ -217,7 +278,7 @@ class Campaign2Orchestrator:
         self.suite = suite
         self.params = SUITE_C_PARAMS if suite == "suite_c" else SUITE_P_PARAMS
         self.workspace_root = workspace_root
-        self.envelope = PromptEnvelope()
+        self.envelope = PromptEnvelope(master_registration_data=registration)
 
         # Load tier assignments
         assignments = tier_assignment["set_assignments"]
@@ -240,7 +301,11 @@ class Campaign2Orchestrator:
         self.trio_orderings = [tuple(t) for t in registration["frozen_trio_orderings"]]
 
         self.trial_results: List[TrialResult] = []
-        self.call_counter = 0
+        if self.ledger and hasattr(self.ledger, "_max_call_counter") and self.ledger._max_call_counter > 0:
+            self.call_counter = self.ledger._max_call_counter
+        else:
+            self.call_counter = 0
+
         self.exploratory = ExploratoryTracker()
 
     def _next_call_id(self, prefix: str) -> str:
@@ -252,36 +317,45 @@ class Campaign2Orchestrator:
         replicate: int, trio_slot: str = "", trio_position: int = -1,
         round_index: int = -1,
     ) -> Tuple[int, int, int, CallRecord]:
-        """Generate candidate code and evaluate it with ledger & envelope protection."""
         call_id = self._next_call_id(f"gen_{arm}_{task_id}_r{replicate}")
         effective_prompt, prompt_hash = self.envelope.build_effective_prompt(mutable_body)
 
-        # 1. Record Intent BEFORE model call
-        if self.ledger:
-            self.ledger.record_intent(call_id, "generate", arm, phase, task_id, {"prompt_hash": prompt_hash})
-
-        # 2. Make Model Call
-        try:
-            code, tokens = self.model.generate_candidate(task_id, effective_prompt, call_id)
-        except Exception as e:
+        max_attempts = 3
+        code, tokens = "", 0
+        for attempt in range(1, max_attempts + 1):
             if self.ledger:
-                self.ledger.record_completion(call_id, False, 0, fault=CallFault("generation_error", False, str(e), type(e).__name__))
-            raise
+                self.ledger.record_intent(call_id, "generate", arm, phase, task_id, {"prompt_hash": prompt_hash, "attempt": attempt})
+            try:
+                code, tokens = self.model.generate_candidate(task_id, effective_prompt, call_id)
+                if self.ledger:
+                    self.ledger.record_completion(call_id, True, tokens)
+                break
+            except Exception as e:
+                bytes_sent = getattr(e, "bytes_sent", None)
+                bytes_received = getattr(e, "bytes_received", None)
+                fault = classify_call_fault(e, bytes_sent=bytes_sent, bytes_received=bytes_received)
+                if self.ledger:
+                    self.ledger.record_completion(call_id, False, 0, fault=fault)
+                if fault.retryable and attempt < max_attempts:
+                    time.sleep(0.1 * (2 ** (attempt - 1)))
+                    continue
+                raise OrchestratorError(f"Generation call {call_id} failed on attempt {attempt}: {e}") from e
 
-        # 3. Evaluate Candidate Code
-        earned, max_s = self.evaluator.evaluate(task_id, code)
+        evaluation = self.evaluator.evaluate(task_id, code)
+        if not isinstance(evaluation, tuple) or len(evaluation) not in (2, 3, 4):
+            raise OrchestratorError("Task evaluator must return (earned, max), (earned, max, is_valid), or (earned, max, is_valid, error_trace)")
+        earned, max_s = evaluation[:2]
+        is_valid = bool(evaluation[2]) if len(evaluation) >= 3 else True
+        error_trace = str(evaluation[3]) if len(evaluation) >= 4 else (str(evaluation[2]) if len(evaluation) == 3 and isinstance(evaluation[2], str) else "")
 
-        # 4. Record Completion AFTER model call
-        if self.ledger:
-            self.ledger.record_completion(call_id, True, tokens)
-
-        self.exploratory.record_generation(tokens, earned > 0)
+        self.exploratory.record_generation(tokens, is_valid)
 
         record = CallRecord(
             call_id=call_id, call_type="generate", arm=arm, phase=phase,
             task_id=task_id, replicate=replicate, trio_slot=trio_slot,
             trio_position=trio_position, tokens=tokens, earned=earned,
             max_score=max_s, round_index=round_index, prompt_hash=prompt_hash,
+            error_trace=error_trace, is_valid=is_valid,
         )
         return earned, max_s, tokens, record
 
@@ -289,208 +363,181 @@ class Campaign2Orchestrator:
         self, mutable_body: str, failure_context: str, arm: str, phase: int,
         round_index: int,
     ) -> Tuple[str, int, CallRecord]:
-        """Mutate prompt body with envelope validation & ledger tracking."""
         call_id = self._next_call_id(f"mut_{arm}_r{round_index}")
 
-        # 1. Record Intent BEFORE model call
-        if self.ledger:
-            self.ledger.record_intent(call_id, "mutate", arm, phase, metadata={"round_index": round_index})
-
-        # 2. Make Model Call
-        try:
-            raw_new_body, tokens = self.model.mutate_prompt(mutable_body, failure_context, call_id)
-        except Exception as e:
+        max_attempts = 3
+        new_body, tokens = "", 0
+        for attempt in range(1, max_attempts + 1):
             if self.ledger:
-                self.ledger.record_completion(call_id, False, 0, fault=CallFault("mutation_error", False, str(e), type(e).__name__))
-            raise
-
-        # 3. Validate Envelope Integrity
-        clean_new_body = self.envelope.validate_mutation_output(raw_new_body)
-
-        # 4. Record Completion AFTER model call
-        if self.ledger:
-            self.ledger.record_completion(call_id, True, tokens)
+                self.ledger.record_intent(call_id, "mutate", arm, phase, metadata={"round_index": round_index, "attempt": attempt})
+            try:
+                new_body, tokens = self.model.mutate_prompt(mutable_body, failure_context, call_id)
+                new_body = self.envelope.validate_mutation_output(new_body)
+                if self.ledger:
+                    self.ledger.record_completion(call_id, True, tokens)
+                break
+            except Exception as e:
+                bytes_sent = getattr(e, "bytes_sent", None)
+                bytes_received = getattr(e, "bytes_received", None)
+                fault = classify_call_fault(e, bytes_sent=bytes_sent, bytes_received=bytes_received)
+                if self.ledger:
+                    self.ledger.record_completion(call_id, False, 0, fault=fault)
+                if fault.retryable and attempt < max_attempts:
+                    time.sleep(0.1 * (2 ** (attempt - 1)))
+                    continue
+                raise OrchestratorError(f"Mutation call {call_id} failed on attempt {attempt}: {e}") from e
 
         record = CallRecord(
             call_id=call_id, call_type="mutate", arm=arm, phase=phase,
-            round_index=round_index, tokens=tokens,
+            tokens=tokens, round_index=round_index,
         )
-        return clean_new_body, tokens, record
-
-    def _evaluate_prompt_on_tasks(
-        self, tasks: List[str], mutable_body: str, arm: str, phase: int,
-        round_index: int = -1,
-    ) -> Tuple[Dict[str, List[Tuple[int, int]]], List[CallRecord], int]:
-        """Evaluate a prompt across tasks with k replicates."""
-        k = self.params["k"]
-        scores: Dict[str, List[Tuple[int, int]]] = {}
-        records: List[CallRecord] = []
-        total_tokens = 0
-
-        for task_id in tasks:
-            task_pairs = []
-            for rep in range(k):
-                earned, max_s, tokens, record = self._generate_and_evaluate(
-                    task_id, mutable_body, arm, phase, rep,
-                    round_index=round_index,
-                )
-                task_pairs.append((earned, max_s))
-                records.append(record)
-                total_tokens += tokens
-            scores[task_id] = task_pairs
-
-        return scores, records, total_tokens
-
-    def _compute_aggregate_score(self, task_scores: Dict[str, List[Tuple[int, int]]]) -> Fraction:
-        """Compute equal-weighted aggregate score across tasks."""
-        task_means = []
-        for task_id in sorted(task_scores.keys()):
-            pairs = task_scores[task_id]
-            mean = task_mean_over_k(pairs)
-            task_means.append(mean)
-        return aggregate_tasks_equal_weight(task_means)
-
-    def _collect_failure_traces(
-        self, task_scores: Dict[str, List[Tuple[int, int]]], mutable_body: str
-    ) -> str:
-        """Collect failure context for optimizer arm mutation."""
-        failures = []
-        for task_id in sorted(task_scores.keys()):
-            for rep_idx, (earned, max_s) in enumerate(task_scores[task_id]):
-                if earned < max_s:
-                    failures.append(
-                        f"--- Task: {task_id}, Replicate: {rep_idx} ---\n"
-                        f"Score: {earned}/{max_s}\n"
-                    )
-        if not failures:
-            return ""
-        return "Failed Tasks:\n" + "\n".join(failures)
+        return new_body, tokens, record
 
     def run_trial(self, trial_index: int) -> TrialResult:
-        """Execute a complete trial using registered arm_sign (+1/-1)."""
+        """Execute a single trial with equal-task weighted winner selection and counterbalanced arm scheduling."""
+        arm_sign = self.arm_vectors[trial_index]
         trial_id = f"trial_{trial_index + 1}"
-        arm_sign = self.arm_vectors[trial_index]  # +1 or -1
         result = TrialResult(trial_index, trial_id, arm_sign)
         result.started_at = time.time()
 
-        k = self.params["k"]
-        mr = self.params["mutation_rounds"]
+        baseline_body = "# Initial default strategy body\n"
+        k = 2
 
-        # ---- PHASE 1: Pre-mutation baseline on opt+sel ----
-        baseline_body = INITIAL_MUTABLE_BODY
-        phase1_scores, phase1_records, phase1_tokens = self._evaluate_prompt_on_tasks(
-            self.opt_sel_tasks, baseline_body, "baseline", phase=1,
-        )
-        result.phase1_scores = phase1_scores
-        result.call_records.extend(phase1_records)
-        result.total_tokens += phase1_tokens
+        # ---- PHASE 1: Baseline evaluation on opt/sel tasks ----
+        phase1_call_count = 0
+        for task_id in self.opt_sel_tasks:
+            result.phase1_scores[task_id] = []
+            for rep in range(k):
+                earned, max_s, tokens, record = self._generate_and_evaluate(
+                    task_id, baseline_body, arm="baseline", phase=1, replicate=rep,
+                )
+                result.phase1_scores[task_id].append((earned, max_s))
+                result.call_records.append(record)
+                result.total_tokens += tokens
+                phase1_call_count += 1
 
-        phase1_call_count = len(phase1_records)
         if phase1_call_count != self.params["expected_phase1_calls"]:
             raise CallArithmeticError(
                 f"Trial {trial_id} Phase 1: expected {self.params['expected_phase1_calls']} "
                 f"calls, got {phase1_call_count}"
             )
 
-        # ---- PHASE 2: 3 mutation rounds + selection ----
-        opt_body = baseline_body
-        ctrl_body = baseline_body
-        best_opt_score = self._compute_aggregate_score(phase1_scores)
-        best_ctrl_score = best_opt_score
-        best_opt_body = opt_body
-        best_ctrl_body = ctrl_body
-        best_opt_depth = 0
-        best_ctrl_depth = 0
+        # ---- EQUAL-TASK WEIGHTED BASELINE FRACTION COMPUTATION ----
+        # Calculate task mean for each task, then take unweighted average across tasks
+        p1_task_means = [
+            sum(Fraction(e, m) for e, m in result.phase1_scores[t]) / Fraction(k)
+            for t in self.opt_sel_tasks
+        ]
+        initial_baseline_frac = sum(p1_task_means) / Fraction(len(p1_task_means))
+
+        # ---- PHASE 2: Strategy Search (Counterbalanced Arm Scheduling) ----
+        # Arm execution order: slot_a runs 1st, slot_b runs 2nd.
+        # Under arm_sign == +1: slot_a = Optimizer, slot_b = Control (Optimizer 1st)
+        # Under arm_sign == -1: slot_a = Control, slot_b = Optimizer (Control 1st)
+        slots = ["slot_a", "slot_b"]
+
         phase2_call_count = 0
+        best_opt_body = baseline_body
+        best_ctrl_body = baseline_body
 
-        # P0-4: Active arm assignment vector wiring
-        # When arm_sign == +1: Arm A = Optimizer, Arm B = Control
-        # When arm_sign == -1: Arm A = Control, Arm B = Optimizer
-        for round_idx in range(mr):
-            if arm_sign == +1:
-                # 1. Mutate Optimizer (Arm A)
-                failure_ctx = self._collect_failure_traces(phase1_scores if round_idx == 0 else opt_scores, opt_body)
-                new_opt_body, opt_mut_tokens, opt_mut_rec = self._mutate_prompt_with_envelope(
-                    opt_body, failure_ctx, "optimizer", phase=2, round_index=round_idx
+        best_opt_frac = initial_baseline_frac
+        best_ctrl_frac = initial_baseline_frac
+        best_opt_depth = 0
+
+        slot_bodies = {"slot_a": baseline_body, "slot_b": baseline_body}
+        slot_scores = {
+            "slot_a": dict(result.phase1_scores),
+            "slot_b": dict(result.phase1_scores),
+        }
+
+        for slot in slots:
+            is_optimizer_arm = (slot == "slot_a" and arm_sign == 1) or (slot == "slot_b" and arm_sign == -1)
+            current_body = baseline_body
+            current_best_frac = initial_baseline_frac
+            last_round_scores = dict(result.phase1_scores)
+            last_round_errors = {
+                task_id: [
+                    rec.error_trace for rec in result.call_records
+                    if rec.phase == 1 and rec.task_id == task_id and rec.error_trace
+                ]
+                for task_id in self.opt_sel_tasks
+            }
+
+            for rnd in range(1, self.params["mutations_per_arm"] + 1):
+                if is_optimizer_arm:
+                    failed = []
+                    for task_id, pairs in last_round_scores.items():
+                        earned_total = sum(e for e, _m in pairs)
+                        max_total = sum(m for _e, m in pairs)
+                        if earned_total < max_total:
+                            traces = last_round_errors.get(task_id, [])
+                            trace_text = " | ".join(traces) if traces else "no evaluator trace supplied"
+                            failed.append(
+                                f"{task_id}: score {earned_total}/{max_total}; errors: {trace_text}"
+                            )
+                    fail_ctx = (
+                        f"Round {rnd-1} feedback (aggregate {current_best_frac:.4f}):\n"
+                        + "\n".join(failed)
+                    )
+                else:
+                    # Control arm receives registered CONTROL_REFORMULATION_TEXT
+                    fail_ctx = self.envelope.control_reformulation_text
+
+                new_body, mut_tokens, mut_record = self._mutate_prompt_with_envelope(
+                    current_body, fail_ctx, arm=slot, phase=2, round_index=rnd,
                 )
-                result.call_records.append(opt_mut_rec)
-                result.total_tokens += opt_mut_tokens
+                result.call_records.append(mut_record)
+                result.total_tokens += mut_tokens
                 phase2_call_count += 1
 
-                # 2. Mutate Control (Arm B)
-                new_ctrl_body, ctrl_mut_tokens, ctrl_mut_rec = self._mutate_prompt_with_envelope(
-                    ctrl_body, CONTROL_REFORMULATION_TEXT, "control", phase=2, round_index=round_idx
-                )
-                result.call_records.append(ctrl_mut_rec)
-                result.total_tokens += ctrl_mut_tokens
-                phase2_call_count += 1
+                rnd_scores = {}
+                rnd_errors = {}
+                for task_id in self.opt_sel_tasks:
+                    rnd_scores[task_id] = []
+                    rnd_errors[task_id] = []
+                    for rep in range(k):
+                        earned, max_s, tokens, record = self._generate_and_evaluate(
+                            task_id, new_body, arm=slot, phase=2, replicate=rep, round_index=rnd,
+                        )
+                        rnd_scores[task_id].append((earned, max_s))
+                        result.call_records.append(record)
+                        if record.error_trace:
+                            rnd_errors[task_id].append(record.error_trace)
+                        result.total_tokens += tokens
+                        phase2_call_count += 1
 
-                # 3. Evaluate Optimizer (Arm A)
-                opt_scores, opt_recs, opt_tokens = self._evaluate_prompt_on_tasks(
-                    self.opt_sel_tasks, new_opt_body, "optimizer", phase=2, round_index=round_idx
-                )
-                result.call_records.extend(opt_recs)
-                result.total_tokens += opt_tokens
-                phase2_call_count += len(opt_recs)
+                last_round_scores = rnd_scores
+                last_round_errors = rnd_errors
 
-                # 4. Evaluate Control (Arm B)
-                ctrl_scores, ctrl_recs, ctrl_tokens = self._evaluate_prompt_on_tasks(
-                    self.opt_sel_tasks, new_ctrl_body, "control", phase=2, round_index=round_idx
-                )
-                result.call_records.extend(ctrl_recs)
-                result.total_tokens += ctrl_tokens
-                phase2_call_count += len(ctrl_recs)
-            else:
-                # arm_sign == -1: Swap execution order (Arm A = Control, Arm B = Optimizer)
-                # 1. Mutate Control (Arm A)
-                new_ctrl_body, ctrl_mut_tokens, ctrl_mut_rec = self._mutate_prompt_with_envelope(
-                    ctrl_body, CONTROL_REFORMULATION_TEXT, "control", phase=2, round_index=round_idx
-                )
-                result.call_records.append(ctrl_mut_rec)
-                result.total_tokens += ctrl_mut_tokens
-                phase2_call_count += 1
+                # EQUAL-TASK WEIGHTED ROUND EVALUATION
+                rnd_task_means = [
+                    sum(Fraction(e, m) for e, m in rnd_scores[t]) / Fraction(k)
+                    for t in self.opt_sel_tasks
+                ]
+                rnd_frac = sum(rnd_task_means) / Fraction(len(rnd_task_means))
 
-                # 2. Mutate Optimizer (Arm B)
-                failure_ctx = self._collect_failure_traces(phase1_scores if round_idx == 0 else opt_scores, opt_body)
-                new_opt_body, opt_mut_tokens, opt_mut_rec = self._mutate_prompt_with_envelope(
-                    opt_body, failure_ctx, "optimizer", phase=2, round_index=round_idx
-                )
-                result.call_records.append(opt_mut_rec)
-                result.total_tokens += opt_mut_tokens
-                phase2_call_count += 1
+                if is_optimizer_arm:
+                    improved = rnd_frac > current_best_frac
+                    mut_record.was_improving = improved
+                    self.exploratory.record_optimizer_mutation(improved, mut_tokens)
+                    if improved:
+                        current_best_frac = rnd_frac
+                        current_body = new_body
+                        best_opt_body = new_body
+                        best_opt_frac = rnd_frac
+                        best_opt_depth = rnd
+                        slot_scores[slot] = rnd_scores
+                else:
+                    mut_record.was_improving = False
+                    self.exploratory.record_control_mutation(mut_tokens)
+                    if rnd_frac > current_best_frac:
+                        current_best_frac = rnd_frac
+                        current_body = new_body
+                        best_ctrl_body = new_body
+                        best_ctrl_frac = rnd_frac
+                        slot_scores[slot] = rnd_scores
 
-                # 3. Evaluate Control (Arm A)
-                ctrl_scores, ctrl_recs, ctrl_tokens = self._evaluate_prompt_on_tasks(
-                    self.opt_sel_tasks, new_ctrl_body, "control", phase=2, round_index=round_idx
-                )
-                result.call_records.extend(ctrl_recs)
-                result.total_tokens += ctrl_tokens
-                phase2_call_count += len(ctrl_recs)
-
-                # 4. Evaluate Optimizer (Arm B)
-                opt_scores, opt_recs, opt_tokens = self._evaluate_prompt_on_tasks(
-                    self.opt_sel_tasks, new_opt_body, "optimizer", phase=2, round_index=round_idx
-                )
-                result.call_records.extend(opt_recs)
-                result.total_tokens += opt_tokens
-                phase2_call_count += len(opt_recs)
-
-            # Score tracking for both arms
-            opt_score = self._compute_aggregate_score(opt_scores)
-            self.exploratory.record_mutation_outcome(opt_score > best_opt_score)
-            if opt_score > best_opt_score:
-                best_opt_score = opt_score
-                best_opt_body = new_opt_body
-                best_opt_depth = round_idx + 1
-            opt_body = new_opt_body
-
-            ctrl_score = self._compute_aggregate_score(ctrl_scores)
-            self.exploratory.record_mutation_outcome(ctrl_score > best_ctrl_score)
-            if ctrl_score > best_ctrl_score:
-                best_ctrl_score = ctrl_score
-                best_ctrl_body = new_ctrl_body
-                best_ctrl_depth = round_idx + 1
-            ctrl_body = new_ctrl_body
+                slot_bodies[slot] = current_body
 
         if phase2_call_count != self.params["expected_phase2_calls"]:
             raise CallArithmeticError(
@@ -498,23 +545,31 @@ class Campaign2Orchestrator:
                 f"calls, got {phase2_call_count}"
             )
 
-        if best_opt_score >= best_ctrl_score:
-            result.phase2_winner = "optimizer"
+        if best_opt_frac >= best_ctrl_frac:
+            result.phase2_winner = "slot_a" if arm_sign == 1 else "slot_b"
         else:
-            result.phase2_winner = "control"
+            result.phase2_winner = "slot_b" if arm_sign == 1 else "slot_a"
 
-        result.optimizer_mutable_body = best_opt_body
-        result.control_mutable_body = best_ctrl_body
+        result.slot_a_mutable_body = slot_bodies["slot_a"]
+        result.slot_b_mutable_body = slot_bodies["slot_b"]
+
+        if arm_sign == 1:
+            result.optimizer_mutable_body = slot_bodies["slot_a"]
+            result.control_mutable_body = slot_bodies["slot_b"]
+        else:
+            result.optimizer_mutable_body = slot_bodies["slot_b"]
+            result.control_mutable_body = slot_bodies["slot_a"]
+
         self.exploratory.record_best_depth(best_opt_depth)
-
-        result.phase2_arm_scores["optimizer"] = opt_scores
-        result.phase2_arm_scores["control"] = ctrl_scores
+        result.best_opt_depth = best_opt_depth
+        result.phase2_arm_scores["slot_a"] = slot_scores["slot_a"]
+        result.phase2_arm_scores["slot_b"] = slot_scores["slot_b"]
 
         # ---- PHASE 3: Post-selection microblock trios on conf+holdout ----
-        slot_bodies = {
+        trio_bodies = {
             "baseline": baseline_body,
-            "optimizer_winner": best_opt_body,
-            "control_winner": best_ctrl_body,
+            "slot_a_winner": slot_bodies["slot_a"],
+            "slot_b_winner": slot_bodies["slot_b"],
         }
 
         phase3_call_count = 0
@@ -526,7 +581,7 @@ class Campaign2Orchestrator:
 
                 trio_records = []
                 for position, slot_name in enumerate(ordering):
-                    body = slot_bodies[slot_name]
+                    body = trio_bodies[slot_name]
                     earned, max_s, tokens, record = self._generate_and_evaluate(
                         task_id, body, slot_name, phase=3, replicate=rep,
                         trio_slot=slot_name, trio_position=position,
@@ -565,139 +620,247 @@ class Campaign2Orchestrator:
 
     def run_all_trials(self) -> List[TrialResult]:
         """
-        Execute trials with resumption support via CheckpointManager.
-        Resumes from start_trial_index if an existing checkpoint is loaded.
+        Execute trials with exact-head durability resumption support.
+        Reconstructs exploratory metrics state from loaded trial results.
         """
         start_trial_index = 0
         if self.checkpoint_mgr:
             start_trial_index = self.checkpoint_mgr.get_resume_trial_index()
+            completed = self.checkpoint_mgr.get_completed_results()
+            for res_dict in completed:
+                if isinstance(res_dict, dict) and "trial_index" in res_dict:
+                    t_res = TrialResult.from_dict(res_dict)
+                    if not any(r.trial_index == t_res.trial_index for r in self.trial_results):
+                        self.trial_results.append(t_res)
+
+                        self.exploratory.record_best_depth(t_res.best_opt_depth)
+                        opt_slot = "slot_a" if t_res.arm_sign == 1 else "slot_b"
+                        for r in t_res.call_records:
+                            if r.call_type == "generate":
+                                self.exploratory.record_generation(r.tokens, getattr(r, "is_valid", True))
+                            elif r.call_type == "mutate":
+                                if r.arm == opt_slot:
+                                    was_imp = getattr(r, "was_improving", False)
+                                    self.exploratory.record_optimizer_mutation(was_imp, r.tokens)
+                                else:
+                                    self.exploratory.record_control_mutation(r.tokens)
 
         num_trials = self.params["num_trials"]
-        results = []
+        results = list(self.trial_results)
 
         for trial_idx in range(start_trial_index, num_trials):
-            # 1. Seal intent BEFORE trial execution
             if self.checkpoint_mgr:
-                self.checkpoint_mgr.seal_checkpoint_intent(trial_idx, {"arm_sign": self.arm_vectors[trial_idx]})
+                self.checkpoint_mgr.seal_pre_trial_intent(trial_idx, {"arm_sign": self.arm_vectors[trial_idx]})
 
-            # 2. Run Trial
             result = self.run_trial(trial_idx)
             results.append(result)
 
-            # 3. Commit completed head AFTER trial execution
             if self.checkpoint_mgr:
-                summary = {
-                    "trial_id": result.trial_id,
-                    "arm_sign": result.arm_sign,
-                    "winner": result.phase2_winner,
-                    "tokens": result.total_tokens,
-                }
-                self.checkpoint_mgr.commit_checkpoint_head(trial_idx, summary)
+                self.checkpoint_mgr.commit_checkpoint_head(trial_idx, result.to_dict())
 
         return results
 
+    def verify_trio_adjacency(self) -> bool:
+        """Verify that microblock trios in Phase 3 are strictly adjacent in call sequence."""
+        for result in self.trial_results:
+            p3_calls = [r for r in result.call_records if r.phase == 3]
+            if len(p3_calls) % 3 != 0:
+                raise TrioAdjacencyError(f"Trial {result.trial_id} Phase 3 call count {len(p3_calls)} is not a multiple of 3")
+            for i in range(0, len(p3_calls), 3):
+                trio = p3_calls[i:i+3]
+                slots = {r.trio_slot for r in trio}
+                if len(slots) != 3:
+                    raise TrioAdjacencyError(f"Trio at index {i} in trial {result.trial_id} does not contain 3 distinct slots: {slots}")
+        return True
+
     def compute_outcome(self) -> Dict[str, Any]:
-        """Compute Schema 3 experiment outcome."""
+        """Compute Schema 3 experiment outcome with equal-task weighted exact rational arithmetic."""
         if not self.trial_results:
             raise OrchestratorError("No trials have been executed")
 
-        slot_trial_aggregates = {
-            "baseline": [],
-            "optimizer_winner": [],
-            "control_winner": [],
+        opt_sel_baseline_fracs = []
+        conf_baseline_fracs = []
+        conf_holdout_baseline_fracs = []
+
+        opt_sel_opt_fracs = []
+        opt_sel_ctrl_fracs = []
+
+        conf_holdout_opt_fracs = []
+        conf_holdout_ctrl_fracs = []
+
+        all_16_opt_sel_fracs = []
+        conf_task_set = set(self.conf_tasks)
+        family_samples = {
+            f"F{index}": {"task_ids": set(), "optimizer_samples": [], "control_samples": []}
+            for index in range(1, 5)
         }
 
+        def family_of(task_id: str) -> str:
+            match = re.match(r"^[cp]_f([1-4])_", task_id)
+            if not match:
+                raise OrchestratorError(f"Task id does not encode a structural family: {task_id}")
+            return f"F{match.group(1)}"
+
         for result in self.trial_results:
-            for slot_name in ("baseline", "optimizer_winner", "control_winner"):
-                slot_scores = result.phase3_trio_scores[slot_name]
-                if slot_scores:
-                    agg = self._compute_aggregate_score(slot_scores)
-                    slot_trial_aggregates[slot_name].append(agg)
+            arm_sign = result.arm_sign
+
+            # Phase 1: Opt/Sel Baseline
+            for task_id, pairs in result.phase1_scores.items():
+                for e, m in pairs:
+                    frac = Fraction(e, m)
+                    opt_sel_baseline_fracs.append(frac)
+                    all_16_opt_sel_fracs.append(frac)
+
+            # Phase 2: Opt/Sel Arm Scores
+            for slot_name in ("slot_a", "slot_b"):
+                is_opt = (slot_name == "slot_a" and arm_sign == 1) or (slot_name == "slot_b" and arm_sign == -1)
+                target_list = opt_sel_opt_fracs if is_opt else opt_sel_ctrl_fracs
+                slot_scores = result.phase2_arm_scores.get(slot_name, {})
+                for task_id, pairs in slot_scores.items():
+                    for e, m in pairs:
+                        frac = Fraction(e, m)
+                        target_list.append(frac)
+                        family = family_of(task_id)
+                        family_samples[family]["task_ids"].add(task_id)
+                        role = "optimizer_samples" if is_opt else "control_samples"
+                        family_samples[family][role].append(frac)
+
+            # Phase 3: Confirmatory & Holdout Trio Scores
+            for slot_name in ("baseline", "slot_a_winner", "slot_b_winner"):
+                slot_scores = result.phase3_trio_scores.get(slot_name, {})
+                for task_id, pairs in slot_scores.items():
+                    for e, m in pairs:
+                        frac = Fraction(e, m)
+                        if slot_name == "baseline":
+                            conf_holdout_baseline_fracs.append(frac)
+                            if task_id in conf_task_set:
+                                conf_baseline_fracs.append(frac)
+                        else:
+                            is_opt = (slot_name == "slot_a_winner" and arm_sign == 1) or (slot_name == "slot_b_winner" and arm_sign == -1)
+                            target_list = conf_holdout_opt_fracs if is_opt else conf_holdout_ctrl_fracs
+                            target_list.append(frac)
+                            family = family_of(task_id)
+                            family_samples[family]["task_ids"].add(task_id)
+                            role = "optimizer_samples" if is_opt else "control_samples"
+                            family_samples[family][role].append(frac)
 
         def mean_fraction(fracs: List[Fraction]) -> Fraction:
             if not fracs:
                 return Fraction(0)
             return sum(fracs) / Fraction(len(fracs))
 
-        baseline_mean = mean_fraction(slot_trial_aggregates["baseline"])
-        opt_mean = mean_fraction(slot_trial_aggregates["optimizer_winner"])
-        ctrl_mean = mean_fraction(slot_trial_aggregates["control_winner"])
-        delta = opt_mean - ctrl_mean
+        opt_sel_baseline_mean = mean_fraction(opt_sel_baseline_fracs)
+        conf_baseline_mean = mean_fraction(conf_baseline_fracs)
+        conf_holdout_baseline_mean = mean_fraction(conf_holdout_baseline_fracs)
+        total_baseline_mean = mean_fraction(opt_sel_baseline_fracs + conf_holdout_baseline_fracs)
 
-        return {
-            "schema_version": "3",
-            "suite": self.suite,
-            "num_trials": self.params["num_trials"],
-            "arm_assignment_vectors": self.arm_vectors,
-            "immutable_contract_hash": self.envelope.immutable_contract_hash,
-            "delimiter_hash": self.envelope.delimiter_hash,
-            "baseline_aggregate": str(baseline_mean),
-            "optimizer_winner_aggregate": str(opt_mean),
-            "control_winner_aggregate": str(ctrl_mean),
-            "delta_opt_minus_ctrl": str(delta),
-            "delta_positive": delta > 0,
-            "per_trial": [
-                {
-                    "trial_id": r.trial_id,
-                    "arm_sign": r.arm_sign,
-                    "winner": r.phase2_winner,
-                    "total_tokens": r.total_tokens,
-                    "model_calls": r.model_call_count(),
-                    "baseline_scores": {
-                        t: list(pairs)
-                        for t, pairs in r.phase3_trio_scores["baseline"].items()
-                    },
-                    "optimizer_scores": {
-                        t: list(pairs)
-                        for t, pairs in r.phase3_trio_scores["optimizer_winner"].items()
-                    },
-                    "control_scores": {
-                        t: list(pairs)
-                        for t, pairs in r.phase3_trio_scores["control_winner"].items()
-                    },
-                }
-                for r in self.trial_results
-            ],
-            "exploratory": self.exploratory.summary(),
+        opt_sel_opt_mean = mean_fraction(opt_sel_opt_fracs)
+        opt_sel_ctrl_mean = mean_fraction(opt_sel_ctrl_fracs)
+
+        conf_holdout_opt_mean = mean_fraction(conf_holdout_opt_fracs)
+        conf_holdout_ctrl_mean = mean_fraction(conf_holdout_ctrl_fracs)
+
+        delta_opt_minus_ctrl = conf_holdout_opt_mean - conf_holdout_ctrl_mean
+        all_16_opt_sel_perfect = all(f == Fraction(1) for f in all_16_opt_sel_fracs) if all_16_opt_sel_fracs else False
+
+        tier_tasks = {
+            "optimization": self.opt_tasks,
+            "selection": self.sel_tasks,
+            "confirmatory": self.conf_tasks,
+            "structural_holdout": self.holdout_tasks,
         }
 
-    def verify_trio_adjacency(self) -> bool:
-        """Verify that all Phase 3 microblock trios are adjacent in the call log."""
-        for result in self.trial_results:
-            phase3_records = [r for r in result.call_records if r.phase == 3]
+        def serialize_samples(pairs):
+            return [str(Fraction(e, m)) for e, m in pairs]
 
-            i = 0
-            while i < len(phase3_records):
-                if i + 2 >= len(phase3_records):
-                    raise TrioAdjacencyError(
-                        f"Incomplete trio at end of Phase 3 records in {result.trial_id}"
-                    )
-                trio = phase3_records[i:i+3]
-                task_ids = {r.task_id for r in trio}
-                replicates = {r.replicate for r in trio}
+        per_trial_outcomes = []
+        for r in self.trial_results:
+            opt_slot = "slot_a" if r.arm_sign == 1 else "slot_b"
+            ctrl_slot = "slot_b" if r.arm_sign == 1 else "slot_a"
+            opt_trio = f"{opt_slot}_winner"
+            ctrl_trio = f"{ctrl_slot}_winner"
+            tier_evidence = {}
+            for tier, tasks in tier_tasks.items():
+                task_evidence = {}
+                task_deltas = []
+                for task_id in tasks:
+                    if tier in ("optimization", "selection"):
+                        baseline_pairs = r.phase1_scores.get(task_id, [])
+                        opt_pairs = r.phase2_arm_scores.get(opt_slot, {}).get(task_id, [])
+                        ctrl_pairs = r.phase2_arm_scores.get(ctrl_slot, {}).get(task_id, [])
+                    else:
+                        baseline_pairs = r.phase3_trio_scores.get("baseline", {}).get(task_id, [])
+                        opt_pairs = r.phase3_trio_scores.get(opt_trio, {}).get(task_id, [])
+                        ctrl_pairs = r.phase3_trio_scores.get(ctrl_trio, {}).get(task_id, [])
+                    opt_mean = mean_fraction([Fraction(e, m) for e, m in opt_pairs])
+                    ctrl_mean = mean_fraction([Fraction(e, m) for e, m in ctrl_pairs])
+                    delta = opt_mean - ctrl_mean
+                    task_deltas.append(delta)
+                    task_evidence[task_id] = {
+                        "family": family_of(task_id),
+                        "baseline_k_samples": serialize_samples(baseline_pairs),
+                        "optimizer_k_samples": serialize_samples(opt_pairs),
+                        "control_k_samples": serialize_samples(ctrl_pairs),
+                        "optimizer_mean": str(opt_mean),
+                        "control_mean": str(ctrl_mean),
+                        "delta_opt_minus_ctrl": str(delta),
+                    }
+                tier_evidence[tier] = {
+                    "tasks": task_evidence,
+                    "delta_opt_minus_ctrl": str(mean_fraction(task_deltas)),
+                }
 
-                if len(task_ids) != 1:
-                    raise TrioAdjacencyError(
-                        f"Trio task_id mismatch in {result.trial_id}: {task_ids}"
-                    )
-                if len(replicates) != 1:
-                    raise TrioAdjacencyError(
-                        f"Trio replicate mismatch in {result.trial_id}: {replicates}"
-                    )
+            control_records = []
+            for record in r.call_records:
+                is_phase2_control = record.phase == 2 and record.arm == ctrl_slot
+                is_phase3_control = record.phase == 3 and record.trio_slot == ctrl_trio
+                if is_phase2_control or is_phase3_control:
+                    control_records.append(record.to_dict())
+            per_trial_outcomes.append({
+                "trial_index": r.trial_index,
+                "trial_id": r.trial_id,
+                "arm_sign": r.arm_sign,
+                "optimizer_slot": opt_slot,
+                "control_slot": ctrl_slot,
+                "phase2_winner": r.phase2_winner,
+                "total_tokens": r.total_tokens,
+                "call_count": r.model_call_count(),
+                "tiers": tier_evidence,
+                "control_records": control_records,
+            })
 
-                positions = [r.trio_position for r in trio]
-                if positions != [0, 1, 2]:
-                    raise TrioAdjacencyError(
-                        f"Trio positions not sequential in {result.trial_id}: {positions}"
-                    )
+        family_scores = {}
+        for family, samples in family_samples.items():
+            family_scores[family] = {
+                "task_ids": sorted(samples["task_ids"]),
+                "optimizer_samples": [str(value) for value in samples["optimizer_samples"]],
+                "control_samples": [str(value) for value in samples["control_samples"]],
+            }
 
-                slots = {r.trio_slot for r in trio}
-                expected_slots = {"baseline", "optimizer_winner", "control_winner"}
-                if slots != expected_slots:
-                    raise TrioAdjacencyError(
-                        f"Trio slots incomplete in {result.trial_id}: {slots}"
-                    )
-
-                i += 3
-
-        return True
+        return {
+            "suite": self.suite,
+            "num_trials": len(self.trial_results),
+            "opt_sel_baseline_aggregate": str(opt_sel_baseline_mean),
+            "conf_baseline_aggregate": str(conf_baseline_mean),
+            "conf_holdout_baseline_aggregate": str(conf_holdout_baseline_mean),
+            "baseline_aggregate": str(total_baseline_mean),
+            "opt_sel_opt_aggregate": str(opt_sel_opt_mean),
+            "opt_sel_ctrl_aggregate": str(opt_sel_ctrl_mean),
+            "optimizer_winner_aggregate": str(conf_holdout_opt_mean),
+            "control_winner_aggregate": str(conf_holdout_ctrl_mean),
+            "delta_opt_minus_ctrl": str(delta_opt_minus_ctrl),
+            "delta_positive": delta_opt_minus_ctrl > 0,
+            "all_16_opt_sel_perfect": all_16_opt_sel_perfect,
+            "raw_fractions": {
+                "opt_sel_baseline": opt_sel_baseline_mean,
+                "conf_baseline": conf_baseline_mean,
+                "opt_sel_opt": opt_sel_opt_mean,
+                "opt_sel_ctrl": opt_sel_ctrl_mean,
+                "conf_opt": conf_holdout_opt_mean,
+                "conf_ctrl": conf_holdout_ctrl_mean,
+                "delta": delta_opt_minus_ctrl,
+            },
+            "per_trial": per_trial_outcomes,
+            "family_scores": family_scores,
+            "exploratory": self.exploratory.summary(),
+        }

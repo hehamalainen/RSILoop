@@ -697,17 +697,10 @@ class WorkerIPCClient:
 
     def _raise_worker_exit(self, retcode: int, cause: BaseException = None) -> None:
         if self._is_candidate_phase():
-            if retcode in (-signal.SIGXCPU, 128 + signal.SIGXCPU, -24, 152):
-                self.candidate_timeout = True
-                exc = CandidateTimeoutError(f"Worker process terminated by RLIMIT_CPU during {self.phase}")
-                if cause is not None:
-                    raise exc from cause
-                raise exc
-            else:
-                exc = CandidateProcessError(f"Candidate process terminated by signal/exit ({retcode}) during {self.phase}")
-                if cause is not None:
-                    raise exc from cause
-                raise exc
+            exc = CandidateProcessError(f"Candidate process terminated by signal/exit ({retcode}) during {self.phase}")
+            if cause is not None:
+                raise exc from cause
+            raise exc
         err = InfrastructureError(f"Worker process exited during {self.phase} with return code {retcode}")
         self.infrastructure_error = err
         if cause is not None:
@@ -1136,13 +1129,23 @@ def evaluate_candidate_code_sandboxed(task_id: str, candidate_code: str, timeout
 
         earned, max_s = run_eval(cand_proxy)
 
+        if ipc_client.candidate_timeout:
+            raise CandidateTimeoutError(
+                f"Candidate wall-clock timeout during {ipc_client.phase}; "
+                "host harness handling cannot convert it into a scored outcome"
+            )
         if ipc_client.infrastructure_error:
             raise ipc_client.infrastructure_error
         if getattr(harness_mod, "_sticky_infrastructure_error", None):
             raise harness_mod._sticky_infrastructure_error
 
         return int(earned), int(max_s)
-    except (CandidateTimeoutError, CandidateProcessError):
+    except CandidateTimeoutError:
+        # A live worker that stops producing protocol output is not attributable
+        # to a scored candidate outcome. Registered Limitation 10 makes this a
+        # campaign-fatal ambiguity.
+        raise
+    except CandidateProcessError:
         return 0, 10
     except Exception as e:
         if ipc_client and ipc_client.infrastructure_error:

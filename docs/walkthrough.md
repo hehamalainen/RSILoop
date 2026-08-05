@@ -16,10 +16,19 @@ The protocol deliberately separates three phases:
 | Phase | Wall timeout classification | Unexpected exit / Signal classification |
 |---|---|---|
 | Worker startup/readiness | Infrastructure failure; calibration is invalid | Infrastructure failure |
-| Candidate import | Candidate failure (`CandidateTimeoutError`), scored 0/10 | Phase-attributed candidate failure (`CandidateProcessError`: non-`SIGXCPU` signal/exit like `SIGABRT` or `SIGSEGV`), scored 0/10 |
-| Candidate execution | Candidate failure (`CandidateTimeoutError`), scored 0/10 | Phase-attributed candidate failure (`CandidateProcessError`: non-`SIGXCPU` signal/exit like `SIGABRT` or `SIGSEGV`), scored 0/10 |
+| Candidate import | Unattributed non-exiting wait; campaign attempt is invalid | Phase-attributed candidate failure (`CandidateProcessError`: non-`SIGXCPU` signal/exit like `SIGABRT` or `SIGSEGV`), scored 0/10 |
+| Candidate execution | Unattributed non-exiting wait; campaign attempt is invalid | Phase-attributed candidate failure (`CandidateProcessError`: non-`SIGXCPU` signal/exit like `SIGABRT` or `SIGSEGV`), scored 0/10 |
 
 Phase-based exit attribution classifies any non-`SIGXCPU` worker process exit occurring after `load_candidate` as a candidate process failure (`CandidateProcessError`) scoring 0/10.
+It does not attribute a worker that remains alive but stops producing protocol output. Consistent with registered Limitation 10, that wall-clock timeout invalidates the campaign attempt.
+
+## Orchestration recovery and evidence
+
+Every trial is preceded by a sealed pre-trial intent. After evaluation, the commit intent contains the exact canonical bytes and SHA-256 hash of the next checkpoint. Startup rolls forward only a transition proven by that intent; an unexplained pre-trial intent, missing checkpoint, missing anchor, fork, or rollback invalidates the attempt rather than resampling work.
+
+CLI resume requires an explicit `--resume-attempt-id`. The named run directory contains a sealed, hash-anchored identity binding the attempt ID, canonical directory, stage, mock mode, registration hash, checkpoint, and ledger. Checkpoint recovery and intent/completion ledger admission both finish before provider construction.
+
+Schema 3 evidence is emitted by the orchestrator with real task IDs. Each trial carries tier deltas, baseline/optimizer/control k-sample arrays, and control call records. Structural family F1–F4 membership is parsed from task IDs rather than inferred from optimization tiers. Evaluator error traces are preserved in call records and supplied to optimizer mutations for failed tasks.
 
 ## Residual Host Memory Availability Risk
 
@@ -37,8 +46,8 @@ Campaign 2 no longer applies a binding-aware AST denylist. The former abstract i
 
 ## Branch Topology & Preflight Manifest Authentication Scope
 
-- **Branch Topology**: Development is maintained on branch `campaign2-work-order-a-rebuild` directly above pinned base commit `1abb708afc8dae8c90a2aa57e9f6d8a81a8a0bae`.
-- **Preflight Manifest (`campaign2_preflight_hashes.json`)**: Authenticates all 128 Category 1 campaign runtime files (including `campaign2/proxy.py`, `campaign2/manifest.py`, `campaign2/tier_assignment.py`, `campaign2/scorer.py`, `campaign2/defects.py`, `docs/walkthrough.md`, `README.md`, and all 30 benchmark task files).
+- **Branch Topology**: Scientific launch remains blocked until an operator-reviewed launch lock authenticates the exact final Git commit.
+- **Preflight Manifest (`campaign2_preflight_hashes.json`)**: Authenticates all 141 Category 1 campaign runtime files, including `rsi_loop.py`, attempt identity/recovery code, worker code, documentation, and all 30 benchmark task file sets.
 - **Git & Evidence Authentication**: Test launcher `test_campaign2.py` and evaluation evidence files are authenticated via Git commit hash and `campaign2_evidence_hashes.json`.
 
 ## Verification
@@ -49,7 +58,7 @@ The regression suite directly checks that:
 - a real CPU-bound worker exits via `SIGXCPU` under `RLIMIT_CPU`;
 - candidate process signal terminations (e.g. `SIGABRT`) explicitly raise `CandidateProcessError` with returncode `-6` and score 0/10 as candidate failures;
 - repository reads, `/etc/passwd` reads, and loopback socket binding are denied;
-- startup waits are infrastructure failures, while import/execution waits are candidate failures;
+- startup waits are infrastructure failures, while unattributed import/execution wall waits invalidate the campaign attempt;
 - the previously demonstrated `typing.sys.modules`, dynamic `__import__`, and `asyncio` waits all score 0/10;
 - all 30 reference solutions retain 10/10 scores.
 

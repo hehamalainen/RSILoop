@@ -1,32 +1,29 @@
 """
-Campaign 2 Pilot Outcome Ladder Module.
+Campaign 2 Frozen B8 Pilot Outcome Ladder Module.
 
-P0-5 — RESTORATION OF FROZEN BASELINE-HEADROOM PILOT LADDER:
-Evaluates pilot trial outcomes against pre-specified baseline-headroom decision criteria:
-
-Decision Outcomes:
-1. "invalid": infrastructure error or execution protocol failure
-2. "no_headroom": baseline score >= 1.0 (no headroom for optimization)
-3. "insufficient_headroom": baseline score < 0.2 (below floor)
-4. "opt_sel_floor": post-mutation arm aggregate < 0.2
-5. "no_effect": delta (opt_winner - ctrl_winner) <= 0 on confirmatory+holdout
-6. "go": baseline headroom valid, floors met, positive delta (opt_winner - ctrl_winner > 0)
+Exact Frozen B8 Decision Taxonomy (6 Outcomes):
+1. "invalid": infrastructure or plumbing fault
+2. "no_headroom": all 16 opt/selection baseline task scores equal 1.0 (mean == 1.0)
+3. "insufficient_headroom": opt/selection baseline mean score > 9/10 (0.90)
+4. "insufficient_confirmatory_headroom": confirmatory baseline mean score > 19/20 (0.95)
+5. "insufficient_baseline_engagement": opt/selection baseline mean < 1/5 (0.20) OR confirmatory baseline mean < 1/5 (0.20)
+6. "go": otherwise (headroom valid across baselines, baseline engagement met)
 """
 
 from fractions import Fraction
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, Optional
 
-
-FLOOR_THRESHOLD = Fraction(1, 5)  # 0.2 (20%)
-HEADROOM_CEILING = Fraction(1, 1)  # 1.0 (100%)
+OPT_SEL_HEADROOM_CEILING = Fraction(9, 10)       # > 0.90 -> insufficient_headroom
+CONF_HEADROOM_CEILING = Fraction(19, 20)         # > 0.95 -> insufficient_confirmatory_headroom
+ENGAGEMENT_FLOOR = Fraction(1, 5)                # < 0.20 -> insufficient_baseline_engagement
 
 
 class LadderOutcome:
-    """Result of evaluating the pilot outcome ladder."""
+    """Result of evaluating the frozen B8 pilot outcome ladder."""
     __slots__ = ('decision', 'reason', 'detail', 'is_go')
 
     def __init__(self, decision: str, reason: str, detail: str = "", is_go: bool = False):
-        self.decision = decision  # "go", "no_headroom", "insufficient_headroom", "opt_sel_floor", "no_effect", "invalid"
+        self.decision = decision
         self.reason = reason
         self.detail = detail
         self.is_go = is_go
@@ -36,65 +33,74 @@ class LadderOutcome:
 
 
 def evaluate_pilot_outcome_ladder(
-    baseline_score: Fraction,
-    opt_sel_opt_score: Fraction,
-    opt_sel_ctrl_score: Fraction,
-    conf_holdout_opt_score: Fraction,
-    conf_holdout_ctrl_score: Fraction,
-    delta: Fraction,
+    opt_sel_baseline: Fraction,
+    conf_baseline: Fraction,
+    delta: Fraction = Fraction(0),
+    all_16_opt_sel_perfect: bool = False,
+    is_invalid: bool = False,
+    invalid_reason: str = "",
 ) -> LadderOutcome:
     """
-    Evaluate the pilot outcome ladder against pre-specified criteria.
+    Evaluate the verbatim frozen B8 pilot outcome ladder.
 
     Args:
-        baseline_score: pre-mutation baseline aggregate score on opt+sel
-        opt_sel_opt_score: optimizer arm aggregate on opt+sel
-        opt_sel_ctrl_score: control arm aggregate on opt+sel
-        conf_holdout_opt_score: optimizer winner aggregate on confirmatory+holdout
-        conf_holdout_ctrl_score: control winner aggregate on confirmatory+holdout
-        delta: optimizer_winner - control_winner on confirmatory+holdout
+        opt_sel_baseline: Phase 1 pre-mutation baseline mean aggregate on Opt/Sel tasks
+        conf_baseline: Phase 3 pre-mutation baseline mean aggregate on Confirmatory tasks
+        delta: Delta value (retained for signature compatibility, unused by B8 logic)
+        all_16_opt_sel_perfect: True if all 16 baseline evaluations on Opt/Sel tasks scored 1.0
+        is_invalid: True if plumbing/infrastructure fault occurred
+        invalid_reason: Detail string if is_invalid is True
     """
-    # Step 1: Baseline Headroom Check (no headroom if baseline >= 1.0)
-    if baseline_score >= HEADROOM_CEILING:
+    # 1. Plumbing / Infrastructure Fault Check
+    if is_invalid:
         return LadderOutcome(
-            "no_headroom", "baseline_score_at_ceiling",
-            f"Baseline aggregate {baseline_score} >= 1.0; no headroom for optimization",
+            "invalid", "plumbing_or_execution_fault",
+            invalid_reason or "Infrastructure or execution protocol error detected",
             is_go=False
         )
 
-    # Step 2: Baseline Floor Check (insufficient headroom if baseline < 0.2)
-    if baseline_score < FLOOR_THRESHOLD:
+    # 2. All 16 Opt/Selection Baselines Perfect (No Headroom)
+    if all_16_opt_sel_perfect or opt_sel_baseline == Fraction(1):
         return LadderOutcome(
-            "insufficient_headroom", "baseline_below_floor",
-            f"Baseline aggregate {baseline_score} < floor {FLOOR_THRESHOLD}",
+            "no_headroom", "all_16_opt_sel_baselines_perfect",
+            "All 16 baseline evaluations on optimization/selection tasks scored 1.0 (no headroom)",
             is_go=False
         )
 
-    # Step 3: Post-mutation Arm Floor Checks on opt/sel
-    if opt_sel_opt_score < FLOOR_THRESHOLD:
+    # 3. Opt/Selection High Baseline Ceiling Check
+    if opt_sel_baseline > OPT_SEL_HEADROOM_CEILING:
         return LadderOutcome(
-            "opt_sel_floor", "optimizer_below_floor",
-            f"Optimizer opt/sel aggregate {opt_sel_opt_score} < floor {FLOOR_THRESHOLD}",
-            is_go=False
-        )
-    if opt_sel_ctrl_score < FLOOR_THRESHOLD:
-        return LadderOutcome(
-            "opt_sel_floor", "control_below_floor",
-            f"Control opt/sel aggregate {opt_sel_ctrl_score} < floor {FLOOR_THRESHOLD}",
+            "insufficient_headroom", "opt_sel_baseline_ceiling_exceeded",
+            f"Opt/sel baseline aggregate {opt_sel_baseline} > ceiling {OPT_SEL_HEADROOM_CEILING}",
             is_go=False
         )
 
-    # Step 4: Delta Check on Confirmatory+Holdout
-    if delta <= 0:
+    # 4. Confirmatory High Baseline Ceiling Check
+    if conf_baseline > CONF_HEADROOM_CEILING:
         return LadderOutcome(
-            "no_effect", "delta_non_positive",
-            f"Delta (opt_winner - ctrl_winner) = {delta} <= 0; no effect detected",
+            "insufficient_confirmatory_headroom", "confirmatory_baseline_ceiling_exceeded",
+            f"Confirmatory baseline aggregate {conf_baseline} > ceiling {CONF_HEADROOM_CEILING}",
             is_go=False
         )
 
-    # Step 5: All criteria met -> GO
+    # 5. Low Baseline Engagement Check (Opt/Sel or Confirmatory < 1/5)
+    if opt_sel_baseline < ENGAGEMENT_FLOOR:
+        return LadderOutcome(
+            "insufficient_baseline_engagement", "opt_sel_baseline_below_floor",
+            f"Opt/sel baseline aggregate {opt_sel_baseline} < engagement floor {ENGAGEMENT_FLOOR}",
+            is_go=False
+        )
+    if conf_baseline < ENGAGEMENT_FLOOR:
+        return LadderOutcome(
+            "insufficient_baseline_engagement", "confirmatory_baseline_below_floor",
+            f"Confirmatory baseline aggregate {conf_baseline} < engagement floor {ENGAGEMENT_FLOOR}",
+            is_go=False
+        )
+
+    # 6. Otherwise -> GO Outcome
     return LadderOutcome(
-        "go", "positive_delta_with_valid_headroom",
-        f"Baseline headroom valid ({baseline_score}), floors met, positive delta = {delta} > 0",
+        "go", "headroom_and_engagement_valid",
+        f"Valid headroom across baselines (opt_sel={opt_sel_baseline}, conf={conf_baseline}), "
+        f"engagement floor met",
         is_go=True
     )

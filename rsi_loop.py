@@ -3315,12 +3315,10 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
     )
     from campaign2.registration import verify_master_registration
     from campaign2.launch_lock import verify_launch_lock, LaunchLockError
-    from campaign2.attempt_lifecycle import (
-        check_and_resume,
-        publish_scientific_start,
-        AttemptLedger,
-    )
+    from campaign2.attempt_lifecycle import publish_scientific_start, AttemptLedger
+    from campaign2.attempt_identity import create_attempt_identity, verify_attempt_identity
     from campaign2.durability import CheckpointManager
+    from campaign2.attempt_lifecycle import AttemptLifecycleError, publish_scientific_start, verify_stage_scientific_start
     from campaign2.model_provider import (
         MockModelProvider,
         MockTaskEvaluator,
@@ -3360,98 +3358,206 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
         else:
             sys.stdout.write("[mock mode] Proceeding without operator launch lock for vertical slice testing.\n")
 
-    # 2. Preflight Model Provider & Evaluator Initialization (BEFORE publishing SCIENTIFIC_START)
-    if args.mock:
-        model = MockModelProvider()
-        evaluator = MockTaskEvaluator()
-    else:
-        # Non-mock scientific run requires SolModelProvider, which raises NotImplementedError
-        # Failing HERE prevents SCIENTIFIC_START from being published prematurely
-        model = SolModelProvider()
-        evaluator = None
-
     ta_data = generate_family_blocked_assignment()
     suite = "suite_p" if stage == "pilot" else "suite_c"
+    with open(os.path.join(BASE_DIR, "campaign2_master_registration.json"), "rb") as reg_file:
+        registration_sha256 = hashlib.sha256(reg_file.read()).hexdigest()
 
-    # 3. Checkpoint & Scientific Start
-    ckpt_path = os.path.join(BASE_DIR, f"campaign2_{stage}_checkpoint.json")
-    existing_ckpt = check_and_resume(stage, ckpt_path, BASE_DIR)
-    if existing_ckpt is None:
-        publish_scientific_start(stage, BASE_DIR)
+    # 2. Bind all resume state to one explicit, sealed attempt identity.
+    is_resume = getattr(args, "resume", False)
+    if is_resume:
+        identity = verify_attempt_identity(
+            ctx.run_dir,
+            expected_attempt_id=ctx.run_id,
+            expected_stage=stage,
+            expected_mock=args.mock,
+            expected_registration_sha256=registration_sha256,
+        )
+    else:
+        identity = create_attempt_identity(
+            ctx.run_dir, ctx.run_id, stage, suite, args.mock, registration_sha256
+        )
 
-    ckpt_mgr = CheckpointManager(ckpt_path, stage)
-
-    # 4. Attempt Ledger
-    ledger_path = os.path.join(ctx.run_dir, f"campaign2_{stage}_ledger.jsonl")
+    # 3. Construct ledger and wrap all admission, recovery, provider init, and execution in terminal try block.
+    ledger_path = os.path.join(ctx.run_dir, identity["ledger_file"])
     ledger = AttemptLedger(ledger_path)
 
-    # 5. Instantiate & Run Orchestrator
-    orch = Campaign2Orchestrator(
-        model_provider=model,
-        task_evaluator=evaluator,
-        tier_assignment=ta_data,
-        registration=reg_data,
-        suite=suite,
-        ledger=ledger,
-        checkpoint_mgr=ckpt_mgr,
-        workspace_root=BASE_DIR,
-    )
+    try:
+        entries = ledger.get_entries()
+        already_terminal = any(e.get("record_type") == "terminal_classification" for e in entries)
+        if already_terminal:
+            term_rec = [e for e in entries if e.get("record_type") == "terminal_classification"][0]
+            raise AttemptLifecycleError(
+                f"Attempt '{identity['attempt_id']}' is already terminal ({term_rec.get('classification')}) and cannot be resumed."
+            )
 
-    results = orch.run_all_trials()
-    orch.verify_trio_adjacency()
-    outcome = orch.compute_outcome()
+        existing_starts = [
+            e for e in entries
+            if e.get("record_type") == "attempt_start" and e.get("attempt_id") == identity["attempt_id"]
+        ]
+        if not existing_starts:
+            ledger.record_attempt_start(identity["attempt_id"], stage)
 
-    # 6. Pilot Ladder Evaluation
-    baseline_agg = Fraction(outcome["baseline_aggregate"])
-    opt_agg = Fraction(outcome["optimizer_winner_aggregate"])
-    ctrl_agg = Fraction(outcome["control_winner_aggregate"])
-    delta_val = Fraction(outcome["delta_opt_minus_ctrl"])
+        ckpt_path = os.path.join(ctx.run_dir, identity["checkpoint_file"])
+        ckpt_mgr = CheckpointManager(ckpt_path, stage)
+        ledger.verify_resume_admission()
 
-    ladder = evaluate_pilot_outcome_ladder(
-        baseline_score=baseline_agg,
-        opt_sel_opt_score=opt_agg,
-        opt_sel_ctrl_score=ctrl_agg,
-        conf_holdout_opt_score=opt_agg,
-        conf_holdout_ctrl_score=ctrl_agg,
-        delta=delta_val,
-    )
+        if args.mock:
+            model = MockModelProvider()
+            evaluator = MockTaskEvaluator()
+        else:
+            model = SolModelProvider()
+            evaluator = None
+            from campaign2.attempt_lifecycle import verify_stage_scientific_start
+            if is_resume:
+                verify_stage_scientific_start(stage, identity["attempt_id"], BASE_DIR)
+            else:
+                publish_scientific_start(stage, identity["attempt_id"], BASE_DIR)
 
-    # 7. Generate & Publish Schema 3 Report
-    report = generate_schema3_report(
-        outcome, reg_data, ta_data,
-        ledger_path=ledger_path,
-        ladder_outcome=ladder.to_dict(),
-        launch_lock_hash=lock_hash,
-        workspace_root=BASE_DIR,
-    )
-    report_path = os.path.join(ctx.run_dir, f"campaign2_{stage}_report.json")
-    publish_schema3_report(report, report_path)
-    sys.stdout.write(f"Campaign 2 {stage} execution complete. Ladder decision: {ladder.decision}. Report written to {report_path}\n")
+        # 5. Instantiate & Run Orchestrator
+        orch = Campaign2Orchestrator(
+            model_provider=model,
+            task_evaluator=evaluator,
+            tier_assignment=ta_data,
+            registration=reg_data,
+            suite=suite,
+            ledger=ledger,
+            checkpoint_mgr=ckpt_mgr,
+            workspace_root=BASE_DIR,
+        )
+
+        results = orch.run_all_trials()
+        orch.verify_trio_adjacency()
+        ledger.verify_resume_admission()
+        outcome = orch.compute_outcome()
+
+        opt_sel_baseline = Fraction(outcome["opt_sel_baseline_aggregate"])
+        conf_baseline = Fraction(outcome["conf_baseline_aggregate"])
+        opt_sel_opt_score = Fraction(outcome["opt_sel_opt_aggregate"])
+        opt_sel_ctrl_score = Fraction(outcome["opt_sel_ctrl_aggregate"])
+        conf_opt_score = Fraction(outcome["optimizer_winner_aggregate"])
+        conf_ctrl_score = Fraction(outcome["control_winner_aggregate"])
+        delta_val = Fraction(outcome["delta_opt_minus_ctrl"])
+        all_16_opt_sel_perfect = outcome.get("all_16_opt_sel_perfect", False)
+
+        ladder = evaluate_pilot_outcome_ladder(
+            opt_sel_baseline=opt_sel_baseline,
+            conf_baseline=conf_baseline,
+            delta=delta_val,
+            all_16_opt_sel_perfect=all_16_opt_sel_perfect,
+        )
+
+        # 7. Generate & Publish Schema 3 Report
+        report = generate_schema3_report(
+            outcome, reg_data, ta_data,
+            ledger_path=ledger_path,
+            ladder_outcome=ladder.to_dict(),
+            launch_lock_hash=lock_hash,
+            workspace_root=BASE_DIR,
+            is_mock=args.mock,
+        )
+        report_path = os.path.join(ctx.run_dir, f"campaign2_{stage}_report.json")
+        publish_schema3_report(report, report_path)
+
+        ledger.record_terminal_classification(
+            identity["attempt_id"],
+            "completed",
+            f"Ladder decision: {ladder.decision} ({ladder.reason})"
+        )
+        sys.stdout.write(f"Campaign 2 {stage} execution complete. Ladder decision: {ladder.decision}. Report written to {report_path}\n")
+    except Exception as exc:
+        is_already_terminal = False
+        try:
+            cur_entries = ledger.get_entries()
+            if any(e.get("record_type") == "terminal_classification" for e in cur_entries):
+                is_already_terminal = True
+        except Exception:
+            pass
+
+        if not is_already_terminal:
+            intents = {}
+            completions = {}
+            try:
+                cur_entries = ledger.get_entries()
+            except Exception:
+                cur_entries = []
+            for entry in cur_entries:
+                cid = entry.get("call_id")
+                if cid:
+                    if entry.get("record_type") == "intent":
+                        intents[cid] = intents.get(cid, 0) + 1
+                    elif entry.get("record_type") == "completion":
+                        completions[cid] = completions.get(cid, 0) + 1
+            unmatched_count = sum(max(0, intents[cid] - completions.get(cid, 0)) for cid in intents)
+            if unmatched_count > 0:
+                ledger.unknown_usage_count += unmatched_count
+
+            ledger.record_terminal_classification(
+                identity["attempt_id"],
+                "invalidated",
+                f"Terminal execution failure: {exc}"
+            )
+        raise
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the real CLI parser so parser behavior is directly testable."""
     parser = argparse.ArgumentParser(description="RSI Loop Orchestrator")
     parser.add_argument("--campaign", type=int, default=1, choices=[1, 2], help="Campaign number (1 or 2)")
     parser.add_argument("--stage", type=str, default="pilot", choices=["pilot", "full"], help="Stage for Campaign 2 (pilot or full)")
     parser.add_argument("--mock", action="store_true", help="Use mock model provider and evaluator for verification")
+    parser.add_argument("--resume", action="store_true", help="Resume an in-progress or interrupted campaign run")
+    parser.add_argument(
+        "--resume-attempt-id",
+        default="",
+        help="Exact sealed run_<id> to resume; required with --resume",
+    )
+    return parser
+
+
+def main() -> None:
+    parser = build_arg_parser()
     args, unknown = parser.parse_known_args()
+
+    if args.resume and args.campaign != 2:
+        parser.error("--resume is supported only for --campaign 2")
+    if args.resume and not args.resume_attempt_id:
+        parser.error("--resume requires --resume-attempt-id")
+    if args.resume_attempt_id and not args.resume:
+        parser.error("--resume-attempt-id requires --resume")
 
     ctx = RunContext()
     _capture_environment_metadata(ctx)
-    ctx.run_id = f"run_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-    ctx.run_dir = os.path.realpath(os.path.join(HISTORY_DIR, ctx.run_id))
-    try:
-        os.makedirs(ctx.run_dir, exist_ok=True)
-    except Exception as e:
-        sys.stderr.write(f"FATAL: failed to create run directory: {e}\n")
-        sys.exit(1)
+    if args.resume:
+        from campaign2.attempt_identity import resolve_resume_attempt
+        try:
+            ctx.run_dir, _identity = resolve_resume_attempt(
+                HISTORY_DIR, args.resume_attempt_id, args.stage, args.mock
+            )
+            ctx.run_id = args.resume_attempt_id
+            operator_report_path = os.path.join(ctx.run_dir, "operator_report.json")
+            with open(operator_report_path, "r", encoding="utf-8") as report_file:
+                ctx.operator_report = json.load(report_file)
+            if ctx.operator_report.get("run_id") != ctx.run_id:
+                raise ValueError("operator report does not match sealed resume attempt")
+        except Exception as e:
+            sys.stderr.write(f"FATAL: resume admission failed: {e}\n")
+            sys.exit(1)
+    else:
+        ctx.run_id = f"run_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        ctx.run_dir = os.path.realpath(os.path.join(HISTORY_DIR, ctx.run_id))
+        try:
+            os.makedirs(ctx.run_dir, exist_ok=False)
+        except Exception as e:
+            sys.stderr.write(f"FATAL: failed to create run directory: {e}\n")
+            sys.exit(1)
 
-    init_operator_report(ctx)
-    try:
-        save_operator_report(ctx)
-    except Exception as e:
-        sys.stderr.write(f"FATAL: failed to write initial operator report: {e}\n")
-        sys.exit(1)
+        init_operator_report(ctx)
+        try:
+            save_operator_report(ctx)
+        except Exception as e:
+            sys.stderr.write(f"FATAL: failed to write initial operator report: {e}\n")
+            sys.exit(1)
 
     try:
         if args.campaign == 2:

@@ -33,24 +33,24 @@ KNOWN_LIMITATIONS = [
     "Claims cover the eight fixed preregistered confirmatory tasks, not unseen tasks generally.",
     "Tiers balanced by structural task FAMILY, not measured difficulty; families are not difficulty strata.",
     "MacBook memory availability is not a production containment guarantee; accepted for this non-adversarial research campaign.",
-    "A candidate that blocks without consuming CPU will eventually hit the wall-clock supervisor timeout and be classified as a candidate failure scoring (0, 10). This is phase-attributed correctly but consumes real wall-clock time from the trial budget, potentially causing downstream timeouts if many candidates exhibit this behavior.",
+    "A candidate that blocks without consuming CPU produces an unattributed wall-clock timeout and invalidates the attempt; phase-based exit attribution does not cover non-exiting processes.",
     "A >= 0.05 is an observed practical gate, not inferential proof of absolute improvement."
 ]
 
 EXPLORATORY_SECONDARIES = [
-    "score-improving mutations per model call",
+    "score-improving mutations per optimizer mutation call",
     "improvement per 1,000 output tokens",
     "valid-candidate rate",
     "mutation depth producing each new best"
 ]
 
 FROZEN_TRIO_ORDERINGS = [
-    ("baseline", "optimizer_winner", "control_winner"),
-    ("baseline", "control_winner", "optimizer_winner"),
-    ("optimizer_winner", "baseline", "control_winner"),
-    ("optimizer_winner", "control_winner", "baseline"),
-    ("control_winner", "baseline", "optimizer_winner"),
-    ("control_winner", "optimizer_winner", "baseline"),
+    ("baseline", "slot_a_winner", "slot_b_winner"),
+    ("baseline", "slot_b_winner", "slot_a_winner"),
+    ("slot_a_winner", "baseline", "slot_b_winner"),
+    ("slot_a_winner", "slot_b_winner", "baseline"),
+    ("slot_b_winner", "baseline", "slot_a_winner"),
+    ("slot_b_winner", "slot_a_winner", "baseline"),
 ]
 
 
@@ -145,6 +145,15 @@ def generate_master_registration(workspace_root: str = BASE_DIR) -> Tuple[str, s
     arm_vectors, arm_transcript = derive_assignment_vectors()
     trio_seed, trio_transcript = derive_trio_ordering_seed()
 
+    from campaign2.envelope import (
+        IMMUTABLE_CONTRACT,
+        IMMUTABLE_CONTRACT_HASH,
+        DELIMITER,
+        DELIMITER_HASH,
+        CONTROL_REFORMULATION_TEXT,
+        CONTROL_REFORMULATION_HASH,
+    )
+
     reg_data = {
         "schema_version": "3",
         "campaign_id": "campaign_2_gpt5_6_sol",
@@ -153,6 +162,14 @@ def generate_master_registration(workspace_root: str = BASE_DIR) -> Tuple[str, s
         "exploratory_secondaries": EXPLORATORY_SECONDARIES,
         "frozen_trio_orderings": [list(t) for t in FROZEN_TRIO_ORDERINGS],
         "arm_assignment_vectors": arm_vectors,
+        "prompt_envelope": {
+            "immutable_contract": IMMUTABLE_CONTRACT,
+            "immutable_contract_hash": IMMUTABLE_CONTRACT_HASH,
+            "delimiter": DELIMITER,
+            "delimiter_hash": DELIMITER_HASH,
+            "control_reformulation_text": CONTROL_REFORMULATION_TEXT,
+            "control_reformulation_hash": CONTROL_REFORMULATION_HASH,
+        },
         "arm_assignment_derivation": {
             "domain": "rsi_loop/campaign2/arm_assignment",
             "base_commit": APPROVED_BASE_COMMIT,
@@ -259,5 +276,41 @@ def verify_master_registration(workspace_root: str = BASE_DIR) -> Dict[str, Any]
         raise ValueError("Master registration missing arm_assignment_derivation")
     if "trio_ordering_derivation" not in data:
         raise ValueError("Master registration missing trio_ordering_derivation")
+
+    pe = data.get("prompt_envelope")
+    if not isinstance(pe, dict):
+        raise ValueError("Master registration missing or invalid prompt_envelope")
+
+    required_pe_keys = (
+        "immutable_contract", "immutable_contract_hash",
+        "delimiter", "delimiter_hash",
+        "control_reformulation_text", "control_reformulation_hash"
+    )
+    for k in required_pe_keys:
+        val = pe.get(k)
+        if not val or not isinstance(val, str):
+            raise ValueError(f"Master registration prompt_envelope missing non-empty string '{k}'")
+
+    # Recompute and verify SHA-256 hashes of text components
+    calc_contract_hash = hashlib.sha256(pe["immutable_contract"].encode("utf-8")).hexdigest()
+    if calc_contract_hash != pe["immutable_contract_hash"]:
+        raise ValueError(
+            f"Master registration immutable_contract_hash mismatch: text produces '{calc_contract_hash}', "
+            f"registered hash is '{pe['immutable_contract_hash']}'"
+        )
+
+    calc_delimiter_hash = hashlib.sha256(pe["delimiter"].encode("utf-8")).hexdigest()
+    if calc_delimiter_hash != pe["delimiter_hash"]:
+        raise ValueError(
+            f"Master registration delimiter_hash mismatch: text produces '{calc_delimiter_hash}', "
+            f"registered hash is '{pe['delimiter_hash']}'"
+        )
+
+    calc_ctrl_hash = hashlib.sha256(pe["control_reformulation_text"].encode("utf-8")).hexdigest()
+    if calc_ctrl_hash != pe["control_reformulation_hash"]:
+        raise ValueError(
+            f"Master registration control_reformulation_hash mismatch: text produces '{calc_ctrl_hash}', "
+            f"registered hash is '{pe['control_reformulation_hash']}'"
+        )
 
     return data
