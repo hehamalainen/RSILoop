@@ -3315,10 +3315,16 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
     )
     from campaign2.registration import verify_master_registration
     from campaign2.launch_lock import verify_launch_lock, LaunchLockError
-    from campaign2.attempt_lifecycle import publish_scientific_start, AttemptLedger
+    from campaign2.attempt_lifecycle import (
+        publish_scientific_start,
+        verify_stage_scientific_start,
+        publish_sealed_invalidation,
+        is_sealed_invalidated,
+        AttemptLedger,
+        AttemptLifecycleError,
+    )
     from campaign2.attempt_identity import create_attempt_identity, verify_attempt_identity
     from campaign2.durability import CheckpointManager
-    from campaign2.attempt_lifecycle import AttemptLifecycleError, publish_scientific_start, verify_stage_scientific_start
     from campaign2.model_provider import (
         MockModelProvider,
         MockTaskEvaluator,
@@ -3378,9 +3384,18 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
             ctx.run_dir, ctx.run_id, stage, suite, args.mock, registration_sha256
         )
 
+    if is_sealed_invalidated(ctx.run_dir, stage):
+        raise AttemptLifecycleError(
+            f"Attempt '{identity['attempt_id']}' is sealed invalidated and cannot be resumed."
+        )
+
     # 3. Construct ledger and wrap all admission, recovery, provider init, and execution in terminal try block.
     ledger_path = os.path.join(ctx.run_dir, identity["ledger_file"])
-    ledger = AttemptLedger(ledger_path)
+    try:
+        ledger = AttemptLedger(ledger_path)
+    except AttemptLifecycleError as e:
+        publish_sealed_invalidation(ctx.run_dir, stage, identity["attempt_id"], str(e))
+        raise
 
     try:
         entries = ledger.get_entries()
@@ -3408,7 +3423,6 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
         else:
             model = SolModelProvider()
             evaluator = None
-            from campaign2.attempt_lifecycle import verify_stage_scientific_start
             if is_resume:
                 verify_stage_scientific_start(stage, identity["attempt_id"], BASE_DIR)
             else:
@@ -3466,37 +3480,44 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
         )
         sys.stdout.write(f"Campaign 2 {stage} execution complete. Ladder decision: {ladder.decision}. Report written to {report_path}\n")
     except Exception as exc:
-        is_already_terminal = False
-        try:
-            cur_entries = ledger.get_entries()
-            if any(e.get("record_type") == "terminal_classification" for e in cur_entries):
-                is_already_terminal = True
-        except Exception:
-            pass
+        is_already_terminal = is_sealed_invalidated(ctx.run_dir, stage)
+        if not is_already_terminal:
+            try:
+                cur_entries = ledger.get_entries()
+                if any(e.get("record_type") == "terminal_classification" for e in cur_entries):
+                    is_already_terminal = True
+            except Exception:
+                pass
 
         if not is_already_terminal:
-            intents = {}
-            completions = {}
+            is_ledger_corrupt = False
+            cur_entries = []
             try:
                 cur_entries = ledger.get_entries()
             except Exception:
-                cur_entries = []
-            for entry in cur_entries:
-                cid = entry.get("call_id")
-                if cid:
-                    if entry.get("record_type") == "intent":
-                        intents[cid] = intents.get(cid, 0) + 1
-                    elif entry.get("record_type") == "completion":
-                        completions[cid] = completions.get(cid, 0) + 1
-            unmatched_count = sum(max(0, intents[cid] - completions.get(cid, 0)) for cid in intents)
-            if unmatched_count > 0:
-                ledger.unknown_usage_count += unmatched_count
+                is_ledger_corrupt = True
 
-            ledger.record_terminal_classification(
-                identity["attempt_id"],
-                "invalidated",
-                f"Terminal execution failure: {exc}"
-            )
+            if is_ledger_corrupt:
+                publish_sealed_invalidation(ctx.run_dir, stage, identity["attempt_id"], f"Terminal failure with corrupt ledger: {exc}")
+            else:
+                intents = {}
+                completions = {}
+                for entry in cur_entries:
+                    cid = entry.get("call_id")
+                    if cid:
+                        if entry.get("record_type") == "intent":
+                            intents[cid] = intents.get(cid, 0) + 1
+                        elif entry.get("record_type") == "completion":
+                            completions[cid] = completions.get(cid, 0) + 1
+                unmatched_count = sum(max(0, intents[cid] - completions.get(cid, 0)) for cid in intents)
+                if unmatched_count > 0:
+                    ledger.unknown_usage_count += unmatched_count
+
+                ledger.record_terminal_classification(
+                    identity["attempt_id"],
+                    "invalidated",
+                    f"Terminal execution failure: {exc}"
+                )
         raise
 
 

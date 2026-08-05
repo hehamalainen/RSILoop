@@ -290,7 +290,7 @@ class TestWinnerSelectionEqualTaskWeighting(unittest.TestCase):
 
         class TraceEvaluator:
             def evaluate(self, task_id, candidate_code):
-                return 0, 10, f"AssertionError: {task_id} boundary mismatch"
+                return 0, 10, False, f"AssertionError: {task_id} boundary mismatch"
 
         provider = TraceProvider()
         orch = Campaign2Orchestrator(
@@ -584,6 +584,47 @@ class TestAttemptAccounting(unittest.TestCase):
             self.assertEqual(len(term_entries), 1)
             self.assertEqual(term_entries[0]["classification"], "completed")
 
+    def test_malformed_ledger_unmutated_on_repeated_launches(self):
+        with tempfile.TemporaryDirectory() as base_tmp:
+            run_dir = os.path.realpath(os.path.join(base_tmp, "run_test_corrupt_ledger"))
+            os.makedirs(run_dir)
+            run_id = os.path.basename(run_dir)
+            ctx = SimpleNamespace(run_dir=run_dir, run_id=run_id)
+            args = SimpleNamespace(stage="pilot", mock=True, resume=True)
+            reg_p, anchor_p = generate_master_registration(run_dir)
+
+            with open(reg_p, "rb") as f:
+                reg_sha = hashlib.sha256(f.read()).hexdigest()
+            create_attempt_identity(run_dir, run_id, "pilot", "suite_p", True, reg_sha)
+
+            ledger_path = os.path.join(run_dir, "campaign2_pilot_ledger.jsonl")
+            corrupt_bytes = b'{"record_type": "attempt_start", "attempt_id": "' + run_id.encode("utf-8") + b'", "stage": "pilot"}\n{"record_type": "intent", "call_id": "bad_json_line\n'
+            with open(ledger_path, "wb") as f:
+                f.write(corrupt_bytes)
+            initial_sha = hashlib.sha256(corrupt_bytes).hexdigest()
+
+            import rsi_loop
+            # First launch attempt on corrupt ledger -> raises AttemptLifecycleError and publishes sealed invalidation
+            with self.assertRaises(AttemptLifecycleError):
+                rsi_loop._run_campaign2(args, ctx)
+
+            with open(ledger_path, "rb") as f:
+                after_launch1_bytes = f.read()
+            self.assertEqual(hashlib.sha256(after_launch1_bytes).hexdigest(), initial_sha, "First launch must NOT mutate corrupted ledger")
+
+            invalidated_marker = os.path.join(run_dir, "campaign2_pilot_invalidated.json")
+            self.assertTrue(os.path.exists(invalidated_marker))
+            st_mode = stat.S_IMODE(os.stat(invalidated_marker).st_mode)
+            self.assertEqual(st_mode, 0o444)
+
+            # Second launch attempt -> rejects immediately without touching ledger
+            with self.assertRaises(AttemptLifecycleError):
+                rsi_loop._run_campaign2(args, ctx)
+
+            with open(ledger_path, "rb") as f:
+                after_launch2_bytes = f.read()
+            self.assertEqual(hashlib.sha256(after_launch2_bytes).hexdigest(), initial_sha, "Second launch must NOT mutate corrupted ledger")
+
 
 class ImprovingMockModelProvider(MockModelProvider):
     """Mock model provider that marks candidates generated from mutated prompts."""
@@ -720,6 +761,9 @@ class TestFullReportEquivalence(unittest.TestCase):
 
         self.assertNotEqual(u_exploratory["score_improving_mutations_per_call"], "0/6")
         self.assertEqual(u_exploratory["score_improving_mutations_per_call"], "2/6")
+        self.assertEqual(u_exploratory["improvement_per_1000_tokens"], "0.1087")
+        self.assertEqual(u_orch.exploratory.total_output_tokens, 18400)
+        self.assertEqual(u_orch.exploratory.optimizer_mutations_total, 6)
 
         r_dir = os.path.join(self.workspace, "r_imp")
         os.makedirs(r_dir)
@@ -1070,6 +1114,21 @@ class TestStageGlobalOneShot(unittest.TestCase):
 
         with self.assertRaises(AttemptInvalidatedError):
             publish_scientific_start("pilot", "attempt_1", workspace_root=self.workspace)
+
+        # 4. Stage mismatch rejection
+        with self.assertRaises(AttemptInvalidatedError):
+            verify_stage_scientific_start("full", "attempt_1", workspace_root=self.workspace)
+
+        # 5. Status mismatch rejection
+        os.chmod(p1, 0o644)
+        mismatch_data = {"stage": "pilot", "attempt_id": "attempt_1", "status": "completed", "timestamp": 123}
+        with open(p1, "w", encoding="utf-8") as f:
+            json.dump(mismatch_data, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.chmod(p1, 0o444)
+
+        with self.assertRaises(AttemptInvalidatedError):
+            verify_stage_scientific_start("pilot", "attempt_1", workspace_root=self.workspace)
 
 
 class TestUncommittedPreviousHeadDurability(unittest.TestCase):

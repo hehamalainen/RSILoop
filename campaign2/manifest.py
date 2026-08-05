@@ -361,9 +361,9 @@ def compute_campaign2_parity_matrix(workspace_root: str = BASE_DIR) -> Dict[str,
 
         # 1. Reference solution
         direct_ref_earned, direct_ref_max = harness_mod.run_evaluation(sol_mod)
-        ipc_ref_earned, ipc_ref_max = evaluate_candidate_code_sandboxed(task_id, sol_code)[:2]
-        if (direct_ref_earned, direct_ref_max) != (10, 10) or (ipc_ref_earned, ipc_ref_max) != (10, 10):
-            raise RuntimeError(f"Reference solution for {task_id} failed 10/10 check")
+        ipc_ref_earned, ipc_ref_max, ref_valid, ref_err = evaluate_candidate_code_sandboxed(task_id, sol_code)
+        if (direct_ref_earned, direct_ref_max) != (10, 10) or (ipc_ref_earned, ipc_ref_max) != (10, 10) or not ref_valid:
+            raise RuntimeError(f"Reference solution for {task_id} failed 10/10 check (valid={ref_valid}, err={ref_err})")
 
         matrix[f"ref_{task_id}"] = {
             "task_id": task_id,
@@ -400,7 +400,9 @@ def compute_campaign2_parity_matrix(workspace_root: str = BASE_DIR) -> Dict[str,
             cand_code = sol_code + "\n\n" + def_code + "\n\n" + aliases + "\n"
             def_code_hash = hashlib.sha256(cand_code.encode("utf-8")).hexdigest()
 
-            ipc_def_earned, ipc_def_max = evaluate_candidate_code_sandboxed(task_id, cand_code)[:2]
+            ipc_def_earned, ipc_def_max, def_valid, def_err = evaluate_candidate_code_sandboxed(task_id, cand_code)
+            if (direct_def_earned, direct_def_max) != (ipc_def_earned, ipc_def_max) or not def_valid:
+                raise RuntimeError(f"Defect rung {idx} for {task_id} score mismatch: direct={direct_def_earned}, ipc={ipc_def_earned} (valid={def_valid})")
             if (direct_def_earned, direct_def_max) != (ipc_def_earned, ipc_def_max):
                 raise RuntimeError(f"Defect rung {idx} for {task_id} score mismatch: direct={direct_def_earned}, ipc={ipc_def_earned}")
 

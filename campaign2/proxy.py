@@ -672,7 +672,9 @@ class WorkerIPCClient:
         self.counter = 0
         self.last_status = None
         self.candidate_exception_occurred = False
+        self.last_exception_message = ""
         self.candidate_timeout = False
+        self.candidate_process_error = None
         self.infrastructure_error = None
         self.phase = "startup"
         self.selector = selectors.DefaultSelector()
@@ -698,6 +700,7 @@ class WorkerIPCClient:
     def _raise_worker_exit(self, retcode: int, cause: BaseException = None) -> None:
         if self._is_candidate_phase():
             exc = CandidateProcessError(f"Candidate process terminated by signal/exit ({retcode}) during {self.phase}")
+            self.candidate_process_error = exc
             if cause is not None:
                 raise exc from cause
             raise exc
@@ -940,6 +943,7 @@ class WorkerIPCClient:
             self.last_status = resp.get("status")
             if self.last_status == "ok":
                 self.candidate_exception_occurred = False
+                self.last_exception_message = ""
                 return TaggedCodec.decode(resp.get("result"), self.make_host_callback_proxy, self.make_obj_proxy, None, None, lambda h_id: self.host_objects[h_id])
             elif self.last_status == "exception":
                 # P0 FIX: Distinguish between infrastructure origin and candidate/domain origin
@@ -949,9 +953,12 @@ class WorkerIPCClient:
                     raise err_infra
 
                 self.candidate_exception_occurred = True
-                return TaggedCodec.decode(resp.get("result"), self.make_host_callback_proxy, self.make_obj_proxy, None, None, lambda h_id: self.host_objects[h_id])
+                res_obj = TaggedCodec.decode(resp.get("result"), self.make_host_callback_proxy, self.make_obj_proxy, None, None, lambda h_id: self.host_objects[h_id])
+                self.last_exception_message = f"{type(res_obj).__name__}: {res_obj}" if res_obj else ""
+                return res_obj
             elif self.last_status in ("no_func", "no_class"):
                 self.candidate_exception_occurred = False
+                self.last_exception_message = ""
                 return None
             else:
                 err = InfrastructureError(f"Worker returned error status '{self.last_status}': {resp.get('error')}")
@@ -973,6 +980,7 @@ def get_candidate_sandbox_profile(workspace_root: str, cand_tmpdir: str) -> str:
 
 (allow process-exec
     (literal "{real_py}")
+    (literal "{sys.executable}")
     (subpath "{py_prefix}")
     (subpath "{py_base_prefix}")
     (subpath "/usr/bin")
@@ -1118,7 +1126,7 @@ def evaluate_candidate_code_sandboxed(task_id: str, candidate_code: str, timeout
         ipc_client.set_phase("candidate_import", candidate_deadline)
         ipc_client.send_request({"id": "load_candidate", "op": "load_candidate"})
         if ipc_client.candidate_exception_occurred:
-            return 0, 10
+            return 0, 10, False, f"CandidateImportError: {ipc_client.last_exception_message}"
         ipc_client.set_phase("candidate_execution", candidate_deadline)
 
         cand_proxy = CandidateModuleProxy(ipc_client)
@@ -1128,6 +1136,9 @@ def evaluate_candidate_code_sandboxed(task_id: str, candidate_code: str, timeout
             raise InfrastructureError(f"Test harness missing run_evaluation for {task_id}")
 
         earned, max_s = run_eval(cand_proxy)
+
+        if getattr(ipc_client, "candidate_process_error", None):
+            return 0, 10, False, f"CandidateProcessError: {ipc_client.candidate_process_error}"
 
         if ipc_client.candidate_timeout:
             raise CandidateTimeoutError(
@@ -1139,21 +1150,22 @@ def evaluate_candidate_code_sandboxed(task_id: str, candidate_code: str, timeout
         if getattr(harness_mod, "_sticky_infrastructure_error", None):
             raise harness_mod._sticky_infrastructure_error
 
-        return int(earned), int(max_s)
+        err_trace = f"CandidateException: {ipc_client.last_exception_message}" if ipc_client.candidate_exception_occurred else ""
+        return int(earned), int(max_s), True, err_trace
     except CandidateTimeoutError:
         # A live worker that stops producing protocol output is not attributable
         # to a scored candidate outcome. Registered Limitation 10 makes this a
         # campaign-fatal ambiguity.
         raise
-    except CandidateProcessError:
-        return 0, 10
+    except CandidateProcessError as cpe:
+        return 0, 10, False, f"CandidateProcessError: {cpe}"
     except Exception as e:
         if ipc_client and ipc_client.infrastructure_error:
             raise ipc_client.infrastructure_error
         if isinstance(e, InfrastructureError):
             raise
         # Candidate execution syntax / runtime error -> return candidate failure (0, 10)
-        return 0, 10
+        return 0, 10, False, f"{type(e).__name__}: {e}"
     finally:
         if ipc_client:
             ipc_client.selector.close()

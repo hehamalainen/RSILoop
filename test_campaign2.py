@@ -194,8 +194,8 @@ def parse_log_stream(stream):
         return []
     return _contained_parse_log_stream(stream)
 '''
-        earned, max_s = evaluate_candidate_code_sandboxed(task_id, sol_code + containment_probe)
-        self.assertEqual((earned, max_s), (10, 10))
+        earned, max_s, is_valid, err_trace = evaluate_candidate_code_sandboxed(task_id, sol_code + containment_probe)
+        self.assertEqual((earned, max_s, is_valid), (10, 10, True))
 
     def test_06_reference_solution_score_preservation(self):
         """Verifies reference solutions across all 30 tasks achieve 10/10 in sandboxed worker."""
@@ -207,9 +207,10 @@ def parse_log_stream(stream):
                 with open(sol_path, "r", encoding="utf-8") as f:
                     sol_code = f.read()
 
-                earned, max_s = evaluate_candidate_code_sandboxed(task_id, sol_code)
+                earned, max_s, is_valid, err_trace = evaluate_candidate_code_sandboxed(task_id, sol_code)
                 self.assertEqual(earned, 10, f"Reference solution for {task_id} failed to earn 10/10 in sandboxed worker: earned {earned}")
                 self.assertEqual(max_s, 10)
+                self.assertTrue(is_valid, f"Reference solution for {task_id} marked invalid: {err_trace}")
 
     def test_07_preflight_manifest_verification(self):
         """Verifies campaign2_preflight_hashes.json authenticates the full Category 1 inventory."""
@@ -508,8 +509,9 @@ def parse_log_stream(stream, cb=None):
         """Finding 2 [P0] FIX: Verifies candidate top-level import failure carries candidate origin (0, 10)."""
         task_id = "c_f1_01_log_stream_parser"
         bad_import_cand = "import non_existent_package_xyz_999\ndef parse_log_stream(s):\n    return []"
-        earned, max_s = evaluate_candidate_code_sandboxed(task_id, bad_import_cand)
-        self.assertEqual((earned, max_s), (0, 10))
+        earned, max_s, is_valid, err_trace = evaluate_candidate_code_sandboxed(task_id, bad_import_cand)
+        self.assertEqual((earned, max_s, is_valid), (0, 10, False))
+        self.assertIn("non_existent_package_xyz_999", err_trace)
 
     def test_25_no_hidden_ast_policy_and_waits_invalidate_attempt(self):
         """Candidate semantics are unbiased; unattributed residual waits are campaign-fatal."""
@@ -523,11 +525,8 @@ def parse_log_stream(stream, cb=None):
         sol_path = os.path.join(BENCHMARKS_DIR, "suite_c", task_id, "solution.py")
         with open(sol_path, "r", encoding="utf-8") as f:
             sol_code = f.read()
-        self.assertEqual(
-            evaluate_candidate_code_sandboxed(task_id, "import time\n" + sol_code),
-            (10, 10),
-            "ordinary time import was subject to a hidden launch policy",
-        )
+        earned, max_s, is_valid, err_trace = evaluate_candidate_code_sandboxed(task_id, "import time\n" + sol_code)
+        self.assertEqual((earned, max_s, is_valid), (10, 10, True))
 
         wait_candidates = [
             "import typing\ndef parse_log_stream(s):\n    typing.sys.modules['time'].sleep(2)\n    return []",
@@ -552,19 +551,22 @@ def parse_log_stream(stream, cb=None):
 
         # Custom exception across IPC -> candidate failure (0, 10)
         custom_exc_cand = "class MyCustomCandidateErr(Exception): pass\ndef parse_log_stream(s):\n    raise MyCustomCandidateErr('Candidate custom failure message')"
-        earned_c, max_c = evaluate_candidate_code_sandboxed(task_id, custom_exc_cand)
-        self.assertEqual((earned_c, max_c), (0, 10))
+        earned_c, max_c, valid_c, err_c = evaluate_candidate_code_sandboxed(task_id, custom_exc_cand)
+        self.assertEqual((earned_c, max_c, valid_c), (0, 10, True))
+        self.assertIn("Candidate custom failure message", err_c)
 
         # Deep recursion -> candidate failure (0, 10)
         deep_rec_cand = "def parse_log_stream(s):\n    return parse_log_stream(s)"
-        earned_r, max_r = evaluate_candidate_code_sandboxed(task_id, deep_rec_cand)
-        self.assertEqual((earned_r, max_r), (0, 10))
+        earned_r, max_r, valid_r, err_r = evaluate_candidate_code_sandboxed(task_id, deep_rec_cand)
+        self.assertEqual((earned_r, max_r, valid_r), (0, 10, True))
+        self.assertIn("RecursionError", err_r)
 
         # BaseException subclasses raised by candidate code must not kill the worker
         # and be misclassified as campaign infrastructure failure.
         sys_exit_cand = "import sys\ndef parse_log_stream(s):\n    sys.exit(7)"
-        earned_x, max_x = evaluate_candidate_code_sandboxed(task_id, sys_exit_cand)
-        self.assertEqual((earned_x, max_x), (0, 10))
+        earned_x, max_x, valid_x, err_x = evaluate_candidate_code_sandboxed(task_id, sys_exit_cand)
+        self.assertEqual((earned_x, max_x, valid_x), (0, 10, True))
+        self.assertIn("7", err_x)
 
     def test_27_no_residual_model_files_or_code_paths(self):
         """Finding 3 [P1] FIX: Verifies no residual model files, models/ directory, or model runner code paths exist."""
@@ -632,21 +634,19 @@ def parse_log_stream(stream, cb=None):
         sol_path = os.path.join(BASE_DIR, "benchmarks", "campaign2", "suite_c", task_id, "solution.py")
         with open(sol_path, "r") as f:
             sol_code = f.read()
-        earned, max_s = evaluate_candidate_code_sandboxed(task_id, sol_code)
+        earned, max_s, is_valid, err_trace = evaluate_candidate_code_sandboxed(task_id, sol_code)
         # The reference solution handles bad_comp() raising ValueError in clause 6.
         # If domain exceptions were still tagged as infrastructure, this would raise InfrastructureError
         # or return (0, 10) instead of earning points.
-        self.assertEqual(earned, 10, f"Saga orchestrator reference solution failed: earned {earned}/10")
-        self.assertEqual(max_s, 10)
+        self.assertEqual((earned, max_s, is_valid), (10, 10, True), f"Saga orchestrator reference solution failed: earned {earned}/10")
 
         # Also verify the workflow engine which has err_fn raising ValueError
         task_id_wf = "p_f2_01_workflow_execution_engine"
         sol_path_wf = os.path.join(BASE_DIR, "benchmarks", "campaign2", "suite_p", task_id_wf, "solution.py")
         with open(sol_path_wf, "r") as f:
             sol_code_wf = f.read()
-        earned_wf, max_wf = evaluate_candidate_code_sandboxed(task_id_wf, sol_code_wf)
-        self.assertEqual(earned_wf, 10, f"Workflow engine reference solution failed: earned {earned_wf}/10")
-        self.assertEqual(max_wf, 10)
+        earned_wf, max_wf, valid_wf, err_wf = evaluate_candidate_code_sandboxed(task_id_wf, sol_code_wf)
+        self.assertEqual((earned_wf, max_wf, valid_wf), (10, 10, True), f"Workflow engine reference solution failed: earned {earned_wf}/10")
 
     def test_31_infrastructure_callback_failure_sticky(self):
         """P0 FIX: Inner callback infrastructure failures (unserializable result) set sticky infrastructure_error even when caught by candidate."""
@@ -810,8 +810,9 @@ def parse_log_stream(stream, cb=None):
             shutil.rmtree(cand_tmpdir, ignore_errors=True)
 
         # 2. High-level supervisor verification scoring (0, 10)
-        earned, max_s = evaluate_candidate_code_sandboxed(task_id, cand_sig_code, timeout_seconds=5)
-        self.assertEqual((earned, max_s), (0, 10), "Candidate process signal termination must score (0, 10) as candidate failure")
+        earned, max_s, is_valid, err_trace = evaluate_candidate_code_sandboxed(task_id, cand_sig_code, timeout_seconds=5)
+        self.assertEqual((earned, max_s, is_valid), (0, 10, False), "Candidate process signal termination must score (0, 10) as candidate failure")
+        self.assertIn("CandidateProcessError", err_trace)
 
 
 if __name__ == "__main__":

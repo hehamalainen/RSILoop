@@ -185,6 +185,42 @@ def classify_call_fault(exc: Exception, bytes_sent: int = -1, bytes_received: in
     )
 
 
+def publish_sealed_invalidation(run_dir: str, stage: str, attempt_id: str, reason: str) -> str:
+    """
+    Publish an independently sealed invalidation marker file when ledger is corrupted or invalid.
+    Prevents mutating an unparseable ledger file while ensuring permanent trial invalidation.
+    """
+    path = os.path.join(run_dir, f"campaign2_{stage}_invalidated.json")
+    if os.path.exists(path):
+        return path
+    data = {
+        "record_type": "terminal_classification",
+        "stage": stage,
+        "attempt_id": attempt_id,
+        "classification": "invalidated",
+        "reason": reason,
+        "timestamp": time.time(),
+    }
+    content = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(path, 0o444)
+    dir_fd = os.open(run_dir, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+    return path
+
+
+def is_sealed_invalidated(run_dir: str, stage: str) -> bool:
+    """Check if an independently sealed invalidation marker exists in run_dir."""
+    path = os.path.join(run_dir, f"campaign2_{stage}_invalidated.json")
+    return os.path.exists(path)
+
+
 class AttemptLedger:
     """Append-only audit ledger tracking attempt lifecycle, call intents, and completions."""
 
@@ -205,33 +241,34 @@ class AttemptLedger:
                     continue
                 try:
                     entry = json.loads(line)
-                    rec_type = entry.get("record_type")
-                    if rec_type == "completion":
-                        self.cumulative_calls += 1
-                        toks = entry.get("tokens", 0)
-                        if toks > 0:
-                            self.cumulative_tokens += toks
-                        if "unknown_usage_count" in entry:
-                            self.unknown_usage_count = entry["unknown_usage_count"]
-                        elif toks == 0:
-                            fault_dict = entry.get("fault") or {}
-                            bs = fault_dict.get("bytes_sent", -1)
-                            br = fault_dict.get("bytes_received", -1)
-                            is_pre_req = (bs == 0 and br == 0)
-                            if not is_pre_req:
-                                self.unknown_usage_count += 1
-                    elif rec_type in ("terminal_classification", "attempt_start"):
-                        if "unknown_usage_count" in entry:
-                            self.unknown_usage_count = entry["unknown_usage_count"]
-                    call_id = entry.get("call_id", "")
-                    if "_" in call_id:
-                        parts = call_id.split("_")
-                        if parts[-1].isdigit():
-                            num = int(parts[-1])
-                            if num > self._max_call_counter:
-                                self._max_call_counter = num
-                except Exception:
-                    pass
+                except Exception as e:
+                    raise AttemptLifecycleError(f"Ledger file is corrupted (invalid JSON line): {self.ledger_path}") from e
+
+                rec_type = entry.get("record_type")
+                if rec_type == "completion":
+                    self.cumulative_calls += 1
+                    toks = entry.get("tokens", 0)
+                    if toks > 0:
+                        self.cumulative_tokens += toks
+                    if "unknown_usage_count" in entry:
+                        self.unknown_usage_count = entry["unknown_usage_count"]
+                    elif toks == 0:
+                        fault_dict = entry.get("fault") or {}
+                        bs = fault_dict.get("bytes_sent", -1)
+                        br = fault_dict.get("bytes_received", -1)
+                        is_pre_req = (bs == 0 and br == 0)
+                        if not is_pre_req:
+                            self.unknown_usage_count += 1
+                elif rec_type in ("terminal_classification", "attempt_start"):
+                    if "unknown_usage_count" in entry:
+                        self.unknown_usage_count = entry["unknown_usage_count"]
+                call_id = entry.get("call_id", "")
+                if "_" in call_id:
+                    parts = call_id.split("_")
+                    if parts[-1].isdigit():
+                        num = int(parts[-1])
+                        if num > self._max_call_counter:
+                            self._max_call_counter = num
 
     def record_attempt_start(self, attempt_id: str, stage: str, metadata: Optional[dict] = None):
         entry = {

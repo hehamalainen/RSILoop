@@ -342,11 +342,26 @@ class Campaign2Orchestrator:
                 raise OrchestratorError(f"Generation call {call_id} failed on attempt {attempt}: {e}") from e
 
         evaluation = self.evaluator.evaluate(task_id, code)
-        if not isinstance(evaluation, tuple) or len(evaluation) not in (2, 3, 4):
-            raise OrchestratorError("Task evaluator must return (earned, max), (earned, max, is_valid), or (earned, max, is_valid, error_trace)")
-        earned, max_s = evaluation[:2]
-        is_valid = bool(evaluation[2]) if len(evaluation) >= 3 else True
-        error_trace = str(evaluation[3]) if len(evaluation) >= 4 else (str(evaluation[2]) if len(evaluation) == 3 and isinstance(evaluation[2], str) else "")
+        if isinstance(evaluation, tuple) and len(evaluation) == 4:
+            earned, max_s, is_valid, error_trace = evaluation
+        elif isinstance(evaluation, tuple) and len(evaluation) == 2:
+            earned, max_s = evaluation
+            is_valid = True
+            error_trace = ""
+        elif isinstance(evaluation, tuple) and len(evaluation) == 3:
+            earned, max_s, is_valid = evaluation
+            error_trace = ""
+        else:
+            raise OrchestratorError(
+                "Task evaluator must return (earned: int, max_s: int, is_valid: bool, error_trace: str)"
+            )
+
+        if not isinstance(is_valid, bool):
+            raise OrchestratorError(f"is_valid field must be a boolean, got {type(is_valid)}")
+
+        earned = int(earned)
+        max_s = int(max_s)
+        error_trace = str(error_trace)
 
         self.exploratory.record_generation(tokens, is_valid)
 
