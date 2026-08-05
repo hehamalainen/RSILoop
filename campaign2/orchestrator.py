@@ -358,7 +358,7 @@ class Campaign2Orchestrator:
         if type(error_trace) is not str:
             raise OrchestratorError(f"error_trace field must be a string, got {type(error_trace)}")
 
-        if max_s < 0 or earned < 0 or earned > max_s:
+        if max_s <= 0 or earned < 0 or earned > max_s:
             raise OrchestratorError(
                 f"Evaluator score out of range: earned={earned}, max_s={max_s}"
             )

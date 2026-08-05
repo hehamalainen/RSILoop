@@ -3384,7 +3384,7 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
             ctx.run_dir, ctx.run_id, stage, suite, args.mock, registration_sha256
         )
 
-    if is_sealed_invalidated(ctx.run_dir, stage):
+    if is_sealed_invalidated(ctx.run_dir, stage, identity["attempt_id"]):
         raise AttemptLifecycleError(
             f"Attempt '{identity['attempt_id']}' is sealed invalidated and cannot be resumed."
         )
@@ -3480,7 +3480,10 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
         )
         sys.stdout.write(f"Campaign 2 {stage} execution complete. Ladder decision: {ladder.decision}. Report written to {report_path}\n")
     except Exception as exc:
-        is_already_terminal = is_sealed_invalidated(ctx.run_dir, stage)
+        try:
+            is_already_terminal = is_sealed_invalidated(ctx.run_dir, stage, identity["attempt_id"])
+        except Exception:
+            is_already_terminal = True
         if not is_already_terminal:
             try:
                 cur_entries = ledger.get_entries()

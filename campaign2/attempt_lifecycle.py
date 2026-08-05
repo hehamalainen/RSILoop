@@ -191,18 +191,16 @@ def publish_sealed_invalidation(run_dir: str, stage: str, attempt_id: str, reaso
     Prevents mutating an unparseable ledger file while ensuring permanent trial invalidation.
     Uses the frozen durability sequence: atomic temp file write, fchmod(0o444), file fsync,
     atomic os.replace, and parent directory fsync.
+    NEVER overwrites an existing terminal marker file.
     """
-    real_run_dir = os.path.realpath(run_dir)
     path = os.path.join(run_dir, f"campaign2_{stage}_invalidated.json")
-    real_path = os.path.realpath(path)
 
     if os.path.lexists(path):
-        if os.path.islink(path):
-            raise AttemptLifecycleError(f"Invalidated marker path exists as a symlink: {path}")
-        if os.path.dirname(real_path) != real_run_dir:
-            raise AttemptLifecycleError(f"Invalidated marker path traverses outside run_dir: {path}")
-        if is_sealed_invalidated(run_dir, stage):
+        if is_sealed_invalidated(run_dir, stage, attempt_id):
             return path
+        raise AttemptLifecycleError(
+            f"Sealed invalidation marker {path} already exists and cannot be overwritten."
+        )
 
     data = {
         "record_type": "terminal_classification",
@@ -244,49 +242,56 @@ def publish_sealed_invalidation(run_dir: str, stage: str, attempt_id: str, reaso
     return path
 
 
-def is_sealed_invalidated(run_dir: str, stage: str) -> bool:
+def is_sealed_invalidated(run_dir: str, stage: str, attempt_id: Optional[str] = None) -> bool:
     """
     Check and strictly authenticate an independently sealed invalidation marker in run_dir.
-    Validates:
-    - Non-symlink path containment within run_dir
-    - Regular file type (not directory or symlink)
-    - Exact 0o444 file permissions mode
-    - Valid JSON object matching required identity fields:
-      record_type == "terminal_classification", stage == stage, classification == "invalidated".
-    Returns True only if all checks pass.
+    Outcomes:
+    - absent (file does not exist) -> return False
+    - present and 100% valid for stage, attempt_id, permissions, and canonical formatting -> return True
+    - present but malformed, noncanonical, mismatched, or incorrectly sealed -> raise AttemptLifecycleError
     """
     path = os.path.join(run_dir, f"campaign2_{stage}_invalidated.json")
-    if not os.path.lexists(path) or os.path.islink(path):
+    if not os.path.lexists(path):
         return False
+
+    if os.path.islink(path):
+        raise AttemptLifecycleError(f"Sealed invalidation marker path exists as a symlink: {path}")
 
     real_run_dir = os.path.realpath(run_dir)
     real_path = os.path.realpath(path)
     if os.path.dirname(real_path) != real_run_dir:
-        return False
+        raise AttemptLifecycleError(f"Sealed invalidation marker path traverses outside run_dir: {path}")
 
     st = os.stat(path)
     if not stat.S_ISREG(st.st_mode):
-        return False
+        raise AttemptLifecycleError(f"Sealed invalidation marker is not a regular file: {path}")
 
     mode = stat.S_IMODE(st.st_mode)
     if mode != 0o444:
-        return False
+        raise AttemptLifecycleError(f"Sealed invalidation marker permission mode must be 0o444, got {oct(mode)} for {path}")
 
     try:
         with open(path, "rb") as f:
-            data = json.loads(f.read().decode("utf-8"))
-    except Exception:
-        return False
+            raw_bytes = f.read()
+        data = json.loads(raw_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise AttemptLifecycleError(f"Sealed invalidation marker {path} contains invalid JSON: {exc}") from exc
 
     if not isinstance(data, dict):
-        return False
+        raise AttemptLifecycleError(f"Sealed invalidation marker {path} JSON must be a dictionary")
 
     if data.get("record_type") != "terminal_classification":
-        return False
+        raise AttemptLifecycleError(f"Sealed invalidation marker {path} record_type mismatch: got {data.get('record_type')}")
     if data.get("stage") != stage:
-        return False
+        raise AttemptLifecycleError(f"Sealed invalidation marker {path} stage mismatch: expected {stage}, got {data.get('stage')}")
     if data.get("classification") != "invalidated":
-        return False
+        raise AttemptLifecycleError(f"Sealed invalidation marker {path} classification mismatch: got {data.get('classification')}")
+    if attempt_id is not None and data.get("attempt_id") != attempt_id:
+        raise AttemptLifecycleError(f"Sealed invalidation marker {path} attempt_id mismatch: expected {attempt_id}, got {data.get('attempt_id')}")
+
+    expected_bytes = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if raw_bytes != expected_bytes:
+        raise AttemptLifecycleError(f"Sealed invalidation marker {path} contains noncanonical JSON formatting")
 
     return True
 

@@ -121,7 +121,7 @@
   "benchmarks/campaign2/suite_p/p_f4_02_sip_call_flow_fsm/solution.py": "f176d21c1f685ef72c790a49a9bae497bbbde7451388bfd0c4d24f05c4a01a35",
   "benchmarks/campaign2/suite_p/p_f4_02_sip_call_flow_fsm/test_harness.py": "62fb6980d9b819bd64a85587a91b9ab33b1058829e8e6b52cbb0271c6cfc8c48",
   "campaign2/attempt_identity.py": "b6c8b62707821ca1c7d7f02add7a231cec4d63b265d5658ebaebcecc2bde4963",
-  "campaign2/attempt_lifecycle.py": "b27d5297ca895166cd9ae36a5e6c9fa7f74889503f3fe5280c8fce618bef53aa",
+  "campaign2/attempt_lifecycle.py": "1fd7f7c93e894e1fbfb9dd00b93dba4f1118bd1a1f0a68357672811abe676283",
   "campaign2/defects.py": "2d8797df93ea4573407cc177b736fd3dfe34561f5deabbb6f5c4620e9a2f2288",
   "campaign2/durability.py": "94504d0100dda210e76a798dc6ed874780271c9ca64b66bca498955777c6646b",
   "campaign2/envelope.py": "81fa93ad4beeae7bcdf2f6665c2f81590b51fc2a718d6c92c6eff4bfc6149f05",
@@ -129,8 +129,8 @@
   "campaign2/launch_lock.py": "f1ed6a353bf1cf97e5b213215a7615e50884f86e1fed1d2e61638f4cc04f5db6",
   "campaign2/manifest.py": "66620f3f8ee2ac48ca768f3292a52be2694e285d04fa1f988f6e0f068193defb",
   "campaign2/model_provider.py": "7f308e91ec177a272552f64465a124c4f3dcd906bdcd2596a0ce3e1fc7ed727c",
-  "campaign2/orchestrator.py": "8e364eb50b81e330dcf140d1bea840d1c746abcecb7cc49d253e88ea63bcec1b",
-  "campaign2/proxy.py": "71cd6f63fe5830903b6eeff8e20497b993ba7e7645354461384b285b463f1db6",
+  "campaign2/orchestrator.py": "e18b508d04d5d0899dd228ca55af5702afec7046a345ad1d85103bf11aa6bb3a",
+  "campaign2/proxy.py": "8dadbcebf1c290c6a159fbd4def9e34e8c798753fa5047d2f85f5fd0a8d561d3",
   "campaign2/registration.py": "060c175dec651ac89c48eea0f140dc1b44a92a97a5794726ca4651fee44bcb32",
   "campaign2/reporting.py": "75d4fa2dee65803ce5a80ef69d536c9d09d63b5408a04ec8edb4124b5650b5de",
   "campaign2/scorer.py": "9a24687f8120b4617fe609e4211d4adc3f3cb1d0feb9e5f775aadd8ecc0bfbbd",
@@ -138,6 +138,6 @@
   "campaign2_master_registration.json": "082af7efaf01da48bec740274fda9e85a985f2099f3eb834f3fad45bee2640be",
   "campaign2_registration_anchor.hash": "2ad3b40461639c424319485d4376b8e1bd96fc003d50390972b1dc5b830eaeb4",
   "docs/walkthrough.md": "74956d466c2b9321cd8311c5e1367d48c2af490bf5e90adc5fd67e2e391fabbc",
-  "rsi_loop.py": "f8700be5bf6956268b69bf61818dd7638141737fe72edad5c49469d6a9cdafd9",
+  "rsi_loop.py": "75982d8d292a168bffa0997477bb68a64f04136f6c8b5062a86cb6df75e09df6",
   "run_tests.py": "29868bad46004c5cd87f8d3eda448e1453016ad34fe19751cd4f4a54eb35b736"
 }

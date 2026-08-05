@@ -1293,38 +1293,64 @@ class TestSealedInvalidationSecurity(unittest.TestCase):
 
             marker_path = publish_sealed_invalidation(run_dir, "pilot", "att_123", "Corrupt ledger")
             self.assertTrue(os.path.exists(marker_path))
-            self.assertTrue(is_sealed_invalidated(run_dir, "pilot"))
+            self.assertTrue(is_sealed_invalidated(run_dir, "pilot", "att_123"))
+
+            # Attempt ID mismatch -> raises AttemptLifecycleError
+            with self.assertRaises(AttemptLifecycleError):
+                is_sealed_invalidated(run_dir, "pilot", "att_WRONG")
 
             # Exact mode 0o444
             mode = stat.S_IMODE(os.stat(marker_path).st_mode)
             self.assertEqual(mode, 0o444)
 
-            # Symlink marker rejection
+            # Symlink marker rejection -> raises AttemptLifecycleError
             sym_dir = os.path.realpath(os.path.join(base_tmp, "run_sym_test"))
             os.makedirs(sym_dir)
             target = os.path.join(sym_dir, "campaign2_pilot_invalidated.json")
             real_file = os.path.join(sym_dir, "real_target.json")
             with open(real_file, "w") as f:
-                f.write('{"record_type": "terminal_classification", "stage": "pilot", "classification": "invalidated"}\n')
+                f.write('{\n  "attempt_id": "att_123",\n  "classification": "invalidated",\n  "record_type": "terminal_classification",\n  "stage": "pilot"\n}\n')
             os.chmod(real_file, 0o444)
             os.symlink(real_file, target)
-            self.assertFalse(is_sealed_invalidated(sym_dir, "pilot"))
+            with self.assertRaises(AttemptLifecycleError):
+                is_sealed_invalidated(sym_dir, "pilot")
 
-            # Tampered marker (wrong mode)
+            # Tampered marker (wrong mode) -> raises AttemptLifecycleError
             tampered_dir = os.path.realpath(os.path.join(base_tmp, "run_tamp_mode"))
             os.makedirs(tampered_dir)
             t_path = publish_sealed_invalidation(tampered_dir, "pilot", "att_123", "reason")
             os.chmod(t_path, 0o644)
-            self.assertFalse(is_sealed_invalidated(tampered_dir, "pilot"))
+            with self.assertRaises(AttemptLifecycleError):
+                is_sealed_invalidated(tampered_dir, "pilot")
 
-            # Tampered marker (non-dict JSON)
+            # Tampered marker (non-dict JSON) -> raises AttemptLifecycleError
             tamp_dict_dir = os.path.realpath(os.path.join(base_tmp, "run_tamp_dict"))
             os.makedirs(tamp_dict_dir)
             td_path = os.path.join(tamp_dict_dir, "campaign2_pilot_invalidated.json")
             with open(td_path, "w") as f:
                 f.write("[]\n")
             os.chmod(td_path, 0o444)
-            self.assertFalse(is_sealed_invalidated(tamp_dict_dir, "pilot"))
+            with self.assertRaises(AttemptLifecycleError):
+                is_sealed_invalidated(tamp_dict_dir, "pilot")
+
+            # Minified / noncanonical JSON -> raises AttemptLifecycleError
+            noncanon_dir = os.path.realpath(os.path.join(base_tmp, "run_noncanon"))
+            os.makedirs(noncanon_dir)
+            nc_path = os.path.join(noncanon_dir, "campaign2_pilot_invalidated.json")
+            with open(nc_path, "w") as f:
+                f.write('{"record_type":"terminal_classification","stage":"pilot","attempt_id":"att_123","classification":"invalidated"}\n')
+            os.chmod(nc_path, 0o444)
+            with self.assertRaises(AttemptLifecycleError):
+                is_sealed_invalidated(noncanon_dir, "pilot", "att_123")
+
+            # Existing malformed marker cannot be overwritten -> publish_sealed_invalidation raises AttemptLifecycleError
+            with open(nc_path, "rb") as f:
+                raw_before = f.read()
+            with self.assertRaises(AttemptLifecycleError):
+                publish_sealed_invalidation(noncanon_dir, "pilot", "att_123", "Attempting overwrite")
+            with open(nc_path, "rb") as f:
+                raw_after = f.read()
+            self.assertEqual(raw_before, raw_after)
 
     def test_non_dict_json_ledger_lines_raise_lifecycle_error(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1333,6 +1359,33 @@ class TestSealedInvalidationSecurity(unittest.TestCase):
                 f.write("[]\n")
             with self.assertRaises(AttemptLifecycleError):
                 AttemptLedger(ledger_p)
+
+    def test_zero_max_score_rejected_by_orchestrator(self):
+        """P2 FIX: Verifies evaluator returning max_score <= 0 is rejected by orchestrator."""
+        class ZeroMaxEvaluator:
+            def evaluate(self, task_id, code):
+                return 0, 0, True, ""
+
+        class MockProvider:
+            def generate_candidate(self, task_id, effective_prompt, call_id):
+                return "# code", 100
+            def mutate_prompt(self, mutable_body, failure_context, call_id):
+                return "# mutated", 200
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ta_data = generate_family_blocked_assignment()
+            reg_data = verify_master_registration(BASE_DIR)
+            orch = Campaign2Orchestrator(
+                model_provider=MockProvider(),
+                task_evaluator=ZeroMaxEvaluator(),
+                tier_assignment=ta_data,
+                registration=reg_data,
+                suite="suite_p",
+                workspace_root=tmp_dir,
+            )
+            with self.assertRaises(OrchestratorError) as ctx:
+                orch.run_trial(0)
+            self.assertIn("max_s", str(ctx.exception))
 
 
 if __name__ == "__main__":

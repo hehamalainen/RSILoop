@@ -1024,7 +1024,7 @@ def _find_task_dir(task_id: str) -> str:
     raise InfrastructureError(f"Task directory not found for task_id '{task_id}' at {task_dir}")
 
 
-def evaluate_candidate_code_sandboxed(task_id: str, candidate_code: str, timeout_seconds: int = 15) -> Tuple[int, int]:
+def evaluate_candidate_code_sandboxed(task_id: str, candidate_code: str, timeout_seconds: int = 15) -> Tuple[int, int, bool, str]:
     """
     Host Supervisor Candidate Evaluator.
     Imports test_harness.py in host memory outside candidate workspace.
@@ -1132,7 +1132,20 @@ def evaluate_candidate_code_sandboxed(task_id: str, candidate_code: str, timeout
         if not run_eval:
             raise InfrastructureError(f"Test harness missing run_evaluation for {task_id}")
 
-        earned, max_s = run_eval(cand_proxy)
+        eval_res = run_eval(cand_proxy)
+        if type(eval_res) is not tuple or len(eval_res) != 2:
+            raise InfrastructureError(
+                f"Test harness run_evaluation for {task_id} must return (earned: int, max_s: int), got {eval_res}"
+            )
+        earned, max_s = eval_res
+        if type(earned) is not int or type(max_s) is not int:
+            raise InfrastructureError(
+                f"Test harness run_evaluation for {task_id} must return exact int scores, got earned={type(earned)}, max_s={type(max_s)}"
+            )
+        if max_s <= 0 or earned < 0 or earned > max_s:
+            raise InfrastructureError(
+                f"Test harness run_evaluation for {task_id} score out of range: earned={earned}, max_s={max_s}"
+            )
 
         if getattr(ipc_client, "candidate_process_error", None):
             return 0, 10, False, f"CandidateProcessError: {ipc_client.candidate_process_error}"
@@ -1147,7 +1160,8 @@ def evaluate_candidate_code_sandboxed(task_id: str, candidate_code: str, timeout
         if getattr(harness_mod, "_sticky_infrastructure_error", None):
             raise harness_mod._sticky_infrastructure_error
 
-        return int(earned), int(max_s), True, ""
+        err_trace = f"CandidateException: {ipc_client.last_exception_message}" if ipc_client.candidate_exception_occurred else ""
+        return earned, max_s, True, err_trace
     except CandidateTimeoutError:
         # A live worker that stops producing protocol output is not attributable
         # to a scored candidate outcome. Registered Limitation 10 makes this a

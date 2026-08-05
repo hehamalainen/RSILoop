@@ -812,12 +812,36 @@ def parse_log_stream(stream, cb=None):
         self.assertIn("CandidateProcessError", err_trace)
 
     def test_34_sticky_candidate_exceptions_and_runtime_invalid(self):
-        """P1 FIX: Top-level candidate import and process failures yield is_valid=False."""
-        task_id = "p_f1_02_syslog_framing_decoder"
-        cand_code = "raise RuntimeError('Top-level import failure')"
-        earned, max_s, is_valid, err_trace = evaluate_candidate_code_sandboxed(task_id, cand_code, timeout_seconds=5)
+        """P1 FIX: Verifies evaluable-candidate validity definition and sticky error trace preservation."""
+        task_id = "c_f1_01_log_stream_parser"
+
+        # 1. Top-level import failure -> invalid (0, 10, False, CandidateImportError)
+        bad_import_cand = "raise RuntimeError('Top-level import failure')"
+        earned, max_s, is_valid, err_trace = evaluate_candidate_code_sandboxed(task_id, bad_import_cand, timeout_seconds=5)
         self.assertEqual((earned, max_s, is_valid), (0, 10, False))
         self.assertIn("CandidateImportError", err_trace)
+
+        # 2. Runtime exception on first call then success -> valid (1, 10, True, CandidateException)
+        early_runtime_cand = """
+call_count = 0
+def parse_log_stream(s):
+    global call_count
+    call_count += 1
+    if call_count == 1:
+        raise ValueError('Early runtime error')
+    return [{'timestamp': '2026-01-01', 'level': 'INFO', 'message': 'Online'}]
+"""
+        earned_e, max_e, is_valid_e, err_trace_e = evaluate_candidate_code_sandboxed(task_id, early_runtime_cand, timeout_seconds=5)
+        self.assertEqual((earned_e, max_e, is_valid_e), (2, 10, True))
+        self.assertIn("CandidateException", err_trace_e)
+        self.assertIn("Early runtime error", err_trace_e)
+
+        # 3. Runtime exception on all calls -> valid (0, 10, True, CandidateException)
+        runtime_always_cand = "def parse_log_stream(s):\n    raise KeyError('Runtime error always')"
+        earned_a, max_a, is_valid_a, err_trace_a = evaluate_candidate_code_sandboxed(task_id, runtime_always_cand, timeout_seconds=5)
+        self.assertEqual((earned_a, max_a, is_valid_a), (0, 10, True))
+        self.assertIn("CandidateException", err_trace_a)
+        self.assertIn("Runtime error always", err_trace_a)
 
 
 if __name__ == "__main__":
