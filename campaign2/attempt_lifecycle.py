@@ -39,6 +39,16 @@ def publish_scientific_start(stage: str, attempt_id: str, workspace_root: str = 
 
     if os.path.exists(stage_start_p):
         verify_stage_scientific_start(stage, attempt_id, workspace_root)
+        try:
+            dir_fd = os.open(history_dir, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except Exception as exc:
+            raise AttemptInvalidatedError(
+                f"Failed to fsync parent history directory {history_dir} during pre-existing scientific start marker recovery: {exc}"
+            ) from exc
         return stage_start_p
 
     data = {
@@ -71,11 +81,16 @@ def publish_scientific_start(stage: str, attempt_id: str, workspace_root: str = 
             except OSError:
                 pass
 
-    dir_fd = os.open(history_dir, os.O_RDONLY)
     try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+        dir_fd = os.open(history_dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except Exception as exc:
+        raise AttemptInvalidatedError(
+            f"Failed to fsync parent history directory {history_dir} after scientific start marker publication: {exc}"
+        ) from exc
 
     verify_stage_scientific_start(stage, attempt_id, workspace_root)
     return stage_start_p
@@ -196,11 +211,21 @@ def publish_sealed_invalidation(run_dir: str, stage: str, attempt_id: str, reaso
     path = os.path.join(run_dir, f"campaign2_{stage}_invalidated.json")
 
     if os.path.lexists(path):
-        if is_sealed_invalidated(run_dir, stage, attempt_id):
-            return path
-        raise AttemptLifecycleError(
-            f"Sealed invalidation marker {path} already exists and is invalid/mismatched; cannot overwrite."
-        )
+        if not is_sealed_invalidated(run_dir, stage, attempt_id):
+            raise AttemptLifecycleError(
+                f"Sealed invalidation marker {path} already exists and is invalid/mismatched; cannot overwrite."
+            )
+        try:
+            dir_fd = os.open(run_dir, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except Exception as exc:
+            raise AttemptLifecycleError(
+                f"Failed to fsync parent directory {run_dir} during pre-existing invalidation marker recovery: {exc}"
+            ) from exc
+        return path
 
     data = {
         "record_type": "terminal_classification",

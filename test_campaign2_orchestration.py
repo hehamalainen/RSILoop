@@ -1072,6 +1072,22 @@ class TestReportingStructure(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "family_scores"):
             generate_schema3_report(outcome, self.reg_data, self.ta_data, workspace_root=self.workspace)
 
+    def test_exploratory_tracker_summary_exact_keys_no_obsolete_alias(self):
+        """P2 FIX: Verifies ExploratoryTracker summary returns exactly the 4 registered exploratory metric keys without obsolete valid_candidate_rate alias."""
+        from campaign2.orchestrator import ExploratoryTracker
+        tracker = ExploratoryTracker()
+        summary = tracker.summary()
+        self.assertEqual(
+            set(summary.keys()),
+            {
+                "score_improving_mutations_per_call",
+                "improvement_per_1000_tokens",
+                "evaluable_candidate_rate",
+                "best_mutation_depths",
+            },
+        )
+        self.assertNotIn("valid_candidate_rate", summary)
+
 
 class TestStageGlobalOneShot(unittest.TestCase):
     """Test stage-global scientific start claim marker and anti-fishing duplicate attempt rejection."""
@@ -1098,6 +1114,31 @@ class TestStageGlobalOneShot(unittest.TestCase):
 
         with self.assertRaises(AttemptInvalidatedError):
             verify_stage_scientific_start("pilot", "attempt_2", workspace_root=self.workspace)
+
+    def test_scientific_start_pre_existing_marker_recovery_fsync(self):
+        """P1 FIX: Verifies publish_scientific_start on pre-existing valid marker executes directory fsync and handles fsync failure."""
+        p1 = publish_scientific_start("pilot", "attempt_1", workspace_root=self.workspace)
+        fsync_calls = []
+
+        original_fsync = os.fsync
+        def spy_fsync(fd, *args, **kwargs):
+            fsync_calls.append(fd)
+            return original_fsync(fd, *args, **kwargs)
+
+        with mock.patch("os.fsync", side_effect=spy_fsync):
+            p1_again = publish_scientific_start("pilot", "attempt_1", workspace_root=self.workspace)
+            self.assertEqual(p1, p1_again)
+            self.assertTrue(len(fsync_calls) >= 1, "Directory fsync must be executed on pre-existing scientific start marker recovery")
+
+        def mock_failing_dir_fsync(fd, *args, **kwargs):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError("Disk I/O failure on history dir fsync")
+            return original_fsync(fd, *args, **kwargs)
+
+        with mock.patch("os.fsync", side_effect=mock_failing_dir_fsync):
+            with self.assertRaises(AttemptInvalidatedError) as ctx:
+                publish_scientific_start("pilot", "attempt_1", workspace_root=self.workspace)
+            self.assertIn("Failed to fsync parent history directory", str(ctx.exception))
 
     def test_scientific_start_strict_verification(self):
         p1 = publish_scientific_start("pilot", "attempt_1", workspace_root=self.workspace)
@@ -1450,6 +1491,32 @@ class TestSealedInvalidationSecurity(unittest.TestCase):
                  mock.patch("os.fsync", side_effect=mock_failing_dir_fsync):
                 with self.assertRaises(AttemptLifecycleError) as ctx:
                     publish_sealed_invalidation(race_dir2, "pilot", "attempt-winner", "Failing dir fsync")
+                self.assertIn("Failed to fsync parent directory", str(ctx.exception))
+
+            # Pre-existing valid invalidation marker recovery test:
+            # Verifies parent directory fsync is executed on initial lexists() match, and directory fsync failure raises AttemptLifecycleError
+            lexists_dir = os.path.realpath(os.path.join(base_tmp, "run_lexists_recovery"))
+            os.makedirs(lexists_dir)
+            p_ex = publish_sealed_invalidation(lexists_dir, "pilot", "att_123", "Reason")
+            fsync_calls_ex = []
+
+            def spy_fsync_ex(fd, *args, **kwargs):
+                fsync_calls_ex.append(fd)
+                return original_fsync(fd, *args, **kwargs)
+
+            with mock.patch("os.fsync", side_effect=spy_fsync_ex):
+                p_res = publish_sealed_invalidation(lexists_dir, "pilot", "att_123", "Reason again")
+                self.assertEqual(p_res, p_ex)
+                self.assertTrue(len(fsync_calls_ex) >= 1, "Directory fsync must be executed on pre-existing invalidation marker recovery")
+
+            def mock_failing_dir_fsync_ex(fd, *args, **kwargs):
+                if stat.S_ISDIR(os.fstat(fd).st_mode):
+                    raise OSError("Disk I/O failure on dir fsync")
+                return original_fsync(fd, *args, **kwargs)
+
+            with mock.patch("os.fsync", side_effect=mock_failing_dir_fsync_ex):
+                with self.assertRaises(AttemptLifecycleError) as ctx:
+                    publish_sealed_invalidation(lexists_dir, "pilot", "att_123", "Reason again")
                 self.assertIn("Failed to fsync parent directory", str(ctx.exception))
 
     def test_non_dict_json_ledger_lines_raise_lifecycle_error(self):

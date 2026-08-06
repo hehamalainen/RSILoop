@@ -121,7 +121,7 @@
   "benchmarks/campaign2/suite_p/p_f4_02_sip_call_flow_fsm/solution.py": "f176d21c1f685ef72c790a49a9bae497bbbde7451388bfd0c4d24f05c4a01a35",
   "benchmarks/campaign2/suite_p/p_f4_02_sip_call_flow_fsm/test_harness.py": "62fb6980d9b819bd64a85587a91b9ab33b1058829e8e6b52cbb0271c6cfc8c48",
   "campaign2/attempt_identity.py": "b6c8b62707821ca1c7d7f02add7a231cec4d63b265d5658ebaebcecc2bde4963",
-  "campaign2/attempt_lifecycle.py": "652fde3b7a356af724bddb804aa7d8983a5917d6eecff18536803145e5265a09",
+  "campaign2/attempt_lifecycle.py": "abffe74129367e2e24e9529c4ebf4f37f25669bc9dc973c4f8f0b541c86f322b",
   "campaign2/defects.py": "2d8797df93ea4573407cc177b736fd3dfe34561f5deabbb6f5c4620e9a2f2288",
   "campaign2/durability.py": "94504d0100dda210e76a798dc6ed874780271c9ca64b66bca498955777c6646b",
   "campaign2/envelope.py": "81fa93ad4beeae7bcdf2f6665c2f81590b51fc2a718d6c92c6eff4bfc6149f05",
