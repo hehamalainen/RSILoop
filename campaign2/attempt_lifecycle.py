@@ -234,11 +234,10 @@ def publish_sealed_invalidation(run_dir: str, stage: str, attempt_id: str, reaso
     try:
         os.link(tmp_path, path)
     except FileExistsError:
-        if is_sealed_invalidated(run_dir, stage, attempt_id):
-            return path
-        raise AttemptLifecycleError(
-            f"Sealed invalidation marker {path} already exists and is invalid/mismatched; cannot overwrite."
-        )
+        if not is_sealed_invalidated(run_dir, stage, attempt_id):
+            raise AttemptLifecycleError(
+                f"Sealed invalidation marker {path} already exists and is invalid/mismatched; cannot overwrite."
+            )
     finally:
         if os.path.lexists(tmp_path):
             try:
@@ -246,11 +245,14 @@ def publish_sealed_invalidation(run_dir: str, stage: str, attempt_id: str, reaso
             except Exception:
                 pass
 
-    dir_fd = os.open(run_dir, os.O_RDONLY)
     try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+        dir_fd = os.open(run_dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except Exception as exc:
+        raise AttemptLifecycleError(f"Failed to fsync parent directory {run_dir} after marker publication: {exc}") from exc
 
     return path
 

@@ -247,7 +247,6 @@ class ExploratoryTracker:
                 if self.total_output_tokens > 0 else "N/A"
             ),
             "evaluable_candidate_rate": rate_str,
-            "valid_candidate_rate": rate_str,
             "best_mutation_depths": self.best_depth_per_trial,
         }
 

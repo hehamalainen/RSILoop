@@ -15,6 +15,7 @@ Mechanical Traceability Matrix:
 
 import os
 import sys
+import time
 import json
 import stat
 import hashlib
@@ -825,6 +826,17 @@ class TestMasterRegistrationHashVerification(unittest.TestCase):
             "and invalidates the attempt; phase-based exit attribution does not cover non-exiting processes.",
         )
 
+    def test_evaluable_candidate_definition_exact_registration(self):
+        """P1 FIX: Verifies exact preregistered evaluable_candidate_definition dictionary in master registration."""
+        from campaign2.registration import EVALUABLE_CANDIDATE_DEFINITION
+        reg = verify_master_registration(self.workspace)
+        self.assertIn("evaluable_candidate_definition", reg)
+        ecd = reg["evaluable_candidate_definition"]
+        self.assertEqual(ecd["metric_name"], "evaluable-candidate rate")
+        self.assertEqual(ecd, EVALUABLE_CANDIDATE_DEFINITION)
+        self.assertIn("CandidateTimeoutError", ecd["classification"])
+        self.assertIn("invalidates the attempt", ecd["classification"])
+
     def test_registration_content_tamper_is_rejected(self):
         path = os.path.join(self.workspace, "campaign2_master_registration.json")
         os.chmod(path, 0o600)
@@ -1356,24 +1368,89 @@ class TestSealedInvalidationSecurity(unittest.TestCase):
                 raw_after = f.read()
             self.assertEqual(raw_before, raw_after)
 
-            # Deterministic check-then-replace atomic link race test:
-            # Inject an existing valid marker for attempt-existing immediately before publish call
-            race_dir = os.path.realpath(os.path.join(base_tmp, "run_race_dir"))
+            # Deterministic os.link() collision race test:
+            # During publish_sealed_invalidation(), mock os.link so that when os.link(tmp, target) is called:
+            # 1. A competing publisher creates the valid target marker file on disk (simulating winning the link race).
+            # 2. os.link raises FileExistsError (simulating kernel collision).
+            # Verifies that FileExistsError is caught, winner is authenticated, parent directory is fsynced,
+            # and existing marker is NEVER overwritten.
+            race_dir = os.path.realpath(os.path.join(base_tmp, "run_real_link_race"))
             os.makedirs(race_dir)
-            existing_marker_path = publish_sealed_invalidation(race_dir, "pilot", "attempt-existing", "Existing marker")
-            with open(existing_marker_path, "r", encoding="utf-8") as f:
-                content_before = f.read()
+            target_path = os.path.join(race_dir, "campaign2_pilot_invalidated.json")
 
-            # Attempting publish with attempt-new must trigger FileExistsError handling and raise AttemptLifecycleError without overwriting
-            with self.assertRaises(AttemptLifecycleError):
-                publish_sealed_invalidation(race_dir, "pilot", "attempt-new", "New marker attempt")
+            original_os_link = os.link
+            fsync_calls = []
 
-            with open(existing_marker_path, "r", encoding="utf-8") as f:
-                content_after = f.read()
+            def mock_colliding_link(src, dst, *args, **kwargs):
+                if dst == target_path:
+                    # Directly create the winning valid marker to simulate winning publisher without recursion
+                    data = {
+                        "record_type": "terminal_classification",
+                        "stage": "pilot",
+                        "attempt_id": "attempt-winner",
+                        "classification": "invalidated",
+                        "reason": "Winning race",
+                        "timestamp": time.time(),
+                    }
+                    content_bytes = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+                    with open(target_path, "wb") as f:
+                        f.write(content_bytes)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.chmod(target_path, 0o444)
+                    raise FileExistsError(17, "File exists")
+                return original_os_link(src, dst, *args, **kwargs)
 
-            self.assertEqual(content_before, content_after)
-            existing_data = json.loads(content_after)
-            self.assertEqual(existing_data["attempt_id"], "attempt-existing")
+            original_fsync = os.fsync
+            def spy_fsync(fd, *args, **kwargs):
+                fsync_calls.append(fd)
+                return original_fsync(fd, *args, **kwargs)
+
+            with mock.patch("os.link", side_effect=mock_colliding_link), \
+                 mock.patch("os.fsync", side_effect=spy_fsync):
+                fsync_calls.clear()
+                res = publish_sealed_invalidation(race_dir, "pilot", "attempt-winner", "Losing race attempt")
+                self.assertEqual(res, target_path)
+                self.assertTrue(len(fsync_calls) >= 2, "Both file fsync and parent directory fsync must execute on link collision")
+
+            with open(target_path, "r", encoding="utf-8") as f:
+                winner_data = json.load(f)
+            self.assertEqual(winner_data["attempt_id"], "attempt-winner")
+
+            # Also verify that if directory fsync fails during collision recovery, AttemptLifecycleError is raised
+            race_dir2 = os.path.realpath(os.path.join(base_tmp, "run_real_link_race2"))
+            os.makedirs(race_dir2)
+            target_path2 = os.path.join(race_dir2, "campaign2_pilot_invalidated.json")
+
+            def mock_colliding_link2(src, dst, *args, **kwargs):
+                if dst == target_path2:
+                    data = {
+                        "record_type": "terminal_classification",
+                        "stage": "pilot",
+                        "attempt_id": "attempt-winner",
+                        "classification": "invalidated",
+                        "reason": "Winning race",
+                        "timestamp": time.time(),
+                    }
+                    content_bytes = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+                    with open(target_path2, "wb") as f:
+                        f.write(content_bytes)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.chmod(target_path2, 0o444)
+                    raise FileExistsError(17, "File exists")
+                return original_os_link(src, dst, *args, **kwargs)
+
+            def mock_failing_dir_fsync(fd, *args, **kwargs):
+                if stat.S_ISDIR(os.fstat(fd).st_mode):
+                    raise OSError("Disk I/O failure on dir fsync")
+                return original_fsync(fd, *args, **kwargs)
+
+            with mock.patch("os.link", side_effect=mock_colliding_link2), \
+                 mock.patch("os.fsync", side_effect=mock_failing_dir_fsync):
+                with self.assertRaises(AttemptLifecycleError) as ctx:
+                    publish_sealed_invalidation(race_dir2, "pilot", "attempt-winner", "Failing dir fsync")
+                self.assertIn("Failed to fsync parent directory", str(ctx.exception))
 
     def test_non_dict_json_ledger_lines_raise_lifecycle_error(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

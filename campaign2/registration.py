@@ -46,9 +46,9 @@ EXPLORATORY_SECONDARIES = [
 
 EVALUABLE_CANDIDATE_DEFINITION = {
     "metric_name": "evaluable-candidate rate",
-    "numerator": "Number of candidate generation calls where candidate imported cleanly and completed a scored test harness evaluation without process death or evaluation-aborting infrastructure failure",
+    "numerator": "Number of candidate generation calls where candidate imported cleanly and completed a scored test harness evaluation without process death, worker timeout, or evaluation-aborting infrastructure failure",
     "denominator": "Total candidate generation calls (baseline + optimizer + control)",
-    "classification": "Harness-contained candidate runtime exceptions during evaluation remain evaluable (is_valid=True) with bounded error traces recorded for optimizer feedback. Candidate top-level import/syntax failures, process signal/exit deaths (CandidateProcessError), and evaluation timeouts score (0, 10) with is_valid=False. Unattributed wall-clock timeouts or infrastructure faults invalidate the attempt."
+    "classification": "Harness-contained candidate runtime exceptions during evaluation remain evaluable (is_valid=True) with bounded error traces recorded for optimizer feedback. Candidate top-level import/syntax failures and attributable process termination (CandidateProcessError) score (0, 10) with is_valid=False. Any live-worker CandidateTimeoutError, unattributed wall-clock timeout, or infrastructure fault invalidates the attempt, not a scored candidate."
 }
 
 FROZEN_TRIO_ORDERINGS = [
