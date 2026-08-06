@@ -3417,12 +3417,31 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
         ckpt_mgr = CheckpointManager(ckpt_path, stage)
         ledger.verify_resume_admission()
 
+        from campaign2.cpu_gate import run_prescientific_cpu_gate
+        from campaign2.preflight_registry import run_pilot_canary
+        from campaign2.model_provider import (
+            MockModelProvider,
+            MockTaskEvaluator,
+            SolModelProvider,
+            ProductionTaskEvaluator,
+            verify_codex_cli_version,
+        )
+
         if args.mock:
-            model = MockModelProvider()
-            evaluator = MockTaskEvaluator()
+            run_prescientific_cpu_gate(BASE_DIR, is_mock=True)
+            model = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=BASE_DIR, ledger=ledger, mock_subprocess=True)
+            evaluator = ProductionTaskEvaluator()
+            run_pilot_canary(stage, identity["attempt_id"], model, BASE_DIR)
+            if is_resume:
+                verify_stage_scientific_start(stage, identity["attempt_id"], BASE_DIR)
+            else:
+                publish_scientific_start(stage, identity["attempt_id"], BASE_DIR)
         else:
-            model = SolModelProvider()
-            evaluator = None
+            verify_codex_cli_version("codex")
+            run_prescientific_cpu_gate(BASE_DIR, is_mock=False)
+            model = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=BASE_DIR, ledger=ledger, mock_subprocess=False)
+            evaluator = ProductionTaskEvaluator()
+            run_pilot_canary(stage, identity["attempt_id"], model, BASE_DIR)
             if is_resume:
                 verify_stage_scientific_start(stage, identity["attempt_id"], BASE_DIR)
             else:

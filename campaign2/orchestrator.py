@@ -269,7 +269,12 @@ class Campaign2Orchestrator:
         workspace_root: str = BASE_DIR,
     ):
         self.model = model_provider
+        if task_evaluator is None:
+            from campaign2.model_provider import ProductionTaskEvaluator
+            task_evaluator = ProductionTaskEvaluator()
         self.evaluator = task_evaluator
+        if self.evaluator is None:
+            raise OrchestratorError("self.evaluator must not be None")
         self.ledger = ledger
         self.checkpoint_mgr = checkpoint_mgr
 

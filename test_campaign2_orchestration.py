@@ -127,9 +127,12 @@ class TestMockModelProvider(unittest.TestCase):
         self.assertIn("guided=True", mut_body)
         self.assertEqual(mt, 200)
 
-    def test_sol_provider_raises_not_implemented(self):
-        with self.assertRaises(NotImplementedError):
-            SolModelProvider()
+    def test_sol_provider_instantiation(self):
+        provider = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=BASE_DIR, mock_subprocess=True)
+        self.assertEqual(provider.model_name, "gpt-5.6-sol")
+        code, toks = provider.generate_candidate("c_f1_01_log_stream_parser", "prompt", "call1")
+        self.assertIn("def solve()", code)
+        self.assertEqual(toks, 100)
 
 
 class TestCampaign2Orchestrator(unittest.TestCase):

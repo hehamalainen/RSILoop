@@ -9,6 +9,7 @@ import os
 import json
 import stat
 import time
+import hashlib
 from typing import Dict, Any, List, Optional, Tuple
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -452,10 +453,20 @@ class AttemptLedger:
 
     def _append(self, entry: dict):
         line = json.dumps(entry) + "\n"
+        first_write = not os.path.exists(self.ledger_path)
         with open(self.ledger_path, "a", encoding="utf-8") as f:
             f.write(line)
             f.flush()
             os.fsync(f.fileno())
+        if first_write:
+            dir_fd = os.open(os.path.dirname(self.ledger_path), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
+    def _append_record(self, entry: dict):
+        self._append(entry)
 
     def get_entries(self) -> List[dict]:
         if not os.path.exists(self.ledger_path):
@@ -498,6 +509,64 @@ class AttemptLedger:
                 )
         return True
 
+    def verify_three_record_protocol(self) -> bool:
+        entries = self.get_entries()
+        intents = {}
+        started = {}
+        completes = {}
+
+        for entry in entries:
+            r_type = entry.get("record_type")
+            if r_type == "invocation_intent":
+                cid = entry.get("logical_call_id")
+                ord_num = entry.get("invocation_ordinal", 1)
+                key = (cid, ord_num)
+                if key in intents:
+                    raise AttemptLifecycleError(f"Duplicate invocation_intent for key {key}")
+                rec_bytes = (json.dumps(entry, sort_keys=True) + "\n").encode("utf-8")
+                rec_hash = hashlib.sha256(rec_bytes).hexdigest()
+                intents[key] = (entry, rec_hash)
+            elif r_type == "process_started":
+                cid = entry.get("logical_call_id")
+                ord_num = entry.get("invocation_ordinal", 1)
+                key = (cid, ord_num)
+                if key in started:
+                    raise AttemptLifecycleError(f"Duplicate process_started for key {key}")
+                if key not in intents:
+                    raise AttemptLifecycleError(f"process_started recorded without invocation_intent for key {key}")
+                intent_rec, intent_hash = intents[key]
+                if entry.get("intent_record_hash") != intent_hash:
+                    raise AttemptLifecycleError(f"process_started intent_record_hash mismatch for key {key}")
+                rec_bytes = (json.dumps(entry, sort_keys=True) + "\n").encode("utf-8")
+                rec_hash = hashlib.sha256(rec_bytes).hexdigest()
+                started[key] = (entry, rec_hash)
+            elif r_type == "invocation_completion":
+                cid = entry.get("logical_call_id")
+                ord_num = entry.get("invocation_ordinal", 1)
+                key = (cid, ord_num)
+                if key in completes:
+                    raise AttemptLifecycleError(f"Duplicate invocation_completion for key {key}")
+                if key not in intents:
+                    raise AttemptLifecycleError(f"invocation_completion recorded without invocation_intent for key {key}")
+                intent_rec, intent_hash = intents[key]
+                if entry.get("intent_record_hash") != intent_hash:
+                    raise AttemptLifecycleError(f"invocation_completion intent_record_hash mismatch for key {key}")
+
+                if key in started:
+                    st_rec, st_hash = started[key]
+                    if entry.get("started_record_hash") != st_hash:
+                        raise AttemptLifecycleError(f"invocation_completion started_record_hash mismatch for key {key}")
+                elif entry.get("parse_state") != "spawn_failure":
+                    raise AttemptLifecycleError(f"invocation_completion without process_started must be spawn_failure for key {key}")
+
+                completes[key] = (entry, None)
+
+        for key in intents:
+            if key not in completes:
+                raise AttemptLifecycleError(f"Uncompleted invocation_intent for key {key}")
+
+        return True
+
     def verify_resume_admission(self) -> bool:
         for entry in self.get_entries():
             if entry.get("record_type") == "terminal_classification":
@@ -505,4 +574,5 @@ class AttemptLedger:
                     f"Attempt is already terminal (classified as '{entry.get('classification')}' - "
                     f"'{entry.get('reason')}') and cannot be resumed"
                 )
-        return self.verify_all_intents_completed()
+        self.verify_all_intents_completed()
+        return self.verify_three_record_protocol()

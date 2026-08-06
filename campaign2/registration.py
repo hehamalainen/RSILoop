@@ -165,11 +165,25 @@ def generate_master_registration(workspace_root: str = BASE_DIR) -> Tuple[str, s
         "schema_version": "3",
         "campaign_id": "campaign_2_gpt5_6_sol",
         "base_commit_sha": APPROVED_BASE_COMMIT,
+        "model_name": "gpt-5.6-sol",
+        "cli_version": "0.144.5",
+        "reasoning_setting": "cli_0.144.5_default",
         "known_limitations": KNOWN_LIMITATIONS,
         "exploratory_secondaries": EXPLORATORY_SECONDARIES,
         "evaluable_candidate_definition": EVALUABLE_CANDIDATE_DEFINITION,
         "frozen_trio_orderings": [list(t) for t in FROZEN_TRIO_ORDERINGS],
         "arm_assignment_vectors": arm_vectors,
+        "execution_limits": {
+            "max_output_tokens": 600000,
+            "max_active_seconds": 28800.0,
+            "max_logical_calls": 175,
+            "max_local_invocation_attempts": 525,
+            "call_wall_limit_seconds": 120.0,
+            "candidate_cpu_limit_seconds": 15.0,
+            "candidate_wall_limit_seconds": 15.0,
+            "max_canary_attempts": 3,
+            "max_invocation_attempts": 3,
+        },
         "prompt_envelope": {
             "immutable_contract": IMMUTABLE_CONTRACT,
             "immutable_contract_hash": IMMUTABLE_CONTRACT_HASH,
@@ -177,6 +191,12 @@ def generate_master_registration(workspace_root: str = BASE_DIR) -> Tuple[str, s
             "delimiter_hash": DELIMITER_HASH,
             "control_reformulation_text": CONTROL_REFORMULATION_TEXT,
             "control_reformulation_hash": CONTROL_REFORMULATION_HASH,
+            "candidate_template_bytes": IMMUTABLE_CONTRACT,
+            "candidate_template_bytes_hash": IMMUTABLE_CONTRACT_HASH,
+            "mutation_template_bytes": CONTROL_REFORMULATION_TEXT,
+            "mutation_template_bytes_hash": CONTROL_REFORMULATION_HASH,
+            "candidate_wrapper": "{immutable_contract}\n\n---PROBLEM SPECIFICATION---\n\n{problem_text}{delimiter}{mutable_body}",
+            "mutation_wrapper": "# MUTATION REQUEST\n# Failure Context:\n{failure_context}\n\n# Mutable Strategy Body:\n{mutable_body}\n",
         },
         "arm_assignment_derivation": {
             "domain": "rsi_loop/campaign2/arm_assignment",
@@ -283,6 +303,28 @@ def verify_master_registration(workspace_root: str = BASE_DIR) -> Dict[str, Any]
     for v in vectors:
         if v not in (+1, -1):
             raise ValueError(f"Arm assignment vector element must be +1 or -1, got {v}")
+
+    if data.get("base_commit_sha") != APPROVED_BASE_COMMIT:
+        raise ValueError(f"Base commit SHA mismatch: expected {APPROVED_BASE_COMMIT}, got {data.get('base_commit_sha')}")
+
+    if data.get("arm_assignment_vectors") != [-1, -1, -1, 1, -1, -1, -1, 1, 1, -1]:
+        raise ValueError(f"Arm assignment vectors mismatch: got {data.get('arm_assignment_vectors')}")
+
+    if data.get("trio_ordering_master_seed") != 685898983:
+        raise ValueError(f"Trio ordering master seed mismatch: expected 685898983, got {data.get('trio_ordering_master_seed')}")
+
+    if data.get("model_name") != "gpt-5.6-sol":
+        raise ValueError(f"Model name mismatch: expected 'gpt-5.6-sol', got {data.get('model_name')}")
+
+    if data.get("cli_version") != "0.144.5":
+        raise ValueError(f"CLI version mismatch: expected '0.144.5', got {data.get('cli_version')}")
+
+    if data.get("reasoning_setting") != "cli_0.144.5_default":
+        raise ValueError(f"Reasoning setting mismatch: expected 'cli_0.144.5_default', got {data.get('reasoning_setting')}")
+
+    limits = data.get("execution_limits", {})
+    if limits.get("max_output_tokens") != 600000 or limits.get("max_active_seconds") != 28800.0:
+        raise ValueError(f"Execution limits mismatch in master registration: {limits}")
 
     if "arm_assignment_derivation" not in data:
         raise ValueError("Master registration missing arm_assignment_derivation")

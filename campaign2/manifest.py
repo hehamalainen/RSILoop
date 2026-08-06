@@ -1,7 +1,7 @@
 """
 Campaign 2 Manifest & Evidence Integrity Verification Module.
 
-Provides preflight manifest generation and verification for 141 Git-tracked Category 1 files,
+Provides preflight manifest generation and verification for 144 Git-tracked Category 1 files,
 sealed evidence manifest verification (4 required files), and strict read-only parity matrix verification.
 """
 
@@ -103,6 +103,9 @@ def get_expected_frozen_inventory(workspace_root: str = BASE_DIR) -> List[str]:
         "campaign2/reporting.py",
         "campaign2/ladder.py",
         "campaign2/envelope.py",
+        "campaign2/cpu_gate.py",
+        "campaign2/preflight_registry.py",
+        "generator.sb.template",
     ]
 
     for sealed_file in ["campaign2_master_registration.json", "campaign2_registration_anchor.hash"]:
@@ -174,7 +177,7 @@ def verify_campaign2_manifest(workspace_root: str = BASE_DIR) -> Tuple[bool, int
     """
     STRICTLY READ-ONLY Verification of Preflight Manifest.
     Verifies that campaign2_preflight_hashes.json exists, is a regular file with mode 0o444,
-    no path component is a symlink, contains all 141 Category 1 files, and every file SHA256 matches.
+    no path component is a symlink, contains all 142 Category 1 files, and every file SHA256 matches.
     """
     _verify_exact_task_directories(workspace_root)
 

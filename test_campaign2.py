@@ -114,11 +114,11 @@ def sandboxed_worker(candidate_code, cpu_timeout=2):
 class TestCampaign2(unittest.TestCase):
     # Finding 4 [P1] FIX: No setUp() or chmod mutations. All verification runs strictly read-only on committed disk files.
 
-    def test_01_all_141_category1_files_exist_and_match_hashes(self):
-        """Verifies all 141 Git-tracked Category 1 files pass the SHA-256 preflight manifest."""
+    def test_01_all_144_category1_files_exist_and_match_hashes(self):
+        """Verifies all 144 Git-tracked Category 1 files pass the SHA-256 preflight manifest."""
         ok, count = verify_campaign2_manifest(BASE_DIR)
         self.assertTrue(ok)
-        self.assertEqual(count, 141)
+        self.assertEqual(count, 144)
 
     def test_02_task_defects_structure_and_monotonicity(self):
         """Verifies strict monotonicity of defect ladders (ref > rung1 > rung2 > rung3) across all 30 tasks."""
@@ -216,7 +216,7 @@ def parse_log_stream(stream):
         """Verifies campaign2_preflight_hashes.json authenticates the full Category 1 inventory."""
         ok, count = verify_campaign2_manifest(BASE_DIR)
         self.assertTrue(ok)
-        self.assertEqual(count, 141)
+        self.assertEqual(count, 144)
 
     def test_08_production_parity_matrix_verification(self):
         """Finding 1 [P0] FIX: Verifies campaign2_parity_matrix.json recomputes code and harness hashes for all 120 rows on disk."""
@@ -728,7 +728,7 @@ def parse_log_stream(stream, cb=None):
         """P1 FIX: Symlinked benchmark tree is rejected during manifest verification."""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Copy static files
-            for static_file in ["README.md", "run_tests.py", "rsi_loop.py"]:
+            for static_file in ["README.md", "run_tests.py", "rsi_loop.py", "generator.sb.template"]:
                 shutil.copy2(os.path.join(BASE_DIR, static_file), os.path.join(tmpdir, static_file))
             os.makedirs(os.path.join(tmpdir, "docs"))
             shutil.copy2(os.path.join(BASE_DIR, "docs", "walkthrough.md"), os.path.join(tmpdir, "docs", "walkthrough.md"))
