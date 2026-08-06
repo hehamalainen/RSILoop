@@ -1313,7 +1313,11 @@ class TestSealedInvalidationSecurity(unittest.TestCase):
             os.chmod(real_file, 0o444)
             os.symlink(real_file, target)
             with self.assertRaises(AttemptLifecycleError):
-                is_sealed_invalidated(sym_dir, "pilot")
+                is_sealed_invalidated(sym_dir, "pilot", "att_123")
+
+            # Missing or empty attempt_id -> raises ValueError
+            with self.assertRaises(ValueError):
+                is_sealed_invalidated(sym_dir, "pilot", "")
 
             # Tampered marker (wrong mode) -> raises AttemptLifecycleError
             tampered_dir = os.path.realpath(os.path.join(base_tmp, "run_tamp_mode"))
@@ -1321,7 +1325,7 @@ class TestSealedInvalidationSecurity(unittest.TestCase):
             t_path = publish_sealed_invalidation(tampered_dir, "pilot", "att_123", "reason")
             os.chmod(t_path, 0o644)
             with self.assertRaises(AttemptLifecycleError):
-                is_sealed_invalidated(tampered_dir, "pilot")
+                is_sealed_invalidated(tampered_dir, "pilot", "att_123")
 
             # Tampered marker (non-dict JSON) -> raises AttemptLifecycleError
             tamp_dict_dir = os.path.realpath(os.path.join(base_tmp, "run_tamp_dict"))
@@ -1331,7 +1335,7 @@ class TestSealedInvalidationSecurity(unittest.TestCase):
                 f.write("[]\n")
             os.chmod(td_path, 0o444)
             with self.assertRaises(AttemptLifecycleError):
-                is_sealed_invalidated(tamp_dict_dir, "pilot")
+                is_sealed_invalidated(tamp_dict_dir, "pilot", "att_123")
 
             # Minified / noncanonical JSON -> raises AttemptLifecycleError
             noncanon_dir = os.path.realpath(os.path.join(base_tmp, "run_noncanon"))
@@ -1351,6 +1355,25 @@ class TestSealedInvalidationSecurity(unittest.TestCase):
             with open(nc_path, "rb") as f:
                 raw_after = f.read()
             self.assertEqual(raw_before, raw_after)
+
+            # Deterministic check-then-replace atomic link race test:
+            # Inject an existing valid marker for attempt-existing immediately before publish call
+            race_dir = os.path.realpath(os.path.join(base_tmp, "run_race_dir"))
+            os.makedirs(race_dir)
+            existing_marker_path = publish_sealed_invalidation(race_dir, "pilot", "attempt-existing", "Existing marker")
+            with open(existing_marker_path, "r", encoding="utf-8") as f:
+                content_before = f.read()
+
+            # Attempting publish with attempt-new must trigger FileExistsError handling and raise AttemptLifecycleError without overwriting
+            with self.assertRaises(AttemptLifecycleError):
+                publish_sealed_invalidation(race_dir, "pilot", "attempt-new", "New marker attempt")
+
+            with open(existing_marker_path, "r", encoding="utf-8") as f:
+                content_after = f.read()
+
+            self.assertEqual(content_before, content_after)
+            existing_data = json.loads(content_after)
+            self.assertEqual(existing_data["attempt_id"], "attempt-existing")
 
     def test_non_dict_json_ledger_lines_raise_lifecycle_error(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

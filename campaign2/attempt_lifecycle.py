@@ -189,9 +189,9 @@ def publish_sealed_invalidation(run_dir: str, stage: str, attempt_id: str, reaso
     """
     Publish an independently sealed invalidation marker file when ledger is corrupted or invalid.
     Prevents mutating an unparseable ledger file while ensuring permanent trial invalidation.
-    Uses the frozen durability sequence: atomic temp file write, fchmod(0o444), file fsync,
-    atomic os.replace, and parent directory fsync.
-    NEVER overwrites an existing terminal marker file.
+    Uses the frozen durability sequence with atomic no-clobber hard link publication (os.link):
+    write unique tmp_path, fchmod(0o444), fsync, os.link to destination, parent dir fsync.
+    On FileExistsError, authenticates destination marker without replacing it.
     """
     path = os.path.join(run_dir, f"campaign2_{stage}_invalidated.json")
 
@@ -199,7 +199,7 @@ def publish_sealed_invalidation(run_dir: str, stage: str, attempt_id: str, reaso
         if is_sealed_invalidated(run_dir, stage, attempt_id):
             return path
         raise AttemptLifecycleError(
-            f"Sealed invalidation marker {path} already exists and cannot be overwritten."
+            f"Sealed invalidation marker {path} already exists and is invalid/mismatched; cannot overwrite."
         )
 
     data = {
@@ -212,7 +212,7 @@ def publish_sealed_invalidation(run_dir: str, stage: str, attempt_id: str, reaso
     }
     content_bytes = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
-    tmp_path = path + ".tmp"
+    tmp_path = os.path.join(run_dir, f".inval_{stage}_{attempt_id}_{os.getpid()}_{time.time_ns()}.tmp")
     if os.path.lexists(tmp_path):
         if not os.path.islink(tmp_path):
             os.chmod(tmp_path, 0o600)
@@ -231,7 +231,20 @@ def publish_sealed_invalidation(run_dir: str, stage: str, attempt_id: str, reaso
     finally:
         os.close(fd)
 
-    os.replace(tmp_path, path)
+    try:
+        os.link(tmp_path, path)
+    except FileExistsError:
+        if is_sealed_invalidated(run_dir, stage, attempt_id):
+            return path
+        raise AttemptLifecycleError(
+            f"Sealed invalidation marker {path} already exists and is invalid/mismatched; cannot overwrite."
+        )
+    finally:
+        if os.path.lexists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
     dir_fd = os.open(run_dir, os.O_RDONLY)
     try:
@@ -242,14 +255,18 @@ def publish_sealed_invalidation(run_dir: str, stage: str, attempt_id: str, reaso
     return path
 
 
-def is_sealed_invalidated(run_dir: str, stage: str, attempt_id: Optional[str] = None) -> bool:
+def is_sealed_invalidated(run_dir: str, stage: str, attempt_id: str) -> bool:
     """
     Check and strictly authenticate an independently sealed invalidation marker in run_dir.
+    attempt_id is MANDATORY.
     Outcomes:
     - absent (file does not exist) -> return False
     - present and 100% valid for stage, attempt_id, permissions, and canonical formatting -> return True
     - present but malformed, noncanonical, mismatched, or incorrectly sealed -> raise AttemptLifecycleError
     """
+    if not attempt_id or not isinstance(attempt_id, str):
+        raise ValueError("is_sealed_invalidated requires non-empty attempt_id string")
+
     path = os.path.join(run_dir, f"campaign2_{stage}_invalidated.json")
     if not os.path.lexists(path):
         return False
@@ -286,7 +303,7 @@ def is_sealed_invalidated(run_dir: str, stage: str, attempt_id: Optional[str] = 
         raise AttemptLifecycleError(f"Sealed invalidation marker {path} stage mismatch: expected {stage}, got {data.get('stage')}")
     if data.get("classification") != "invalidated":
         raise AttemptLifecycleError(f"Sealed invalidation marker {path} classification mismatch: got {data.get('classification')}")
-    if attempt_id is not None and data.get("attempt_id") != attempt_id:
+    if data.get("attempt_id") != attempt_id:
         raise AttemptLifecycleError(f"Sealed invalidation marker {path} attempt_id mismatch: expected {attempt_id}, got {data.get('attempt_id')}")
 
     expected_bytes = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")

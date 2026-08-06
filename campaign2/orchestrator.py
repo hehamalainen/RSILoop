@@ -207,7 +207,7 @@ class ExploratoryTracker:
         self.optimizer_mutations_total = 0
         self.score_improving_mutations = 0
         self.total_output_tokens = 0
-        self.valid_candidates = 0
+        self.evaluable_candidates = 0
         self.total_candidates = 0
         self.best_depth_per_trial: List[int] = []
 
@@ -227,12 +227,16 @@ class ExploratoryTracker:
             self.total_output_tokens += tokens
         self.total_candidates += 1
         if valid:
-            self.valid_candidates += 1
+            self.evaluable_candidates += 1
 
     def record_best_depth(self, depth: int):
         self.best_depth_per_trial.append(depth)
 
     def summary(self) -> dict:
+        rate_str = (
+            f"{self.evaluable_candidates}/{self.total_candidates}"
+            if self.total_candidates > 0 else "0/0"
+        )
         return {
             "score_improving_mutations_per_call": (
                 f"{self.score_improving_mutations}/{self.optimizer_mutations_total}"
@@ -242,10 +246,8 @@ class ExploratoryTracker:
                 f"{self.score_improving_mutations / (self.total_output_tokens / 1000):.4f}"
                 if self.total_output_tokens > 0 else "N/A"
             ),
-            "valid_candidate_rate": (
-                f"{self.valid_candidates}/{self.total_candidates}"
-                if self.total_candidates > 0 else "0/0"
-            ),
+            "evaluable_candidate_rate": rate_str,
+            "valid_candidate_rate": rate_str,
             "best_mutation_depths": self.best_depth_per_trial,
         }
 

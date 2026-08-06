@@ -40,9 +40,16 @@ KNOWN_LIMITATIONS = [
 EXPLORATORY_SECONDARIES = [
     "score-improving mutations per optimizer mutation call",
     "improvement per 1,000 output tokens",
-    "valid-candidate rate",
+    "evaluable-candidate rate",
     "mutation depth producing each new best"
 ]
+
+EVALUABLE_CANDIDATE_DEFINITION = {
+    "metric_name": "evaluable-candidate rate",
+    "numerator": "Number of candidate generation calls where candidate imported cleanly and completed a scored test harness evaluation without process death or evaluation-aborting infrastructure failure",
+    "denominator": "Total candidate generation calls (baseline + optimizer + control)",
+    "classification": "Harness-contained candidate runtime exceptions during evaluation remain evaluable (is_valid=True) with bounded error traces recorded for optimizer feedback. Candidate top-level import/syntax failures, process signal/exit deaths (CandidateProcessError), and evaluation timeouts score (0, 10) with is_valid=False. Unattributed wall-clock timeouts or infrastructure faults invalidate the attempt."
+}
 
 FROZEN_TRIO_ORDERINGS = [
     ("baseline", "slot_a_winner", "slot_b_winner"),
@@ -160,6 +167,7 @@ def generate_master_registration(workspace_root: str = BASE_DIR) -> Tuple[str, s
         "base_commit_sha": APPROVED_BASE_COMMIT,
         "known_limitations": KNOWN_LIMITATIONS,
         "exploratory_secondaries": EXPLORATORY_SECONDARIES,
+        "evaluable_candidate_definition": EVALUABLE_CANDIDATE_DEFINITION,
         "frozen_trio_orderings": [list(t) for t in FROZEN_TRIO_ORDERINGS],
         "arm_assignment_vectors": arm_vectors,
         "prompt_envelope": {
@@ -258,8 +266,12 @@ def verify_master_registration(workspace_root: str = BASE_DIR) -> Dict[str, Any]
             raise ValueError(f"Master registration limitation #{idx+1} mismatch")
 
     sec = data.get("exploratory_secondaries", [])
-    if len(sec) != 4:
-        raise ValueError(f"Master registration must contain exactly 4 exploratory secondaries, got {len(sec)}")
+    if len(sec) != 4 or sec != EXPLORATORY_SECONDARIES:
+        raise ValueError(f"Master registration exploratory secondaries mismatch: expected {EXPLORATORY_SECONDARIES}, got {sec}")
+
+    ecd = data.get("evaluable_candidate_definition")
+    if not isinstance(ecd, dict) or ecd != EVALUABLE_CANDIDATE_DEFINITION:
+        raise ValueError(f"Master registration evaluable_candidate_definition mismatch: expected {EVALUABLE_CANDIDATE_DEFINITION}, got {ecd}")
 
     orderings = data.get("frozen_trio_orderings", [])
     if len(orderings) != 6:

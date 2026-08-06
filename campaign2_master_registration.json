@@ -100,10 +100,16 @@
   ],
   "base_commit_sha": "96e04c94ef44b974301bbe9e4fedd2ba4281022d",
   "campaign_id": "campaign_2_gpt5_6_sol",
+  "evaluable_candidate_definition": {
+    "classification": "Harness-contained candidate runtime exceptions during evaluation remain evaluable (is_valid=True) with bounded error traces recorded for optimizer feedback. Candidate top-level import/syntax failures, process signal/exit deaths (CandidateProcessError), and evaluation timeouts score (0, 10) with is_valid=False. Unattributed wall-clock timeouts or infrastructure faults invalidate the attempt.",
+    "denominator": "Total candidate generation calls (baseline + optimizer + control)",
+    "metric_name": "evaluable-candidate rate",
+    "numerator": "Number of candidate generation calls where candidate imported cleanly and completed a scored test harness evaluation without process death or evaluation-aborting infrastructure failure"
+  },
   "exploratory_secondaries": [
     "score-improving mutations per optimizer mutation call",
     "improvement per 1,000 output tokens",
-    "valid-candidate rate",
+    "evaluable-candidate rate",
     "mutation depth producing each new best"
   ],
   "frozen_trio_orderings": [
