@@ -591,15 +591,37 @@ class AttemptLedger:
                     f"'{entry.get('reason')}') and cannot be resumed"
                 )
 
-        # Credential residue scan across attempt directory AND global scratch directories (P1-1)
+        # Credential residue scan across attempt directory, recorded scratch dirs, and user scratch dirs (P1-1, P1-2)
         attempt_dir = os.path.dirname(os.path.abspath(self.ledger_path))
         import glob
         import tempfile
+
+        # Gather explicitly recorded scratch dirs from ledger intents
+        recorded_scratch_dirs = set()
+        for entry in self.get_entries():
+            if entry.get("record_type") == "invocation_intent":
+                if entry.get("scratch_dir"):
+                    recorded_scratch_dirs.add(entry.get("scratch_dir"))
+                if entry.get("cwd"):
+                    recorded_scratch_dirs.add(entry.get("cwd"))
+
         scan_paths = [
             os.path.join(attempt_dir, "**", ".codex", "auth.json"),
-            os.path.join(tempfile.gettempdir(), "*rsi_codex_scratch_*", ".codex", "auth.json"),
-            os.path.join(tempfile.gettempdir(), "*rsi_codex_scratch_*", "**", ".codex", "auth.json"),
         ]
+        for sdir in recorded_scratch_dirs:
+            if sdir and os.path.exists(sdir):
+                scan_paths.append(os.path.join(sdir, "**", ".codex", "auth.json"))
+
+        current_uid = os.getuid() if hasattr(os, "getuid") else None
+        for cand_dir in glob.glob(os.path.join(tempfile.gettempdir(), "*rsi_codex_scratch_*")):
+            if os.path.isdir(cand_dir):
+                try:
+                    st = os.stat(cand_dir)
+                    if current_uid is None or st.st_uid == current_uid:
+                        scan_paths.append(os.path.join(cand_dir, "**", ".codex", "auth.json"))
+                except Exception:
+                    pass
+
         for pattern in scan_paths:
             for auth_p in glob.glob(pattern, recursive=True):
                 if os.path.exists(auth_p):

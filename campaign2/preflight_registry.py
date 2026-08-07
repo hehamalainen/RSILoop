@@ -142,29 +142,68 @@ class PreflightRegistry:
 
     def _reload(self) -> None:
         """Reload latest registry state from disk with strict authentication (P0-4)."""
-        if os.path.exists(self.registry_path):
-            if os.path.islink(self.registry_path):
-                raise PreflightRegistryError(f"Registry file must not be a symlink: {self.registry_path}")
-            if not os.path.isfile(self.registry_path):
-                raise PreflightRegistryError(f"Registry file must be a regular file: {self.registry_path}")
+        if not os.path.exists(self.registry_path):
+            if hasattr(self, "data") and self.data:
+                # File existed when object was initialized, but was deleted/removed on disk!
+                raise PreflightRegistryError(f"Preflight registry file missing on disk: {self.registry_path}")
+            return
 
-            try:
-                with open(self.registry_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception as e:
-                raise PreflightRegistryError(f"Failed to read/parse preflight registry file {self.registry_path}: {e}")
+        if os.path.islink(self.registry_path):
+            raise PreflightRegistryError(f"Registry file must not be a symlink: {self.registry_path}")
+        if not os.path.isfile(self.registry_path):
+            raise PreflightRegistryError(f"Registry file must be a regular file: {self.registry_path}")
 
-            for req_field in ("record_type", "stage", "registration_hash", "launch_lock_hash"):
-                if req_field not in data:
-                    raise PreflightRegistryError(f"Corrupted preflight registry missing field '{req_field}': {self.registry_path}")
+        # Enforce permission mode 0o444
+        st_mode = stat.S_IMODE(os.stat(self.registry_path).st_mode)
+        if st_mode != 0o444:
+            raise PreflightRegistryError(
+                f"Preflight registry permission mode must be 0o444, got {oct(st_mode)} for {self.registry_path}"
+            )
 
-            if data.get("record_type") != "preflight_registry":
-                raise PreflightRegistryError(f"Invalid preflight registry record_type: '{data.get('record_type')}'")
+        try:
+            with open(self.registry_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            raise PreflightRegistryError(f"Failed to read/parse preflight registry file {self.registry_path}: {e}")
 
-            if data.get("stage") != self.stage:
-                raise PreflightRegistryError(f"Preflight registry stage mismatch: expected '{self.stage}', got '{data.get('stage')}'")
+        for req_field in ("record_type", "stage", "registration_hash", "launch_lock_hash"):
+            if req_field not in data:
+                raise PreflightRegistryError(f"Corrupted preflight registry missing field '{req_field}': {self.registry_path}")
 
-            self.data = data
+        if data.get("record_type") != "preflight_registry":
+            raise PreflightRegistryError(f"Invalid preflight registry record_type: '{data.get('record_type')}'")
+
+        if data.get("stage") != self.stage:
+            raise PreflightRegistryError(f"Preflight registry stage mismatch: expected '{self.stage}', got '{data.get('stage')}'")
+
+        # Verify registration and launch lock hashes match workspace files if present
+        reg_file = os.path.join(self.workspace_root, "campaign2_master_registration.json")
+        if os.path.exists(reg_file):
+            with open(reg_file, "rb") as f:
+                curr_reg_hash = hashlib.sha256(f.read()).hexdigest()
+            if data.get("registration_hash") != curr_reg_hash:
+                raise PreflightRegistryError(
+                    f"Preflight registry registration_hash mismatch: stored '{data.get('registration_hash')}' vs current '{curr_reg_hash}'"
+                )
+
+        lock_file = os.path.join(self.workspace_root, "campaign2_launch_lock.json")
+        if os.path.exists(lock_file):
+            with open(lock_file, "rb") as f:
+                curr_lock_hash = hashlib.sha256(f.read()).hexdigest()
+            if data.get("launch_lock_hash") != curr_lock_hash:
+                raise PreflightRegistryError(
+                    f"Preflight registry launch_lock_hash mismatch: stored '{data.get('launch_lock_hash')}' vs current '{curr_lock_hash}'"
+                )
+
+        self.data = data
+
+    def set_stage_blocked(self, attempt_id: str, reason: str) -> None:
+        """Durably block stage from future preflight canary execution (P0-3)."""
+        self._reload()
+        self.data["stage_blocked"] = True
+        self.data["block_reason"] = reason
+        self.data["blocked_attempt_id"] = attempt_id
+        self._save_data(self.data)
 
     def bind_attempt(self, attempt_id: str) -> None:
         """Bind attempt ID to preflight registry."""
@@ -176,19 +215,39 @@ class PreflightRegistry:
             self._save_data(self.data)
 
     def record_canary_attempt(self, attempt_id: str, status: str, tokens: int, active_time: float, usage_known: bool, call_id: str = "") -> None:
-        """Record canary attempt outcome durably with call_id (P0-3)."""
+        """Record canary attempt outcome durably and idempotently by call_id (P0-3, P1-1)."""
         self._reload()
         attempts_log = self.data.get("canary_attempts", [])
-        attempts_log.append({
-            "attempt_id": attempt_id,
-            "call_id": call_id,
-            "status": status,
-            "tokens": tokens,
-            "active_time": active_time,
-            "usage_known": usage_known,
-            "timestamp": time.time(),
-        })
+
+        # Idempotently update or append attempt entry by call_id
+        existing = False
+        if call_id:
+            for item in attempts_log:
+                if item.get("call_id") == call_id:
+                    item["status"] = status
+                    item["tokens"] = tokens
+                    item["active_time"] = active_time
+                    item["usage_known"] = usage_known
+                    item["timestamp"] = time.time()
+                    existing = True
+                    break
+
+        if not existing:
+            attempts_log.append({
+                "attempt_id": attempt_id,
+                "call_id": call_id,
+                "status": status,
+                "tokens": tokens,
+                "active_time": active_time,
+                "usage_known": usage_known,
+                "timestamp": time.time(),
+            })
+
         self.data["canary_attempts"] = attempts_log
+        if not usage_known or status in ("invalidated", "unknown_usage", "failed_execution"):
+            self.data["stage_blocked"] = True
+            self.data["block_reason"] = f"Canary attempt '{call_id}' failed with status '{status}' (usage_known={usage_known})"
+
         self._save_data(self.data)
 
     def record_canary_passed(self, attempt_id: str, canary_log: List[dict], tokens_used: int, active_time: float) -> None:
@@ -305,6 +364,12 @@ def run_pilot_canary(
 
     registry = PreflightRegistry(stage=stage, workspace_root=workspace_root)
 
+    # Check if stage is permanently blocked due to prior ambiguous/unknown usage (P0-3)
+    attempts_log = registry.data.get("canary_attempts", [])
+    if registry.data.get("stage_blocked", False) or any(not a.get("usage_known", True) or a.get("status") in ("invalidated", "unknown_usage", "failed_execution") for a in attempts_log):
+        reason = registry.data.get("block_reason", "prior unknown-usage or boundary failure")
+        raise CanaryFailureError(f"Stage '{stage}' is permanently BLOCKED due to unrecoverable preflight failure: {reason}")
+
     # If canary already passed for this accepted attempt, reconcile SCIENTIFIC_START marker if missing
     if registry.data.get("canary_passed", False):
         accepted_id = registry.data.get("accepted_attempt_id", "")
@@ -340,83 +405,87 @@ def run_pilot_canary(
             ledger_obj.verify_three_record_protocol()
             entries = ledger_obj.get_entries()
 
-            intents = sorted(
-                [
-                    e for e in entries
-                    if e.get("record_type") == "invocation_intent"
-                    and str(e.get("logical_call_id", "")).startswith(f"canary_{stage}_{attempt_id}")
-                ],
-                key=lambda x: str(x.get("logical_call_id", ""))
-            )
+            intents = [
+                e for e in entries
+                if e.get("record_type") == "invocation_intent"
+                and str(e.get("logical_call_id", "")).startswith(f"canary_{stage}_{attempt_id}")
+            ]
 
-            for intent_rec in intents:
-                call_id = intent_rec.get("logical_call_id", "")
-                inv_ordinal = intent_rec.get("invocation_ordinal", 1)
-                intent_bytes = (json.dumps(intent_rec, sort_keys=True) + "\n").encode("utf-8")
-                intent_hash = hashlib.sha256(intent_bytes).hexdigest()
+            # Group intents by logical_call_id (P0-2)
+            intents_by_call = {}
+            for e in intents:
+                cid = str(e.get("logical_call_id", ""))
+                intents_by_call.setdefault(cid, []).append(e)
 
-                if intent_rec.get("prompt_hash") != expected_canary_prompt_hash:
-                    raise CanaryFailureError(f"Ledger canary intent '{call_id}' prompt_hash mismatch during reconciliation")
+            for cid in sorted(intents_by_call.keys()):
+                call_intents = sorted(intents_by_call[cid], key=lambda x: x.get("invocation_ordinal", 1))
 
-                matching_completes = [
-                    e for e in entries
-                    if e.get("record_type") == "invocation_completion"
-                    and e.get("logical_call_id") == call_id
-                    and e.get("intent_record_hash") == intent_hash
-                ]
+                # 1. Account EVERY local invocation attempt idempotently in registry (P0-1, P0-2)
+                call_completes = []
+                for intent_rec in call_intents:
+                    inv_ordinal = intent_rec.get("invocation_ordinal", 1)
+                    intent_bytes = (json.dumps(intent_rec, sort_keys=True) + "\n").encode("utf-8")
+                    intent_hash = hashlib.sha256(intent_bytes).hexdigest()
 
-                if matching_completes:
-                    comp = matching_completes[-1]
-                    comp_bytes = (json.dumps(comp, sort_keys=True) + "\n").encode("utf-8")
-                    comp_hash = hashlib.sha256(comp_bytes).hexdigest()
-                    tokens = comp.get("tokens", 0)
-                    duration = comp.get("duration", 0.0)
+                    if intent_rec.get("prompt_hash") != expected_canary_prompt_hash:
+                        raise CanaryFailureError(f"Ledger canary intent '{cid}' prompt_hash mismatch during reconciliation")
+
+                    matching = [
+                        e for e in entries
+                        if e.get("record_type") == "invocation_completion"
+                        and e.get("logical_call_id") == cid
+                        and e.get("intent_record_hash") == intent_hash
+                    ]
+                    if matching:
+                        comp = matching[-1]
+                        call_completes.append((intent_rec, comp))
+                        comp_bytes = (json.dumps(comp, sort_keys=True) + "\n").encode("utf-8")
+                        comp_hash = hashlib.sha256(comp_bytes).hexdigest()
+                        tokens = comp.get("tokens", 0)
+                        duration = comp.get("duration", 0.0)
+                        registry.record_usage(tokens, duration, 1, 1, cid, inv_ordinal, comp_hash)
+
+                if call_completes:
+                    # 2. Evaluate outcome based on TERMINAL (final) completion of this logical call sequence (P0-2)
+                    last_intent, last_comp = call_completes[-1]
+                    last_ordinal = last_intent.get("invocation_ordinal", 1)
+                    last_tokens = last_comp.get("tokens", 0)
+                    last_duration = last_comp.get("duration", 0.0)
 
                     is_valid_pass = (
-                        comp.get("classification") == "valid"
-                        and comp.get("return_code") == 0
-                        and comp.get("text_hash") == expected_canary_text_hash
-                        and type(tokens) is not bool and isinstance(tokens, int) and tokens >= 0
-                        and type(duration) is not bool and isinstance(duration, (int, float)) and duration >= 0.0
+                        last_comp.get("classification") == "valid"
+                        and last_comp.get("return_code") == 0
+                        and last_comp.get("text_hash") == expected_canary_text_hash
+                        and type(last_tokens) is not bool and isinstance(last_tokens, int) and last_tokens >= 0
+                        and type(last_duration) is not bool and isinstance(last_duration, (int, float)) and last_duration >= 0.0
                     )
 
                     is_clean_content_failure = (
-                        comp.get("classification") == "valid"
-                        and comp.get("return_code") == 0
+                        last_comp.get("classification") == "valid"
+                        and last_comp.get("return_code") == 0
                     )
 
                     if is_valid_pass:
-                        registry.record_usage(tokens, duration, 1, 1, call_id, inv_ordinal, comp_hash)
                         canary_record = {
-                            "call_id": call_id,
+                            "call_id": cid,
                             "status": "passed",
-                            "tokens": tokens,
-                            "duration": duration,
-                            "attempts": inv_ordinal,
+                            "tokens": last_tokens,
+                            "duration": last_duration,
+                            "attempts": last_ordinal,
                             "usage_known": True,
                         }
-                        registry.record_canary_attempt(attempt_id, "passed", tokens, duration, True, call_id=call_id)
-                        registry.record_canary_passed(attempt_id, [canary_record], tokens, duration)
+                        registry.record_canary_attempt(attempt_id, "passed", last_tokens, last_duration, True, call_id=cid)
+                        registry.record_canary_passed(attempt_id, [canary_record], last_tokens, last_duration)
                         publish_scientific_start(stage=stage, attempt_id=attempt_id, workspace_root=workspace_root)
                         return registry.data
                     elif is_clean_content_failure:
-                        # Reconcile usage and record failed content attempt (P0-1, P0-3)
-                        registry.record_usage(tokens, duration, 1, 1, call_id, inv_ordinal, comp_hash)
-                        existing_attempts = registry.data.get("canary_attempts", [])
-                        already_logged = any(a.get("call_id") == call_id for a in existing_attempts)
-                        if not already_logged:
-                            registry.record_canary_attempt(attempt_id, "failed_content", tokens, duration, True, call_id=call_id)
+                        registry.record_canary_attempt(attempt_id, "failed_content", last_tokens, last_duration, True, call_id=cid)
                     else:
-                        # Ambiguous / unknown usage / boundary failure (P0-2) -> RECORD USAGE AND FAIL CLOSED IMMEDIATELY!
-                        registry.record_usage(tokens, duration, 1, 1, call_id, inv_ordinal, comp_hash)
-                        existing_attempts = registry.data.get("canary_attempts", [])
-                        already_logged = any(a.get("call_id") == call_id for a in existing_attempts)
-                        if not already_logged:
-                            registry.record_canary_attempt(attempt_id, "invalidated", tokens, duration, False, call_id=call_id)
-                        raise CanaryFailureError(
-                            f"Preflight canary completion '{call_id}' failed with non-retryable ambiguous classification "
-                            f"'{comp.get('classification')}' (return_code={comp.get('return_code')}). Pilot BLOCKED."
-                        )
+                        # Ambiguous / unknown usage / boundary failure on terminal completion (P0-2, P0-3)
+                        reason = f"Preflight canary completion '{cid}' failed with non-retryable ambiguous classification '{last_comp.get('classification')}' (return_code={last_comp.get('return_code')})"
+                        registry.record_canary_attempt(attempt_id, "invalidated", last_tokens, last_duration, False, call_id=cid)
+                        registry.set_stage_blocked(attempt_id, reason)
+                        raise CanaryFailureError(f"{reason}. Pilot BLOCKED.")
 
     # Reload latest registry data after reconciliation phase
     registry._reload()
@@ -445,8 +514,7 @@ def run_pilot_canary(
         t1 = time.monotonic()
         active_sec = t1 - t0
 
-        code_val = code.rstrip("\r\n") if isinstance(code, str) else ""
-        if code_val != CANARY_EXPECTED_RESPONSE:  # Exact string match (no leading strip), rstrip newlines (P1-4)
+        if code != CANARY_EXPECTED_RESPONSE:  # Exact string match, NO .strip() or rstrip() (P1-3)
             registry.record_canary_attempt(attempt_id, "failed_content", tokens, active_sec, True, call_id=canary_call_id)
             raise CanaryFailureError(
                 f"Canary response content mismatch for attempt '{attempt_id}': expected '{CANARY_EXPECTED_RESPONSE}', got '{code}'"
@@ -472,4 +540,5 @@ def run_pilot_canary(
         raise
     except Exception as exc:
         registry.record_canary_attempt(attempt_id, "failed_execution", 0, 0.0, False, call_id=canary_call_id)
+        registry.set_stage_blocked(attempt_id, f"Canary execution failed: {exc}")
         raise CanaryFailureError(f"Preflight canary execution failed for attempt '{attempt_id}': {exc}") from exc

@@ -759,10 +759,13 @@ class SolModelProvider(ModelProvider):
                 "duration": duration_sec,
                 "classification": parsed["classification"],
             }
+            comp_bytes = (json.dumps(completion_record, sort_keys=True) + "\n").encode("utf-8")
+            comp_hash = hashlib.sha256(comp_bytes).hexdigest()
+
             if self.ledger:
                 self.ledger._append_record(completion_record)
 
-            # Record usage in PreflightRegistry with deduplicated logical calls (P0-4)
+            # Record usage in PreflightRegistry with exact completion identity (P0-1)
             from campaign2.preflight_registry import PreflightRegistry
             reg = PreflightRegistry(workspace_root=self.state_root)
             reg.record_usage(
@@ -771,6 +774,8 @@ class SolModelProvider(ModelProvider):
                 logical_calls=1,
                 local_attempts=1,
                 logical_call_id=logical_call_id,
+                invocation_ordinal=invocation_ordinal,
+                completion_hash=comp_hash,
             )
 
             if parsed["classification"] == "valid" and return_code == 0:
