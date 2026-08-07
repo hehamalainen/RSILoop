@@ -301,10 +301,31 @@ class Campaign2Orchestrator:
         self.opt_sel_tasks = sorted(self.opt_tasks + self.sel_tasks)
         self.conf_holdout_tasks = sorted(self.conf_tasks + self.holdout_tasks)
 
-        # Load registration parameters
+        # Load registration parameters and validate authoritativeness
         self.arm_vectors = registration["arm_assignment_vectors"]
         self.trio_seed = registration["trio_ordering_master_seed"]
         self.trio_orderings = [tuple(t) for t in registration["frozen_trio_orderings"]]
+
+        if suite == "suite_p" and registration:
+            p_lims = registration.get("pilot_limits", {})
+            c_arith = registration.get("call_arithmetic", {})
+
+            if p_lims and p_lims.get("num_trials") != self.params["num_trials"]:
+                raise OrchestratorError(
+                    f"Master registration num_trials mismatch: {p_lims.get('num_trials')} vs {self.params['num_trials']}"
+                )
+            if p_lims and p_lims.get("max_mutations_per_trial") != self.params["mutations_per_arm"]:
+                raise OrchestratorError(
+                    f"Master registration max_mutations_per_trial mismatch: {p_lims.get('max_mutations_per_trial')} vs {self.params['mutations_per_arm']}"
+                )
+            if c_arith and c_arith.get("per_trial_benchmark_logical_calls") != self.params["expected_total_calls"]:
+                raise OrchestratorError(
+                    f"Master registration per_trial_benchmark_logical_calls mismatch: {c_arith.get('per_trial_benchmark_logical_calls')} vs {self.params['expected_total_calls']}"
+                )
+            if c_arith and c_arith.get("pilot_total_benchmark_logical_calls") != self.params["num_trials"] * self.params["expected_total_calls"]:
+                raise OrchestratorError(
+                    f"Master registration pilot_total_benchmark_logical_calls mismatch: {c_arith.get('pilot_total_benchmark_logical_calls')} vs {self.params['num_trials'] * self.params['expected_total_calls']}"
+                )
 
         self.trial_results: List[TrialResult] = []
         if self.ledger and hasattr(self.ledger, "_max_call_counter") and self.ledger._max_call_counter > 0:

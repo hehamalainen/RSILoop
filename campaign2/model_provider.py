@@ -339,18 +339,20 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
         pass
 
     events_parsed = len(events)
+    has_stdout = len(stdout_bytes.strip()) > 0
 
     if return_code != 0:
-        err_text = (stdout_bytes + b"\n" + stderr_bytes).decode("utf-8", errors="replace")
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace")
         transient_kw = (
             "HTTP 429", "429 Too Many Requests", "503 Service Unavailable",
             "DNS lookup failed", "TLS handshake failed", "connection refused",
             "ConnectionRefusedError", "connect ETIMEDOUT", "rate_limit_exceeded"
         )
-        is_transient = any(kw in err_text for kw in transient_kw)
+        is_transient = any(kw in stderr_text for kw in transient_kw)
 
-        # Zero-Event Load-Bearing Invariant: If ANY JSONL event was emitted, retry is strictly forbidden!
-        if events_parsed > 0 or not is_transient:
+        # Zero-Stdout Load-Bearing Invariant: If ANY raw stdout was emitted (has_stdout=True),
+        # or if stderr does not contain transport failure keywords, retry is strictly forbidden!
+        if has_stdout or not is_transient:
             classification = "invalidated"
         else:
             classification = "transient_infrastructure_error"
@@ -364,7 +366,7 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
             "stdout_hash": stdout_hash,
             "stderr_hash": stderr_hash,
             "events_parsed": events_parsed,
-            "error": f"Process exited with non-zero return code {return_code} (events_parsed={events_parsed})",
+            "error": f"Process exited with non-zero return code {return_code} (has_stdout={has_stdout}, events_parsed={events_parsed})",
         }
 
     if not lines or len(lines) != len(events):
@@ -530,6 +532,14 @@ class SolModelProvider(ModelProvider):
         input_hash = prompt_hash
 
         max_attempts = 3
+        reg_file = os.path.join(self.state_root, "campaign2_master_registration.json")
+        if os.path.exists(reg_file):
+            try:
+                with open(reg_file, "r", encoding="utf-8") as f:
+                    reg_data = json.load(f)
+                max_attempts = reg_data.get("call_arithmetic", {}).get("retry_cap", 3)
+            except Exception:
+                pass
         last_exception = None
 
         for invocation_ordinal in range(1, max_attempts + 1):
@@ -583,79 +593,78 @@ class SolModelProvider(ModelProvider):
             t0_wall = time.time()
 
             try:
-                if self.mock_subprocess:
-                    pid = 99999 + invocation_ordinal
-                else:
-                    proc = subprocess.Popen(
-                        cmd,
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        start_new_session=True,
-                        text=False,
-                        cwd=scratch_dir,
-                        env=env,
-                    )
-                    pid = proc.pid
+                try:
+                    if self.mock_subprocess:
+                        pid = 99999 + invocation_ordinal
+                    else:
+                        proc = subprocess.Popen(
+                            cmd,
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            start_new_session=True,
+                            text=False,
+                            cwd=scratch_dir,
+                            env=env,
+                        )
+                        pid = proc.pid
 
-            except OSError as spawn_err:
-                completion_record = {
-                    "record_type": "invocation_completion",
+                except OSError as spawn_err:
+                    completion_record = {
+                        "record_type": "invocation_completion",
+                        "logical_call_id": logical_call_id,
+                        "invocation_ordinal": invocation_ordinal,
+                        "intent_record_hash": intent_hash,
+                        "started_record_hash": "",
+                        "return_code": -1,
+                        "raw_stdout_digest": hashlib.sha256(b"").hexdigest(),
+                        "raw_stderr_digest": hashlib.sha256(b"").hexdigest(),
+                        "parse_state": "spawn_failure",
+                        "usage_known": True,
+                        "tokens": 0,
+                        "duration": 0.0,
+                        "classification": "spawn_failure",
+                        "error": str(spawn_err),
+                    }
+                    if self.ledger:
+                        self.ledger._append_record(completion_record)
+
+                    from campaign2.preflight_registry import PreflightRegistry
+                    reg = PreflightRegistry(workspace_root=self.state_root)
+                    reg.record_usage(
+                        tokens_used=0,
+                        active_time=0.0,
+                        logical_calls=1,
+                        local_attempts=1,
+                        logical_call_id=logical_call_id,
+                    )
+
+                    shutil.rmtree(scratch_dir, ignore_errors=True)
+                    last_exception = spawn_err
+                    if invocation_ordinal < max_attempts:
+                        time.sleep(0.1 * (2 ** (invocation_ordinal - 1)))
+                        continue
+                    raise ExecutableBoundaryError(f"Spawn failed after {max_attempts} retries: {spawn_err}") from spawn_err
+
+                # 3. Record process_started AFTER successful Popen spawn
+                started_record = {
+                    "record_type": "process_started",
                     "logical_call_id": logical_call_id,
                     "invocation_ordinal": invocation_ordinal,
+                    "pid": pid,
+                    "monotonic_ts": t0,
+                    "wall_ts": t0_wall,
                     "intent_record_hash": intent_hash,
-                    "started_record_hash": "",
-                    "return_code": -1,
-                    "raw_stdout_digest": hashlib.sha256(b"").hexdigest(),
-                    "raw_stderr_digest": hashlib.sha256(b"").hexdigest(),
-                    "parse_state": "spawn_failure",
-                    "usage_known": True,
-                    "tokens": 0,
-                    "duration": 0.0,
-                    "classification": "spawn_failure",
-                    "error": str(spawn_err),
                 }
+                started_bytes = (json.dumps(started_record, sort_keys=True) + "\n").encode("utf-8")
+                started_hash = hashlib.sha256(started_bytes).hexdigest()
+
                 if self.ledger:
-                    self.ledger._append_record(completion_record)
+                    self.ledger._append_record(started_record)
 
-                from campaign2.preflight_registry import PreflightRegistry
-                reg = PreflightRegistry(workspace_root=self.state_root)
-                reg.record_usage(
-                    tokens_used=0,
-                    active_time=0.0,
-                    logical_calls=1,
-                    local_attempts=1,
-                    logical_call_id=logical_call_id,
-                )
-
-                shutil.rmtree(scratch_dir, ignore_errors=True)
-                last_exception = spawn_err
-                if invocation_ordinal < max_attempts:
-                    time.sleep(0.1 * (2 ** (invocation_ordinal - 1)))
-                    continue
-                raise ExecutableBoundaryError(f"Spawn failed after {max_attempts} retries: {spawn_err}") from spawn_err
-
-            # 3. Record process_started AFTER successful Popen spawn
-            started_record = {
-                "record_type": "process_started",
-                "logical_call_id": logical_call_id,
-                "invocation_ordinal": invocation_ordinal,
-                "pid": pid,
-                "monotonic_ts": t0,
-                "wall_ts": t0_wall,
-                "intent_record_hash": intent_hash,
-            }
-            started_bytes = (json.dumps(started_record, sort_keys=True) + "\n").encode("utf-8")
-            started_hash = hashlib.sha256(started_bytes).hexdigest()
-
-            if self.ledger:
-                self.ledger._append_record(started_record)
-
-            stdout_bytes = b""
-            stderr_bytes = b""
-            return_code = 0
-
-            try:
+                stdout_bytes = b""
+                stderr_bytes = b""
+                return_code = 0
                 if self.mock_subprocess:
                     is_canary = "CANARY_OK" in stdin_bytes.decode("utf-8", errors="ignore") or task_id in ("canary", "")
                     is_mut = "MUTATION REQUEST" in stdin_bytes.decode("utf-8", errors="ignore")
@@ -725,6 +734,9 @@ class SolModelProvider(ModelProvider):
 
             parsed = parse_and_classify_jsonl_output(stdout_bytes, stderr_bytes, return_code)
 
+            text_val = parsed.get("text", "")
+            text_hash = hashlib.sha256(text_val.encode("utf-8")).hexdigest() if text_val else ""
+
             completion_record = {
                 "record_type": "invocation_completion",
                 "logical_call_id": logical_call_id,
@@ -734,6 +746,7 @@ class SolModelProvider(ModelProvider):
                 "return_code": return_code,
                 "raw_stdout_digest": parsed["stdout_hash"],
                 "raw_stderr_digest": parsed["stderr_hash"],
+                "text_hash": text_hash,
                 "parse_state": parsed["parse_state"],
                 "usage_known": parsed["usage_known"],
                 "tokens": parsed["tokens"],

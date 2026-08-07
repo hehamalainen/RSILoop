@@ -194,21 +194,46 @@ class PreflightRegistry:
         # Durably record overshooting usage BEFORE checking limit thresholds
         self._save_data(self.data)
 
-        if new_tokens > MAX_PILOT_TOKENS:
+        # Load dynamic limit thresholds from master registration if present
+        max_tokens = MAX_PILOT_TOKENS
+        max_active = MAX_PILOT_ACTIVE_SECONDS
+        max_calls = MAX_LOGICAL_CALLS
+        max_attempts = MAX_LOCAL_INVOCATION_ATTEMPTS
+
+        reg_file_p = os.path.join(self.workspace_root, "campaign2_master_registration.json")
+        if os.path.exists(reg_file_p):
+            try:
+                with open(reg_file_p, "r", encoding="utf-8") as f:
+                    reg_data = json.load(f)
+                exec_lims = reg_data.get("execution_limits", {})
+                call_arith = reg_data.get("call_arithmetic", {})
+
+                if "max_output_tokens" in exec_lims:
+                    max_tokens = exec_lims["max_output_tokens"]
+                if "max_active_seconds" in exec_lims:
+                    max_active = float(exec_lims["max_active_seconds"])
+                if "pilot_max_logical_calls" in call_arith:
+                    max_calls = call_arith["pilot_max_logical_calls"]
+                if "max_local_invocation_attempts" in call_arith:
+                    max_attempts = call_arith["max_local_invocation_attempts"]
+            except Exception:
+                pass
+
+        if new_tokens > max_tokens:
             raise StageLimitsExceededError(
-                f"Pilot token limit exceeded: {new_tokens} > {MAX_PILOT_TOKENS}"
+                f"Pilot token limit exceeded: {new_tokens} > {max_tokens}"
             )
-        if new_active > MAX_PILOT_ACTIVE_SECONDS:
+        if new_active > max_active:
             raise StageLimitsExceededError(
-                f"Pilot active time limit exceeded: {new_active:.2f} s > {MAX_PILOT_ACTIVE_SECONDS} s"
+                f"Pilot active time limit exceeded: {new_active:.2f} s > {max_active} s"
             )
-        if new_calls > MAX_LOGICAL_CALLS:
+        if new_calls > max_calls:
             raise StageLimitsExceededError(
-                f"Pilot total logical calls limit exceeded: {new_calls} > {MAX_LOGICAL_CALLS}"
+                f"Pilot total logical calls limit exceeded: {new_calls} > {max_calls}"
             )
-        if new_attempts > MAX_LOCAL_INVOCATION_ATTEMPTS:
+        if new_attempts > max_attempts:
             raise StageLimitsExceededError(
-                f"Pilot total local invocation attempts limit exceeded: {new_attempts} > {MAX_LOCAL_INVOCATION_ATTEMPTS}"
+                f"Pilot total local invocation attempts limit exceeded: {new_attempts} > {max_attempts}"
             )
 
 
@@ -217,6 +242,7 @@ def run_pilot_canary(
     attempt_id: str,
     model_provider: Any,
     workspace_root: str = BASE_DIR,
+    ledger: Any = None,
 ) -> Dict[str, Any]:
     """
     Executes preflight canary BEFORE SCIENTIFIC_START.
@@ -243,20 +269,27 @@ def run_pilot_canary(
         return registry.data
 
     # Check AttemptLedger to reconcile completed canary call if provider completion succeeded before registry update
-    candidate_ledger_paths = [
+    candidate_ledger_paths = []
+    if ledger and hasattr(ledger, "ledger_path") and ledger.ledger_path:
+        candidate_ledger_paths.append(ledger.ledger_path)
+
+    candidate_ledger_paths.extend([
+        os.path.join(workspace_root, "history", attempt_id, f"campaign2_{stage}_ledger.jsonl"),
+        os.path.join(workspace_root, "history", attempt_id, "ledger.jsonl"),
         os.path.join(workspace_root, attempt_id, f"campaign2_{stage}_ledger.jsonl"),
         os.path.join(workspace_root, attempt_id, "ledger.jsonl"),
         os.path.join(registry.history_dir, f"campaign2_{attempt_id}_attempt_ledger.jsonl"),
         os.path.join(workspace_root, "ledger.jsonl"),
-    ]
+    ])
 
     expected_canary_prompt_hash = hashlib.sha256(CANARY_NEUTRAL_PROMPT.encode("utf-8")).hexdigest()
+    expected_canary_text_hash = hashlib.sha256(CANARY_EXPECTED_RESPONSE.encode("utf-8")).hexdigest()
 
     for ledger_p in candidate_ledger_paths:
         if os.path.exists(ledger_p) and os.path.isfile(ledger_p) and os.path.getsize(ledger_p) > 0:
-            ledger = AttemptLedger(ledger_p)
-            ledger.verify_three_record_protocol()
-            entries = ledger.get_entries()
+            ledger_obj = AttemptLedger(ledger_p)
+            ledger_obj.verify_three_record_protocol()
+            entries = ledger_obj.get_entries()
 
             intents = {
                 e["logical_call_id"]: (e, hashlib.sha256((json.dumps(e, sort_keys=True) + "\n").encode("utf-8")).hexdigest())
@@ -276,6 +309,9 @@ def run_pilot_canary(
                     and e.get("intent_record_hash") == intent_hash
                     and e.get("classification") == "valid"
                     and e.get("return_code") == 0
+                    and e.get("text_hash") == expected_canary_text_hash
+                    and type(e.get("tokens")) is not bool and isinstance(e.get("tokens"), int) and e.get("tokens") >= 0
+                    and type(e.get("duration")) is not bool and isinstance(e.get("duration"), (int, float)) and e.get("duration") >= 0.0
                 ]
 
                 if matching_completes:

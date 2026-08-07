@@ -591,18 +591,12 @@ class AttemptLedger:
                     f"'{entry.get('reason')}') and cannot be resumed"
                 )
 
-        # Credential residue scan across scratch directories (P1-2)
+        # Credential residue scan scoped to attempt directory (P1-3)
+        attempt_dir = os.path.dirname(os.path.abspath(self.ledger_path))
         import glob
-        import tempfile
-        search_patterns = [
-            os.path.join(tempfile.gettempdir(), "*rsi_codex_scratch_*"),
-            "/tmp/rsi_codex_scratch_*",
-        ]
-        for pattern in search_patterns:
-            for scratch in glob.glob(pattern):
-                auth_p = os.path.join(scratch, ".codex", "auth.json")
-                if os.path.exists(auth_p):
-                    raise AttemptLifecycleError(f"Credential residue found during resume admission scan: {auth_p}")
+        for auth_p in glob.glob(os.path.join(attempt_dir, "**", ".codex", "auth.json"), recursive=True):
+            if os.path.exists(auth_p):
+                raise AttemptLifecycleError(f"Credential residue found during resume admission scan: {auth_p}")
 
         self.verify_all_intents_completed()
         return self.verify_three_record_protocol()

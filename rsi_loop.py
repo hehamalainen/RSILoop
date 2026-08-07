@@ -3432,7 +3432,7 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
             cpu_record = run_prescientific_cpu_gate(mock_ws_root, is_mock=True)
             model = SolModelProvider(model_name="gpt-5.6-sol", artifact_root=BASE_DIR, state_root=mock_ws_root, ledger=ledger, mock_subprocess=True)
             evaluator = ProductionTaskEvaluator()
-            run_pilot_canary(stage, identity["attempt_id"], model, mock_ws_root)
+            run_pilot_canary(stage, identity["attempt_id"], model, mock_ws_root, ledger=ledger)
             if is_resume:
                 verify_stage_scientific_start(stage, identity["attempt_id"], mock_ws_root)
             else:
@@ -3442,7 +3442,7 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
             cpu_record = run_prescientific_cpu_gate(BASE_DIR, is_mock=False)
             model = SolModelProvider(model_name="gpt-5.6-sol", artifact_root=BASE_DIR, state_root=BASE_DIR, ledger=ledger, mock_subprocess=False)
             evaluator = ProductionTaskEvaluator()
-            run_pilot_canary(stage, identity["attempt_id"], model, BASE_DIR)
+            run_pilot_canary(stage, identity["attempt_id"], model, BASE_DIR, ledger=ledger)
             if is_resume:
                 verify_stage_scientific_start(stage, identity["attempt_id"], BASE_DIR)
             else:

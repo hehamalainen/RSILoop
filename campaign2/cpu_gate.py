@@ -122,8 +122,13 @@ def run_prescientific_cpu_gate(workspace_root: str = BASE_DIR, is_mock: bool = F
         if not isinstance(measurements, list) or len(measurements) != 120 or len(expected_rows) != 120:
             raise CpuGateError(f"Existing CPU gate record must contain exactly 120 row measurements, got {len(measurements)}")
 
+        rec_max_cpu = data.get("max_cpu_seconds")
+        if type(rec_max_cpu) is bool or not isinstance(rec_max_cpu, (int, float)) or not math.isfinite(rec_max_cpu) or rec_max_cpu < 0.0:
+            raise CpuGateError(f"Invalid max_cpu_seconds in CPU gate record: {rec_max_cpu}")
+
         seen_row_ids = set()
-        calc_max_cpu = 0.0
+        calc_max_cpu = -1.0
+        calc_max_row_id = ""
 
         for idx, m in enumerate(measurements):
             exp_row = expected_rows[idx]
@@ -142,7 +147,7 @@ def run_prescientific_cpu_gate(workspace_root: str = BASE_DIR, is_mock: bool = F
                     f"CPU gate record row sequence mismatch at index {idx}: expected ({exp_row_id}, {exp_task_id}), got ({m_row_id}, {m_task_id})"
                 )
 
-            if not isinstance(cpu_sec, (int, float)) or not math.isfinite(cpu_sec) or cpu_sec < 0.0:
+            if type(cpu_sec) is bool or not isinstance(cpu_sec, (int, float)) or not math.isfinite(cpu_sec) or cpu_sec < 0.0:
                 raise CpuGateError(f"CPU gate record contains non-numeric or negative worker CPU seconds at index {idx}: {cpu_sec}")
 
             if m_row_id in seen_row_ids:
@@ -151,10 +156,17 @@ def run_prescientific_cpu_gate(workspace_root: str = BASE_DIR, is_mock: bool = F
 
             if cpu_sec > calc_max_cpu:
                 calc_max_cpu = cpu_sec
+                calc_max_row_id = m_row_id
 
-        if abs(calc_max_cpu - float(data.get("max_cpu_seconds", -1.0))) > 1e-6:
+        if abs(calc_max_cpu - float(rec_max_cpu)) > 1e-6:
             raise CpuGateError(
-                f"CPU gate record max_cpu_seconds mismatch: recorded {data.get('max_cpu_seconds')}, calculated {calc_max_cpu:.6f}"
+                f"CPU gate record max_cpu_seconds mismatch: recorded {rec_max_cpu}, calculated {calc_max_cpu:.6f}"
+            )
+
+        rec_max_row_id = data.get("max_row_id")
+        if rec_max_row_id != calc_max_row_id:
+            raise CpuGateError(
+                f"CPU gate record max_row_id mismatch: recorded '{rec_max_row_id}', calculated '{calc_max_row_id}'"
             )
 
         if calc_max_cpu > MAX_ALLOWED_CPU_SECONDS:

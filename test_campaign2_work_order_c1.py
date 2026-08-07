@@ -33,15 +33,7 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 
-def setUpModule():
-    for f in ["campaign2_cpu_gate_record.json", "history/campaign2_pilot_preflight_registry.json"]:
-        p = os.path.join(BASE_DIR, f)
-        if os.path.exists(p):
-            try:
-                os.chmod(p, 0o644)
-                os.remove(p)
-            except Exception:
-                pass
+
 
 from campaign2.model_provider import (
     ProductionTaskEvaluator,
@@ -417,6 +409,18 @@ class TestC1_12_MockAndProductionParity(unittest.TestCase):
                 self.assertEqual(len(report_data["per_tier_deltas"]), 4)
                 self.assertEqual(report_data["prescientific_cpu_gate"]["total_rows_evaluated"], 120)
 
+                # Assert complete accounting equivalence (P1-4)
+                self.assertIn("exploratory", report_data)
+                exp = report_data["exploratory"]
+                self.assertIn("evaluable_candidate_rate", exp)
+                self.assertIn("score_improving_mutations_per_call", exp)
+
+                from campaign2.preflight_registry import PreflightRegistry
+                reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
+                self.assertEqual(reg.data["total_logical_calls"], 172)
+                self.assertEqual(reg.data["total_local_invocation_attempts"], 172)
+                self.assertGreater(reg.data["cumulative_tokens"], 0)
+
 
 class TestC1_14_Round24Invariants(unittest.TestCase):
     def test_preflight_registry_authentication_fails_closed_on_missing_or_mismatched_hashes(self):
@@ -488,6 +492,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "started_record_hash": started_hash,
                 "classification": "valid",
                 "return_code": 0,
+                "text_hash": hashlib.sha256(b"CANARY_OK").hexdigest(),
                 "tokens": 15,
                 "duration": 0.2,
                 "timestamp": time.time(),
@@ -502,7 +507,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
 
             model = mock.MagicMock()
-            data = run_pilot_canary("pilot", "att_rec_001", model, workspace_root=tmp_dir)
+            data = run_pilot_canary("pilot", "att_rec_001", model, workspace_root=tmp_dir, ledger=ledger)
             self.assertTrue(data["canary_passed"])
             # Model should NOT have been called due to reconciliation
             self.assertFalse(model.generate_candidate.called)
@@ -594,9 +599,149 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 ledger.verify_three_record_protocol()
 
     def test_canonical_workspace_remains_clean(self):
-        # Verify no preflight registry or CPU gate record was created in BASE_DIR during tests
-        self.assertFalse(os.path.exists(os.path.join(BASE_DIR, "history", "campaign2_pilot_preflight_registry.json")))
-        self.assertFalse(os.path.exists(os.path.join(BASE_DIR, "campaign2_cpu_gate_record.json")))
+        reg_p = os.path.join(BASE_DIR, "history", "campaign2_pilot_preflight_registry.json")
+        gate_p = os.path.join(BASE_DIR, "campaign2_cpu_gate_record.json")
+        self.assertFalse(os.path.exists(reg_p), f"Forbidden canonical file found in BASE_DIR: {reg_p}")
+        self.assertFalse(os.path.exists(gate_p), f"Forbidden canonical file found in BASE_DIR: {gate_p}")
+
+    def test_master_registration_mismatch_with_source_fails_closed(self):
+        from campaign2.orchestrator import Campaign2Orchestrator, OrchestratorError
+        from campaign2.model_provider import MockModelProvider
+        from campaign2.registration import verify_master_registration
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ta = {
+                "set_assignments": {
+                    "suite_p": {
+                        "optimization": ["p_f1_01_log_stream_parser", "p_f2_01_rate_limiter_token_bucket"],
+                        "selection": ["p_f3_01_lru_cache_ttl", "p_f4_01_bgp_peer_fsm"],
+                        "confirmatory": ["p_f1_02_huffman_encoding", "p_f2_02_token_bucket_refill"],
+                    },
+                    "structural_holdout": ["p_f3_02_lru_eviction", "p_f4_02_bgp_state_transition"],
+                }
+            }
+            reg = dict(verify_master_registration(BASE_DIR))
+            reg["pilot_limits"] = {
+                "num_trials": 99,  # Mismatched num_trials!
+                "max_mutations_per_trial": 3,
+            }
+            with self.assertRaises(OrchestratorError):
+                Campaign2Orchestrator(
+                    model_provider=MockModelProvider(),
+                    task_evaluator=None,
+                    tier_assignment=ta,
+                    registration=reg,
+                    suite="suite_p",
+                    workspace_root=tmp_dir,
+                )
+
+    def test_partial_stdout_bytes_with_http_429_is_invalidated_not_retryable(self):
+        # Probe 1: Partial malformed JSON + HTTP 429 in stderr -> MUST be invalidated
+        partial_json = b'{"type": "item.completed", "item": {"type": "agent_message", "text": "partial'
+        parsed1 = parse_and_classify_jsonl_output(partial_json, b"HTTP 429 Too Many Requests\n", return_code=1)
+        self.assertEqual(parsed1["classification"], "invalidated")
+
+        # Probe 2: Arbitrary partial stdout + HTTP 429 in stderr -> MUST be invalidated
+        partial_bytes = b"random stdout bytes text..."
+        parsed2 = parse_and_classify_jsonl_output(partial_bytes, b"HTTP 429 Too Many Requests\n", return_code=1)
+        self.assertEqual(parsed2["classification"], "invalidated")
+
+        # Probe 3: Zero raw stdout + HTTP 429 in stderr -> RETRYABLE
+        parsed3 = parse_and_classify_jsonl_output(b"", b"HTTP 429 Too Many Requests\n", return_code=1)
+        self.assertEqual(parsed3["classification"], "transient_infrastructure_error")
+
+    def test_canary_reconciliation_semantic_authentication(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from campaign2.attempt_lifecycle import AttemptLedger
+            from campaign2.preflight_registry import CANARY_NEUTRAL_PROMPT
+            run_dir = os.path.join(tmp_dir, "att_rec_002")
+            os.makedirs(run_dir, exist_ok=True)
+            ledger_p = os.path.join(run_dir, "campaign2_pilot_ledger.jsonl")
+            ledger = AttemptLedger(ledger_p)
+
+            canary_prompt_hash = hashlib.sha256(CANARY_NEUTRAL_PROMPT.encode("utf-8")).hexdigest()
+
+            # Record completion with WRONG text hash
+            intent = {
+                "record_type": "invocation_intent",
+                "logical_call_id": "canary_pilot_att_rec_002_01",
+                "invocation_ordinal": 1,
+                "prompt_hash": canary_prompt_hash,
+                "timestamp": time.time(),
+            }
+            intent_bytes = (json.dumps(intent, sort_keys=True) + "\n").encode("utf-8")
+            intent_hash = hashlib.sha256(intent_bytes).hexdigest()
+
+            started = {
+                "record_type": "process_started",
+                "logical_call_id": "canary_pilot_att_rec_002_01",
+                "invocation_ordinal": 1,
+                "pid": 12345,
+                "intent_record_hash": intent_hash,
+                "timestamp": time.time(),
+            }
+            started_bytes = (json.dumps(started, sort_keys=True) + "\n").encode("utf-8")
+            started_hash = hashlib.sha256(started_bytes).hexdigest()
+
+            comp_bad = {
+                "record_type": "invocation_completion",
+                "logical_call_id": "canary_pilot_att_rec_002_01",
+                "invocation_ordinal": 1,
+                "intent_record_hash": intent_hash,
+                "started_record_hash": started_hash,
+                "classification": "valid",
+                "return_code": 0,
+                "text_hash": hashlib.sha256(b"FAKE_RESPONSE").hexdigest(),  # Mismatched text_hash!
+                "tokens": 15,
+                "duration": 0.2,
+                "timestamp": time.time(),
+            }
+
+            ledger._append_record(intent)
+            ledger._append_record(started)
+            ledger._append_record(comp_bad)
+
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_master_registration.json"), os.path.join(tmp_dir, "campaign2_master_registration.json"))
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
+
+            model = mock.MagicMock()
+            model.generate_candidate.return_value = ("CANARY_OK", 10)
+            data = run_pilot_canary("pilot", "att_rec_002", model, workspace_root=tmp_dir, ledger=ledger)
+            self.assertTrue(data["canary_passed"])
+            # Model MUST have been called because fake text_hash completion was rejected for reconciliation!
+            self.assertTrue(model.generate_candidate.called)
+
+    def test_cpu_gate_rejects_booleans_and_mismatched_max_row_id(self):
+        from campaign2.cpu_gate import run_prescientific_cpu_gate, CpuGateError
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_parity_matrix.json"), os.path.join(tmp_dir, "campaign2_parity_matrix.json"))
+            rec_p = os.path.join(tmp_dir, "campaign2_cpu_gate_record.json")
+
+            with open(os.path.join(BASE_DIR, "campaign2_parity_matrix.json"), "r", encoding="utf-8") as f:
+                pm = json.load(f)
+            rows = pm.get("matrix", list(pm.values()))
+            fake_measurements = []
+            for r in rows:
+                fake_measurements.append({
+                    "row_id": r.get("row_id", f"{r['task_id']}_{r.get('variant', 'unknown')}"),
+                    "task_id": r["task_id"],
+                    "worker_cpu_seconds": True,  # Boolean!
+                })
+
+            fake_rec = {
+                "record_type": "prescientific_cpu_gate",
+                "is_mock": False,
+                "total_rows_evaluated": 120,
+                "max_cpu_seconds": 1.0,
+                "max_row_id": rows[0].get("row_id", f"{rows[0]['task_id']}_{rows[0].get('variant', 'unknown')}"),
+                "allowed_limit_seconds": 3.0,
+                "row_measurements": fake_measurements,
+            }
+            with open(rec_p, "w", encoding="utf-8") as f:
+                json.dump(fake_rec, f)
+            os.chmod(rec_p, 0o444)
+
+            with self.assertRaises(CpuGateError):
+                run_prescientific_cpu_gate(workspace_root=tmp_dir, is_mock=False)
 
 
 class TestC1_13_FullStageRefusal(unittest.TestCase):
