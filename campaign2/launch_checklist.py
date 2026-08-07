@@ -18,35 +18,8 @@ from typing import Dict, Any, List, Tuple
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHECKLIST_RELATIVE_PATH = os.path.join("history", "campaign2_launch_checklist.json")
 
-# Accounting constants (derived from design specs)
-PER_LOGICAL_CALL_WALL_CAP_SECONDS = 120
-CANDIDATE_CPU_LIMIT_SECONDS = 15
-CANDIDATE_WALL_LIMIT_SECONDS = 15
-CPU_GATE_THRESHOLD_SECONDS = 3.0
-OUTPUT_TOKEN_CEILING = 600_000
-CUMULATIVE_ACTIVE_TIME_CEILING_HOURS = 8.0
-
-ORDERED_LAUNCH_STEPS = [
-    "1. manifest_verification",
-    "2. evidence_manifest_verification",
-    "3. parity_matrix_verification",
-    "4. tier_assignment_verification",
-    "5. master_registration_verification",
-    "6. launch_lock_verification",
-    "7. attempt_identity_creation_or_verification",
-    "8. attempt_ledger_and_resume_admission_verification",
-    "9. checkpoint_manager_initialization",
-    "10. codex_cli_version_check",
-    "11. prescientific_cpu_gate",
-    "12. preflight_registry_authentication",
-    "13. pilot_canary_execution_or_reconciliation",
-    "14. scientific_start_claim",
-    "15. trial_1_execution_and_checkpoint",
-    "16. trial_2_execution_and_checkpoint",
-    "17. pilot_outcome_ladder_evaluation",
-    "18. schema3_report_generation_and_sealing",
-    "19. terminal_classification_recording"
-]
+from campaign2.registration import FROZEN_ORDERED_LAUNCH_STEPS
+ORDERED_LAUNCH_STEPS = list(FROZEN_ORDERED_LAUNCH_STEPS)
 
 
 class LaunchChecklistError(RuntimeError):
@@ -121,21 +94,45 @@ def generate_launch_checklist_data(workspace_root: str = BASE_DIR) -> Dict[str, 
     if len(arm_vectors) != 10:
         raise LaunchChecklistError(f"Master registration must contain 10 arm assignment vectors, got {len(arm_vectors)}")
 
-    # Derived accounting ceilings and relationship assertions
+    # Derived accounting ceilings directly from verified master registration
+    if "call_arithmetic" not in reg_data or "execution_limits" not in reg_data or "pilot_limits" not in reg_data:
+        raise LaunchChecklistError("Master registration missing required call_arithmetic, execution_limits, or pilot_limits")
+
+    call_arith = reg_data["call_arithmetic"]
+    exec_limits = reg_data["execution_limits"]
+    pilot_lims = reg_data["pilot_limits"]
+
+    try:
+        per_trial = call_arith["per_trial_benchmark_logical_calls"]
+        num_trials = pilot_lims["num_trials"]
+        benchmark_workload = call_arith["pilot_total_benchmark_logical_calls"]
+        canary_calls = call_arith["max_canary_calls"]
+        total_ceiling = call_arith["pilot_max_logical_calls"]
+        max_attempts = exec_limits["max_invocation_attempts"]
+        attempt_ceiling = call_arith["max_local_invocation_attempts"]
+
+        per_call_wall_cap = int(exec_limits["call_wall_limit_seconds"])
+        cand_cpu_limit = int(exec_limits["candidate_cpu_limit_seconds"])
+        cand_wall_limit = int(exec_limits["candidate_wall_limit_seconds"])
+        output_token_ceiling = int(exec_limits["max_output_tokens"])
+        active_time_hours = float(exec_limits["max_active_seconds"]) / 3600.0
+    except KeyError as ke:
+        raise LaunchChecklistError(f"Master registration missing required limit key: {ke}") from ke
+
     from campaign2.cpu_gate import MAX_ALLOWED_CPU_SECONDS
     cpu_threshold = MAX_ALLOWED_CPU_SECONDS
 
-    pilot_trials = 2
-    tasks_per_trial = 86
-    benchmark_workload = pilot_trials * tasks_per_trial  # 172
-    canary_calls = 3
-    total_ceiling = benchmark_workload + canary_calls  # 175
-    attempt_ceiling = total_ceiling * 3  # 525
-
-    if total_ceiling != benchmark_workload + canary_calls:
-        raise LaunchChecklistError(f"Ceiling mismatch: total {total_ceiling} != {benchmark_workload} + {canary_calls}")
-    if attempt_ceiling != total_ceiling * 3:
-        raise LaunchChecklistError(f"Attempt ceiling mismatch: {attempt_ceiling} != {total_ceiling} * 3")
+    # Assert mathematical relationships
+    if per_trial * num_trials != benchmark_workload:
+        raise LaunchChecklistError(f"Per-trial call arithmetic mismatch: {per_trial} * {num_trials} != {benchmark_workload}")
+    if benchmark_workload + canary_calls != total_ceiling:
+        raise LaunchChecklistError(f"Total logical call ceiling arithmetic mismatch: {benchmark_workload} + {canary_calls} != {total_ceiling}")
+    if total_ceiling * max_attempts != attempt_ceiling:
+        raise LaunchChecklistError(f"Attempt ceiling arithmetic mismatch: {total_ceiling} * {max_attempts} != {attempt_ceiling}")
+    if total_ceiling != exec_limits.get("max_logical_calls"):
+        raise LaunchChecklistError(f"Registration total logical calls mismatch: {total_ceiling} != {exec_limits.get('max_logical_calls')}")
+    if attempt_ceiling != exec_limits.get("max_local_invocation_attempts"):
+        raise LaunchChecklistError(f"Registration max invocation attempts mismatch: {attempt_ceiling} != {exec_limits.get('max_local_invocation_attempts')}")
 
     checklist_data = {
         "schema_version": "1",
@@ -157,11 +154,11 @@ def generate_launch_checklist_data(workspace_root: str = BASE_DIR) -> Dict[str, 
             "canary_logical_calls": canary_calls,
             "total_logical_call_ceiling": total_ceiling,
             "invocation_attempt_ceiling": attempt_ceiling,
-            "output_token_ceiling": OUTPUT_TOKEN_CEILING,
-            "cumulative_active_model_invocation_time_ceiling_hours": CUMULATIVE_ACTIVE_TIME_CEILING_HOURS,
-            "per_logical_call_wall_cap_seconds": PER_LOGICAL_CALL_WALL_CAP_SECONDS,
-            "candidate_cpu_limit_seconds": CANDIDATE_CPU_LIMIT_SECONDS,
-            "candidate_wall_limit_seconds": CANDIDATE_WALL_LIMIT_SECONDS,
+            "output_token_ceiling": output_token_ceiling,
+            "cumulative_active_model_invocation_time_ceiling_hours": active_time_hours,
+            "per_logical_call_wall_cap_seconds": per_call_wall_cap,
+            "candidate_cpu_limit_seconds": cand_cpu_limit,
+            "candidate_wall_limit_seconds": cand_wall_limit,
             "cpu_gate_threshold_seconds": cpu_threshold,
         },
         "ordered_launch_steps": ORDERED_LAUNCH_STEPS,

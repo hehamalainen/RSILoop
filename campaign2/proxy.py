@@ -1180,10 +1180,11 @@ def evaluate_candidate_code_sandboxed(task_id: str, candidate_code: str, timeout
         if ipc_client:
             ipc_client.selector.close()
         for fd in (host_in, host_out, worker_in, worker_out):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
         if proc:
             if proc.poll() is None:
                 try:

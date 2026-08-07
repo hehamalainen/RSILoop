@@ -3341,7 +3341,7 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
         raise NotImplementedError("Campaign 2 full stage requires Work Order C implementation")
 
     # 1. Preflight verifications
-    ws_root = getattr(ctx, "workspace_root", BASE_DIR)
+    ws_root = getattr(ctx, "workspace_root", BASE_DIR) if args.mock else BASE_DIR
     verify_campaign2_manifest(ws_root)
     verify_campaign2_evidence_manifest(ws_root)
     verify_campaign2_parity_matrix(ws_root)
@@ -3414,12 +3414,12 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
         if not existing_starts:
             ledger.record_attempt_start(identity["attempt_id"], stage)
 
+        ledger.verify_resume_admission()
         ckpt_path = os.path.join(ctx.run_dir, identity["checkpoint_file"])
         ckpt_mgr = CheckpointManager(ckpt_path, stage)
-        ledger.verify_resume_admission()
 
         from campaign2.cpu_gate import run_prescientific_cpu_gate
-        from campaign2.preflight_registry import run_pilot_canary
+        from campaign2.preflight_registry import run_pilot_canary, PreflightRegistry
         from campaign2.model_provider import (
             MockModelProvider,
             MockTaskEvaluator,
@@ -3430,6 +3430,8 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
 
         if args.mock:
             mock_ws_root = getattr(ctx, "workspace_root", ctx.run_dir)
+            verify_codex_cli_version("codex")
+            PreflightRegistry(stage=stage, workspace_root=mock_ws_root)
             cpu_record = run_prescientific_cpu_gate(mock_ws_root, is_mock=True)
             model = SolModelProvider(model_name="gpt-5.6-sol", artifact_root=BASE_DIR, state_root=mock_ws_root, ledger=ledger, mock_subprocess=True)
             evaluator = ProductionTaskEvaluator()
@@ -3440,6 +3442,7 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
                 publish_scientific_start(stage, identity["attempt_id"], mock_ws_root)
         else:
             verify_codex_cli_version("codex")
+            PreflightRegistry(stage=stage, workspace_root=BASE_DIR)
             cpu_record = run_prescientific_cpu_gate(BASE_DIR, is_mock=False)
             model = SolModelProvider(model_name="gpt-5.6-sol", artifact_root=BASE_DIR, state_root=BASE_DIR, ledger=ledger, mock_subprocess=False)
             evaluator = ProductionTaskEvaluator()

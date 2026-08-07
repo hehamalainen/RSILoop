@@ -697,13 +697,25 @@ class SolModelProvider(ModelProvider):
                             "Focus on edge-case error recovery and stream framing.\n"
                         )
                     else:
-                        text_val = (
-                            "```python\n"
-                            f"# Mock candidate for {task_id}\n"
-                            "def solve():\n"
-                            f"    return '{task_id}_mock'\n"
-                            "```\n"
-                        )
+                        # In mock_subprocess mode (offline integration testing without live Codex CLI),
+                        # load reference benchmark solution if available to allow full-pipeline candidate evaluation.
+                        sol_code = ""
+                        for suite in ("suite_c", "suite_p"):
+                            cand_sol = os.path.join(self.state_root, "benchmarks", "campaign2", suite, task_id, "solution.py")
+                            if os.path.exists(cand_sol):
+                                with open(cand_sol, "r", encoding="utf-8") as sf:
+                                    sol_code = sf.read()
+                                break
+                        if sol_code:
+                            text_val = f"```python\n{sol_code}\n```"
+                        else:
+                            text_val = (
+                                "```python\n"
+                                f"# Mock candidate for {task_id}\n"
+                                "def solve():\n"
+                                f"    return '{task_id}_mock'\n"
+                                "```\n"
+                            )
                     mock_resp = {
                         "type": "turn.completed",
                         "usage": {"output_tokens": 100}

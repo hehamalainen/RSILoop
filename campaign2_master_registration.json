@@ -177,6 +177,27 @@
     "A >= 0.05 is an observed practical gate, not inferential proof of absolute improvement."
   ],
   "model_name": "gpt-5.6-sol",
+  "ordered_launch_steps": [
+    "1. manifest_verification",
+    "2. evidence_manifest_verification",
+    "3. parity_matrix_verification",
+    "4. tier_assignment_verification",
+    "5. master_registration_verification",
+    "6. launch_lock_verification",
+    "7. attempt_identity_creation_or_verification",
+    "8. attempt_ledger_and_resume_admission_verification",
+    "9. checkpoint_manager_initialization",
+    "10. codex_cli_version_check",
+    "11. preflight_registry_authentication",
+    "12. prescientific_cpu_gate",
+    "13. pilot_canary_execution_or_reconciliation",
+    "14. scientific_start_claim",
+    "15. trial_1_execution_and_checkpoint",
+    "16. trial_2_execution_and_checkpoint",
+    "17. pilot_outcome_ladder_evaluation",
+    "18. schema3_report_generation_and_sealing",
+    "19. terminal_classification_recording"
+  ],
   "pilot_limits": {
     "confirmatory_tasks": 2,
     "generation_replicates_k": 2,

@@ -106,11 +106,13 @@ def run_prescientific_cpu_gate(workspace_root: str = BASE_DIR, is_mock: bool = F
             raise CpuGateError(f"Existing CPU gate record allowed_limit_seconds mismatch: {data.get('allowed_limit_seconds')}")
 
         # Authenticate exact (row_id, task_id) sequence against parity matrix
-        from campaign2.manifest import PARITY_MATRIX_PATH
-        if not os.path.exists(PARITY_MATRIX_PATH):
-            raise CpuGateError(f"Missing parity matrix file: {PARITY_MATRIX_PATH}")
+        pm_path = os.path.join(workspace_root, "campaign2_parity_matrix.json")
+        if not os.path.exists(pm_path):
+            pm_path = os.path.join(BASE_DIR, "campaign2_parity_matrix.json")
+        if not os.path.exists(pm_path):
+            raise CpuGateError(f"Missing parity matrix file: {pm_path}")
 
-        with open(PARITY_MATRIX_PATH, "r", encoding="utf-8") as f:
+        with open(pm_path, "r", encoding="utf-8") as f:
             parity_matrix = json.load(f)
 
         if isinstance(parity_matrix, dict):
@@ -176,13 +178,15 @@ def run_prescientific_cpu_gate(workspace_root: str = BASE_DIR, is_mock: bool = F
         return data
 
     # 2. Otherwise execute the pre-scientific CPU gate benchmark across all 120 parity rows
-    from campaign2.manifest import PARITY_MATRIX_PATH
     from campaign2.proxy import evaluate_candidate_code_sandboxed
 
-    if not os.path.exists(PARITY_MATRIX_PATH):
-        raise CpuGateError(f"Missing parity matrix file: {PARITY_MATRIX_PATH}")
+    pm_path = os.path.join(workspace_root, "campaign2_parity_matrix.json")
+    if not os.path.exists(pm_path):
+        pm_path = os.path.join(BASE_DIR, "campaign2_parity_matrix.json")
+    if not os.path.exists(pm_path):
+        raise CpuGateError(f"Missing parity matrix file: {pm_path}")
 
-    with open(PARITY_MATRIX_PATH, "r", encoding="utf-8") as f:
+    with open(pm_path, "r", encoding="utf-8") as f:
         parity_matrix = json.load(f)
 
     if isinstance(parity_matrix, dict):
@@ -209,7 +213,7 @@ def run_prescientific_cpu_gate(workspace_root: str = BASE_DIR, is_mock: bool = F
 
         if is_mock:
             # In mock mode, worker CPU time is deterministic fast mock measurement
-            worker_cpu_sec = 0.01
+            worker_cpu_sec = float(row.get("mock_cpu_sec", 0.01))
         else:
             import resource
             ru0 = resource.getrusage(resource.RUSAGE_CHILDREN)

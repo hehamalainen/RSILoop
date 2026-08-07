@@ -544,6 +544,7 @@ class TestAttemptAccounting(unittest.TestCase):
             ledger = AttemptLedger(ledger_path)
             ledger.record_attempt_start(run_id, "pilot")
             ledger.record_intent("call_unmatched_1", "mutate", "slot_a", 2)
+            ledger.record_completion("call_unmatched_1", True, tokens=0)
 
             import rsi_loop
             with mock.patch("campaign2.durability.CheckpointManager", side_effect=DurabilityError("Injected checkpoint recovery failure")):
@@ -559,6 +560,39 @@ class TestAttemptAccounting(unittest.TestCase):
             term_entry = [e for e in entries if e.get("record_type") == "terminal_classification"][0]
             self.assertEqual(term_entry["classification"], "invalidated")
             self.assertGreater(ledger_reload.unknown_usage_count, 0)
+
+    def test_unmatched_intent_rejected_at_resume_admission(self):
+        """Verify that an attempt with an unmatched intent (intent recorded without completion) is strictly rejected at resume admission."""
+        with tempfile.TemporaryDirectory() as base_tmp:
+            run_dir = os.path.realpath(os.path.join(base_tmp, "run_test_unmatched_intent"))
+            os.makedirs(run_dir)
+            run_id = os.path.basename(run_dir)
+            ctx = SimpleNamespace(run_dir=run_dir, run_id=run_id)
+            args = SimpleNamespace(stage="pilot", mock=True, resume=True)
+            reg_p, anchor_p = generate_master_registration(run_dir)
+
+            with open(reg_p, "rb") as f:
+                reg_sha = hashlib.sha256(f.read()).hexdigest()
+            create_attempt_identity(run_dir, run_id, "pilot", "suite_p", True, reg_sha)
+
+            ledger_path = os.path.join(run_dir, "campaign2_pilot_ledger.jsonl")
+            ledger = AttemptLedger(ledger_path)
+            ledger.record_attempt_start(run_id, "pilot")
+            ledger.record_intent("call_unmatched_dangling_1", "mutate", "slot_a", 2)
+            # Crucially: NO completion is recorded for call_unmatched_dangling_1
+
+            import rsi_loop
+            with mock.patch("campaign2.manifest.verify_campaign2_manifest", return_value=(True, 145)), \
+                 mock.patch("campaign2.manifest.verify_campaign2_evidence_manifest", return_value=True), \
+                 mock.patch("campaign2.manifest.verify_campaign2_parity_matrix", return_value=True), \
+                 mock.patch("campaign2.tier_assignment.verify_family_blocked_assignment", return_value=True), \
+                 mock.patch("campaign2.registration.verify_master_registration", return_value={}), \
+                 mock.patch("campaign2.launch_lock.verify_launch_lock", return_value={}), \
+                 mock.patch("campaign2.attempt_identity.verify_attempt_identity", return_value={"attempt_id": "run_test_unmatched_intent", "ledger_file": "campaign2_pilot_ledger.jsonl", "checkpoint_file": "campaign2_pilot_checkpoint.json"}):
+                with self.assertRaises(AttemptLifecycleError) as exc_ctx:
+                    rsi_loop._run_campaign2(args, ctx)
+
+            self.assertIn("multiplicity mismatch", str(exc_ctx.exception))
 
     def test_terminal_attempt_resume_immutable(self):
         with tempfile.TemporaryDirectory() as base_tmp:

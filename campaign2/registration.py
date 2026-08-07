@@ -51,6 +51,28 @@ EVALUABLE_CANDIDATE_DEFINITION = {
     "classification": "Harness-contained candidate runtime exceptions during evaluation remain evaluable (is_valid=True) with bounded error traces recorded for optimizer feedback. Candidate top-level import/syntax failures and attributable process termination (CandidateProcessError) score (0, 10) with is_valid=False. Any live-worker CandidateTimeoutError, unattributed wall-clock timeout, or infrastructure fault invalidates the attempt, not a scored candidate."
 }
 
+FROZEN_ORDERED_LAUNCH_STEPS = [
+    "1. manifest_verification",
+    "2. evidence_manifest_verification",
+    "3. parity_matrix_verification",
+    "4. tier_assignment_verification",
+    "5. master_registration_verification",
+    "6. launch_lock_verification",
+    "7. attempt_identity_creation_or_verification",
+    "8. attempt_ledger_and_resume_admission_verification",
+    "9. checkpoint_manager_initialization",
+    "10. codex_cli_version_check",
+    "11. preflight_registry_authentication",
+    "12. prescientific_cpu_gate",
+    "13. pilot_canary_execution_or_reconciliation",
+    "14. scientific_start_claim",
+    "15. trial_1_execution_and_checkpoint",
+    "16. trial_2_execution_and_checkpoint",
+    "17. pilot_outcome_ladder_evaluation",
+    "18. schema3_report_generation_and_sealing",
+    "19. terminal_classification_recording"
+]
+
 FROZEN_TRIO_ORDERINGS = [
     ("baseline", "slot_a_winner", "slot_b_winner"),
     ("baseline", "slot_b_winner", "slot_a_winner"),
@@ -197,6 +219,7 @@ def generate_master_registration(workspace_root: str = BASE_DIR) -> Tuple[str, s
         "known_limitations": KNOWN_LIMITATIONS,
         "exploratory_secondaries": EXPLORATORY_SECONDARIES,
         "evaluable_candidate_definition": EVALUABLE_CANDIDATE_DEFINITION,
+        "ordered_launch_steps": list(FROZEN_ORDERED_LAUNCH_STEPS),
         "frozen_trio_orderings": [list(t) for t in FROZEN_TRIO_ORDERINGS],
         "arm_assignment_vectors": arm_vectors,
         "pilot_limits": PILOT_LIMITS,
@@ -322,6 +345,10 @@ def verify_master_registration(workspace_root: str = BASE_DIR) -> Dict[str, Any]
     ecd = data.get("evaluable_candidate_definition")
     if not isinstance(ecd, dict) or ecd != EVALUABLE_CANDIDATE_DEFINITION:
         raise ValueError(f"Master registration evaluable_candidate_definition mismatch: expected {EVALUABLE_CANDIDATE_DEFINITION}, got {ecd}")
+
+    steps = data.get("ordered_launch_steps", [])
+    if len(steps) != 19 or steps != FROZEN_ORDERED_LAUNCH_STEPS:
+        raise ValueError("Master registration ordered_launch_steps mismatch or invalid")
 
     orderings = data.get("frozen_trio_orderings", [])
     if len(orderings) != 6:

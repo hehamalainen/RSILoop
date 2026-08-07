@@ -219,6 +219,7 @@ class TestC1_3_ThreeRecordLedger(unittest.TestCase):
             # Non-contiguous ordinal (ordinal=2 for first call) raises AttemptLifecycleError
             bad_record = {
                 "record_type": "invocation_intent",
+                    "task_file_hash": "",
                 "logical_call_id": "call_bad",
                 "invocation_ordinal": 2,
                 "timestamp": time.time(),
@@ -494,6 +495,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "logical_call_id": "canary_pilot_att_rec_001_01",
                 "invocation_ordinal": 1,
                 "prompt_hash": canary_prompt_hash,
+                    "task_file_hash": "",
                 "argv_hash": "a" * 64,
                 "env_hash": "a" * 64,
                 "cwd_hash": "a" * 64,
@@ -524,6 +526,8 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "classification": "valid",
                 "return_code": 0,
                 "text_hash": hashlib.sha256(b"CANARY_OK").hexdigest(),
+                    "raw_stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "raw_stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "tokens": 15,
                 "duration": 0.2,
                 "timestamp": time.time(),
@@ -600,12 +604,15 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
             ledger = AttemptLedger(ledger_p)
 
             key = ("call_seq_test", 1)
-            intent = {"record_type": "invocation_intent", "logical_call_id": "call_seq_test", "invocation_ordinal": 1, "timestamp": time.time()}
+            intent = {"record_type": "invocation_intent",
+                    "task_file_hash": "", "logical_call_id": "call_seq_test", "invocation_ordinal": 1, "timestamp": time.time()}
             intent_bytes = (json.dumps(intent, sort_keys=True) + "\n").encode("utf-8")
             intent_hash = hashlib.sha256(intent_bytes).hexdigest()
 
             comp = {
                 "record_type": "invocation_completion",
+                    "raw_stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "raw_stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "logical_call_id": "call_seq_test",
                 "invocation_ordinal": 1,
                 "intent_record_hash": intent_hash,
@@ -700,6 +707,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "logical_call_id": "canary_pilot_att_rec_002_01",
                 "invocation_ordinal": 1,
                 "prompt_hash": canary_prompt_hash,
+                    "task_file_hash": "",
                 "argv_hash": "a" * 64,
                 "env_hash": "a" * 64,
                 "cwd_hash": "a" * 64,
@@ -729,7 +737,9 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "started_record_hash": started_hash,
                 "classification": "valid",
                 "return_code": 0,
-                "text_hash": hashlib.sha256(b"FAKE_RESPONSE").hexdigest(),  # Mismatched text_hash!
+                "text_hash": hashlib.sha256(b"FAKE_RESPONSE").hexdigest(),
+                    "raw_stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "raw_stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",  # Mismatched text_hash!
                 "tokens": 15,
                 "duration": 0.2,
                 "timestamp": time.time(),
@@ -801,6 +811,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "logical_call_id": "canary_pilot_att_rec_003_01",
                 "invocation_ordinal": 1,
                 "prompt_hash": canary_prompt_hash,
+                    "task_file_hash": "",
                 "argv_hash": "a" * 64,
                 "env_hash": "a" * 64,
                 "cwd_hash": "a" * 64,
@@ -831,6 +842,8 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "classification": "valid",
                 "return_code": 0,
                 "text_hash": canary_text_hash,
+                    "raw_stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "raw_stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "tokens": 7,
                 "duration": 0.3,
                 "timestamp": time.time(),
@@ -868,6 +881,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "logical_call_id": "canary_pilot_att_rec_004_01",
                 "invocation_ordinal": 1,
                 "prompt_hash": canary_prompt_hash,
+                    "task_file_hash": "",
                 "argv_hash": "a" * 64,
                 "env_hash": "a" * 64,
                 "cwd_hash": "a" * 64,
@@ -898,6 +912,8 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "classification": "invalidated",
                 "return_code": -9,
                 "text_hash": "",
+                    "raw_stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "raw_stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "tokens": 10,
                 "duration": 0.5,
                 "timestamp": time.time(),
@@ -953,6 +969,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "logical_call_id": "canary_pilot_att_r28_001_01",
                 "invocation_ordinal": 1,
                 "prompt_hash": canary_prompt_hash,
+                    "task_file_hash": "",
                 "argv_hash": "a" * 64,
                 "env_hash": "a" * 64,
                 "cwd_hash": "a" * 64,
@@ -983,6 +1000,8 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "classification": "valid",
                 "return_code": 0,
                 "text_hash": canary_text_hash,
+                    "raw_stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "raw_stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "tokens": 7,
                 "duration": 0.2,
                 "timestamp": time.time(),
@@ -1040,6 +1059,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "logical_call_id": "canary_pilot_att_r28_002_01",
                 "invocation_ordinal": 1,
                 "prompt_hash": canary_prompt_hash,
+                    "task_file_hash": "",
                 "argv_hash": "a" * 64,
                 "env_hash": "a" * 64,
                 "cwd_hash": "a" * 64,
@@ -1085,6 +1105,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "logical_call_id": "canary_pilot_att_r28_002_01",
                 "invocation_ordinal": 2,
                 "prompt_hash": canary_prompt_hash,
+                    "task_file_hash": "",
                 "argv_hash": "a" * 64,
                 "env_hash": "a" * 64,
                 "cwd_hash": "a" * 64,
@@ -1115,6 +1136,8 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "classification": "valid",
                 "return_code": 0,
                 "text_hash": canary_text_hash,
+                    "raw_stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "raw_stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "tokens": 7,
                 "duration": 0.3,
                 "timestamp": time.time(),
@@ -1197,6 +1220,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "logical_call_id": cid,
                 "invocation_ordinal": 1,
                 "prompt_hash": canary_prompt_hash,
+                    "task_file_hash": "",
                 "argv_hash": "a" * 64,
                 "env_hash": "a" * 64,
                 "cwd_hash": "a" * 64,
@@ -1234,6 +1258,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "logical_call_id": cid,
                 "invocation_ordinal": 2,
                 "prompt_hash": canary_prompt_hash,
+                    "task_file_hash": "",
                 "argv_hash": "a" * 64,
                 "env_hash": "a" * 64,
                 "cwd_hash": "a" * 64,
@@ -1264,6 +1289,8 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "classification": "valid",
                 "return_code": 0,
                 "text_hash": canary_text_hash,
+                    "raw_stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "raw_stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "tokens": 7,
                 "duration": 0.2,
                 "timestamp": time.time(),
@@ -1306,6 +1333,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "logical_call_id": cid,
                 "invocation_ordinal": 1,
                 "prompt_hash": canary_prompt_hash,
+                    "task_file_hash": "",
                 "argv_hash": "a" * 64,
                 "env_hash": "a" * 64,
                 "cwd_hash": "a" * 64,
@@ -1336,6 +1364,8 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "classification": "invalidated",
                 "return_code": 1,
                 "text_hash": "",
+                    "raw_stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "raw_stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "tokens": 10,
                 "duration": 0.5,
                 "usage_known": True,
@@ -1348,6 +1378,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "logical_call_id": cid,
                 "invocation_ordinal": 2,
                 "prompt_hash": canary_prompt_hash,
+                    "task_file_hash": "",
                 "argv_hash": "a" * 64,
                 "env_hash": "a" * 64,
                 "cwd_hash": "a" * 64,
@@ -1378,6 +1409,8 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "classification": "valid",
                 "return_code": 0,
                 "text_hash": canary_text_hash,
+                    "raw_stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "raw_stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "tokens": 7,
                 "duration": 0.2,
                 "usage_known": True,
@@ -1462,6 +1495,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "logical_call_id": cid,
                 "invocation_ordinal": 1,
                 "prompt_hash": canary_prompt_hash,
+                    "task_file_hash": "",
                 "argv_hash": "a" * 64,
                 "env_hash": "a" * 64,
                 "cwd_hash": "a" * 64,
@@ -1510,6 +1544,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "logical_call_id": cid,
                 "invocation_ordinal": 2,
                 "prompt_hash": canary_prompt_hash,
+                    "task_file_hash": "",
                 "argv_hash": "a" * 64,
                 "env_hash": "a" * 64,
                 "cwd_hash": "a" * 64,
@@ -1540,6 +1575,8 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "classification": "valid",
                 "return_code": 0,
                 "text_hash": canary_text_hash,
+                    "raw_stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "raw_stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "tokens": 7,
                 "duration": 0.2,
                 "usage_known": True,
@@ -1728,6 +1765,29 @@ class TestC1_13_FullStageRefusal(unittest.TestCase):
         self.assertIn("full stage requires Work Order C implementation", str(c.exception))
 
 
+EXPECTED_LAUNCH_STEPS = [
+    "1. manifest_verification",
+    "2. evidence_manifest_verification",
+    "3. parity_matrix_verification",
+    "4. tier_assignment_verification",
+    "5. master_registration_verification",
+    "6. launch_lock_verification",
+    "7. attempt_identity_creation_or_verification",
+    "8. attempt_ledger_and_resume_admission_verification",
+    "9. checkpoint_manager_initialization",
+    "10. codex_cli_version_check",
+    "11. preflight_registry_authentication",
+    "12. prescientific_cpu_gate",
+    "13. pilot_canary_execution_or_reconciliation",
+    "14. scientific_start_claim",
+    "15. trial_1_execution_and_checkpoint",
+    "16. trial_2_execution_and_checkpoint",
+    "17. pilot_outcome_ladder_evaluation",
+    "18. schema3_report_generation_and_sealing",
+    "19. terminal_classification_recording"
+]
+
+
 class TestC1a_LaunchPreflightHardening(unittest.TestCase):
     def test_h1_load_or_init_and_reload_symlink_symmetry_matrix(self):
         """Verify _load_or_init and _reload symmetrically fail closed across all 8 symlink combinations."""
@@ -1799,7 +1859,7 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
         self.assertTrue(is_permitted_local_retry(real_record, has_process_started=True))
 
     def test_h3_digest_shape_validation_and_sentinel_matrix(self):
-        """Verify missing/deleted required hashes fail, while empty task_file_hash is restricted to canary."""
+        """Verify missing/deleted required hashes fail closed, and empty task_file_hash is restricted to canary."""
         from campaign2.attempt_lifecycle import (
             AttemptLedger,
             AttemptLifecycleError,
@@ -1808,7 +1868,7 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
         valid_hash = "a" * 64
 
         # 1. Individually delete each required hash field on invocation_intent -> must raise AttemptLifecycleError
-        for field_to_delete in ("argv_hash", "env_hash", "cwd_hash", "sandbox_profile_hash", "input_hash"):
+        for field_to_delete in ("argv_hash", "env_hash", "cwd_hash", "sandbox_profile_hash", "input_hash", "task_file_hash"):
             with tempfile.TemporaryDirectory() as tmp_dir:
                 ledger_p = os.path.join(tmp_dir, "ledger.jsonl")
                 ledger = AttemptLedger(ledger_p)
@@ -1817,11 +1877,6 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
                     "logical_call_id": "test_call_01",
                     "invocation_ordinal": 1,
                     "prompt_hash": valid_hash,
-                    "argv_hash": "a" * 64,
-                    "env_hash": "a" * 64,
-                    "cwd_hash": "a" * 64,
-                    "sandbox_profile_hash": "a" * 64,
-                    "input_hash": "a" * 64,
                     "task_file_hash": valid_hash,
                     "argv_hash": valid_hash,
                     "env_hash": valid_hash,
@@ -1833,9 +1888,103 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
                 ledger._append(intent_rec)
                 with self.assertRaises(AttemptLifecycleError) as ctx:
                     ledger.verify_three_record_protocol()
+                self.assertTrue("missing or invalid" in str(ctx.exception) or "missing task_file_hash" in str(ctx.exception))
+
+        # 2. Missing task_file_hash on canary invocation_intent -> must raise AttemptLifecycleError
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger_p = os.path.join(tmp_dir, "ledger.jsonl")
+            ledger = AttemptLedger(ledger_p)
+            canary_missing_tf = {
+                "record_type": "invocation_intent",
+                "logical_call_id": "canary_pilot_att_01",
+                "invocation_ordinal": 1,
+                "prompt_hash": valid_hash,
+                "argv_hash": valid_hash,
+                "env_hash": valid_hash,
+                "cwd_hash": valid_hash,
+                "sandbox_profile_hash": valid_hash,
+                "input_hash": valid_hash,
+            }
+            ledger._append(canary_missing_tf)
+            with self.assertRaises(AttemptLifecycleError) as ctx:
+                ledger.verify_three_record_protocol()
+            self.assertIn("missing task_file_hash", str(ctx.exception))
+
+        # 3. None task_file_hash on canary invocation_intent -> must raise AttemptLifecycleError
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger_p = os.path.join(tmp_dir, "ledger.jsonl")
+            ledger = AttemptLedger(ledger_p)
+            canary_none_tf = {
+                "record_type": "invocation_intent",
+                "logical_call_id": "canary_pilot_att_01",
+                "invocation_ordinal": 1,
+                "prompt_hash": valid_hash,
+                "task_file_hash": None,
+                "argv_hash": valid_hash,
+                "env_hash": valid_hash,
+                "cwd_hash": valid_hash,
+                "sandbox_profile_hash": valid_hash,
+                "input_hash": valid_hash,
+            }
+            ledger._append(canary_none_tf)
+            with self.assertRaises(AttemptLifecycleError) as ctx:
+                ledger.verify_three_record_protocol()
+            self.assertIn("cannot be None", str(ctx.exception))
+
+        # 4. Individually delete required digests on invocation_completion -> must raise AttemptLifecycleError
+        for comp_field in ("raw_stdout_digest", "raw_stderr_digest"):
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                ledger_p = os.path.join(tmp_dir, "ledger.jsonl")
+                ledger = AttemptLedger(ledger_p)
+                intent_rec = {
+                    "record_type": "invocation_intent",
+                    "logical_call_id": "canary_pilot_att_01",
+                    "invocation_ordinal": 1,
+                    "prompt_hash": valid_hash,
+                    "task_file_hash": "",
+                    "argv_hash": valid_hash,
+                    "env_hash": valid_hash,
+                    "cwd_hash": valid_hash,
+                    "sandbox_profile_hash": valid_hash,
+                    "input_hash": valid_hash,
+                }
+                intent_bytes = (json.dumps(intent_rec, sort_keys=True) + "\n").encode("utf-8")
+                intent_hash = hashlib.sha256(intent_bytes).hexdigest()
+
+                started_rec = {
+                    "record_type": "process_started",
+                    "logical_call_id": "canary_pilot_att_01",
+                    "invocation_ordinal": 1,
+                    "intent_record_hash": intent_hash,
+                }
+                started_bytes = (json.dumps(started_rec, sort_keys=True) + "\n").encode("utf-8")
+                started_hash = hashlib.sha256(started_bytes).hexdigest()
+
+                comp_rec = {
+                    "record_type": "invocation_completion",
+                    "logical_call_id": "canary_pilot_att_01",
+                    "invocation_ordinal": 1,
+                    "intent_record_hash": intent_hash,
+                    "started_record_hash": started_hash,
+                    "parse_state": "parse_success",
+                    "classification": "accepted_completion",
+                    "usage_known": True,
+                    "tokens": 100,
+                    "return_code": 0,
+                    "duration": 0.1,
+                    "text_hash": valid_hash,
+                    "raw_stdout_digest": valid_hash,
+                    "raw_stderr_digest": valid_hash,
+                }
+                del comp_rec[comp_field]
+                ledger._append(intent_rec)
+                ledger._append(started_rec)
+                ledger._append(comp_rec)
+                with self.assertRaises(AttemptLifecycleError) as ctx:
+                    ledger.verify_three_record_protocol()
                 self.assertIn("missing or invalid", str(ctx.exception))
 
-        # 2. Benchmark invocation_intent with empty task_file_hash -> must raise AttemptLifecycleError
+        # 5. Benchmark invocation_intent with empty task_file_hash -> must raise AttemptLifecycleError
         with tempfile.TemporaryDirectory() as tmp_dir:
             ledger_p = os.path.join(tmp_dir, "ledger.jsonl")
             ledger = AttemptLedger(ledger_p)
@@ -1844,11 +1993,6 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
                 "logical_call_id": "c_f1_01_log_stream_parser_opt_01",
                 "invocation_ordinal": 1,
                 "prompt_hash": valid_hash,
-                "argv_hash": "a" * 64,
-                "env_hash": "a" * 64,
-                "cwd_hash": "a" * 64,
-                "sandbox_profile_hash": "a" * 64,
-                "input_hash": "a" * 64,
                 "task_file_hash": "",
                 "argv_hash": valid_hash,
                 "env_hash": valid_hash,
@@ -1861,7 +2005,7 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
                 ledger.verify_three_record_protocol()
             self.assertIn("task_file_hash must be non-empty", str(ctx.exception))
 
-        # 3. Canary invocation_intent with empty task_file_hash -> must succeed
+        # 6. Canary invocation_intent with explicit empty task_file_hash -> must succeed
         with tempfile.TemporaryDirectory() as tmp_dir:
             ledger_p = os.path.join(tmp_dir, "ledger.jsonl")
             ledger = AttemptLedger(ledger_p)
@@ -1870,11 +2014,6 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
                 "logical_call_id": "canary_pilot_att_01",
                 "invocation_ordinal": 1,
                 "prompt_hash": valid_hash,
-                "argv_hash": "a" * 64,
-                "env_hash": "a" * 64,
-                "cwd_hash": "a" * 64,
-                "sandbox_profile_hash": "a" * 64,
-                "input_hash": "a" * 64,
                 "task_file_hash": "",
                 "argv_hash": valid_hash,
                 "env_hash": valid_hash,
@@ -1914,9 +2053,10 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
             ledger._append(canary_started)
             ledger._append(canary_comp)
             self.assertTrue(ledger.verify_three_record_protocol())
-
     def test_h4_full_launch_sequence_hermetic_integration(self):
-        """Authentic integration test proving preflight gate event order, trial ordering, and clean-path accounting."""
+        """Authentic integration test proving exact 19-step launch sequence, trial ordering, and clean-path accounting."""
+        from campaign2.launch_checklist import ORDERED_LAUNCH_STEPS
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             subprocess.run(["git", "init"], cwd=tmp_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_dir, check=True)
@@ -1938,7 +2078,10 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
 
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_tier_assignment.json"), os.path.join(tmp_dir, "campaign2_tier_assignment.json"))
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_evidence_hashes.json"), os.path.join(tmp_dir, "campaign2_evidence_hashes.json"))
-            shutil.copy2(os.path.join(BASE_DIR, "campaign2_parity_matrix.json"), os.path.join(tmp_dir, "campaign2_parity_matrix.json"))
+            if os.path.exists(os.path.join(BASE_DIR, "campaign2_parity_matrix.json")):
+                shutil.copy2(os.path.join(BASE_DIR, "campaign2_parity_matrix.json"), os.path.join(tmp_dir, "campaign2_parity_matrix.json"))
+                os.chmod(os.path.join(tmp_dir, "campaign2_parity_matrix.json"), 0o444)
+                os.chmod(os.path.join(tmp_dir, "campaign2_parity_matrix.json"), 0o444)
 
             from campaign2.registration import generate_master_registration
             from campaign2.manifest import generate_campaign2_manifest
@@ -1978,6 +2121,8 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
             import campaign2.reporting as rep_mod
             import campaign2.attempt_identity as ident_mod
             import campaign2.attempt_lifecycle as life_mod
+            import campaign2.durability as dur_mod
+            import campaign2.ladder as ladder_mod
 
             orig_manifest = man_mod.verify_campaign2_manifest
             orig_evidence = man_mod.verify_campaign2_evidence_manifest
@@ -1986,99 +2131,312 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
             orig_reg = reg_mod.verify_master_registration
             orig_lock = lock_mod.verify_launch_lock
             orig_ident = ident_mod.create_attempt_identity
+            orig_resume = life_mod.AttemptLedger.verify_resume_admission
+            orig_open = dur_mod.CheckpointManager._open_or_recover
             orig_cpu = cpu_mod.run_prescientific_cpu_gate
+            orig_load = pref_mod.PreflightRegistry._load_or_init
             orig_canary = pref_mod.run_pilot_canary
             orig_start = life_mod.publish_scientific_start
+            orig_save_ckpt = dur_mod.CheckpointManager.commit_checkpoint_head
+            orig_ladder = ladder_mod.evaluate_pilot_outcome_ladder
             orig_report = rep_mod.publish_schema3_report
+            orig_term = life_mod.AttemptLedger.record_terminal_classification
 
             def wrap_manifest(*a, **k):
-                events.append("1. manifest_verification")
+                if "1. manifest_verification" not in events:
+                    events.append("1. manifest_verification")
                 return orig_manifest(*a, **k)
 
             def wrap_evidence(*a, **k):
-                events.append("2. evidence_manifest_verification")
+                if "2. evidence_manifest_verification" not in events:
+                    events.append("2. evidence_manifest_verification")
                 return orig_evidence(*a, **k)
 
             def wrap_parity(*a, **k):
-                events.append("3. parity_matrix_verification")
+                if "3. parity_matrix_verification" not in events:
+                    events.append("3. parity_matrix_verification")
                 return orig_parity(*a, **k)
 
             def wrap_tier(*a, **k):
-                events.append("4. tier_assignment_verification")
+                if "4. tier_assignment_verification" not in events:
+                    events.append("4. tier_assignment_verification")
                 return orig_tier(*a, **k)
 
             def wrap_reg(*a, **k):
-                events.append("5. master_registration_verification")
+                if "5. master_registration_verification" not in events:
+                    events.append("5. master_registration_verification")
                 return orig_reg(*a, **k)
 
             def wrap_lock(*a, **k):
-                events.append("6. launch_lock_verification")
+                if "6. launch_lock_verification" not in events:
+                    events.append("6. launch_lock_verification")
                 return orig_lock(*a, **k)
 
             def wrap_ident(*a, **k):
-                events.append("7. attempt_identity_creation_or_verification")
+                if "7. attempt_identity_creation_or_verification" not in events:
+                    events.append("7. attempt_identity_creation_or_verification")
                 return orig_ident(*a, **k)
 
+            def wrap_resume(self_obj):
+                if "8. attempt_ledger_and_resume_admission_verification" not in events:
+                    events.append("8. attempt_ledger_and_resume_admission_verification")
+                return orig_resume(self_obj)
+
+            def wrap_open(self_obj):
+                if "9. checkpoint_manager_initialization" not in events:
+                    events.append("9. checkpoint_manager_initialization")
+                return orig_open(self_obj)
+
+            def wrap_cli_ver(*a, **k):
+                if "10. codex_cli_version_check" not in events:
+                    events.append("10. codex_cli_version_check")
+                return "codex-cli 0.144.5"
+
             def wrap_cpu(*a, **k):
-                events.append("11. prescientific_cpu_gate")
+                if "12. prescientific_cpu_gate" not in events:
+                    events.append("12. prescientific_cpu_gate")
                 return orig_cpu(*a, **k)
 
+            def wrap_load(self_obj):
+                if "11. preflight_registry_authentication" not in events:
+                    events.append("11. preflight_registry_authentication")
+                return orig_load(self_obj)
+
             def wrap_canary(*a, **k):
-                events.append("13. pilot_canary_execution_or_reconciliation")
+                if "13. pilot_canary_execution_or_reconciliation" not in events:
+                    events.append("13. pilot_canary_execution_or_reconciliation")
                 return orig_canary(*a, **k)
 
             def wrap_start(*a, **k):
-                events.append("14. scientific_start_claim")
+                if "14. scientific_start_claim" not in events:
+                    events.append("14. scientific_start_claim")
                 return orig_start(*a, **k)
 
+            def wrap_save_ckpt(self_obj, trial_idx, trial_result_dict):
+                if trial_idx == 0:
+                    if "15. trial_1_execution_and_checkpoint" not in events:
+                        events.append("15. trial_1_execution_and_checkpoint")
+                elif trial_idx == 1:
+                    if "16. trial_2_execution_and_checkpoint" not in events:
+                        events.append("16. trial_2_execution_and_checkpoint")
+                return orig_save_ckpt(self_obj, trial_idx, trial_result_dict)
+
+            def wrap_ladder(*a, **k):
+                if "17. pilot_outcome_ladder_evaluation" not in events:
+                    events.append("17. pilot_outcome_ladder_evaluation")
+                return orig_ladder(*a, **k)
+
             def wrap_report(*a, **k):
-                events.append("18. schema3_report_generation_and_sealing")
+                if "18. schema3_report_generation_and_sealing" not in events:
+                    events.append("18. schema3_report_generation_and_sealing")
                 return orig_report(*a, **k)
 
-            with mock.patch.object(man_mod, "verify_campaign2_manifest", side_effect=wrap_manifest), \
-                 mock.patch.object(man_mod, "verify_campaign2_evidence_manifest", side_effect=wrap_evidence), \
-                 mock.patch.object(man_mod, "verify_campaign2_parity_matrix", side_effect=wrap_parity), \
-                 mock.patch.object(tier_mod, "verify_family_blocked_assignment", side_effect=wrap_tier), \
-                 mock.patch.object(reg_mod, "verify_master_registration", side_effect=wrap_reg), \
-                 mock.patch.object(lock_mod, "verify_launch_lock", side_effect=wrap_lock), \
-                 mock.patch.object(ident_mod, "create_attempt_identity", side_effect=wrap_ident), \
-                 mock.patch.object(cpu_mod, "run_prescientific_cpu_gate", side_effect=wrap_cpu), \
-                 mock.patch.object(pref_mod, "run_pilot_canary", side_effect=wrap_canary), \
-                 mock.patch.object(life_mod, "publish_scientific_start", side_effect=wrap_start), \
-                 mock.patch.object(rep_mod, "publish_schema3_report", side_effect=wrap_report), \
-                 mock.patch("campaign2.model_provider.setup_credential_home"):
+            def wrap_term(self_obj, attempt_id, classification, reason=""):
+                if "19. terminal_classification_recording" not in events:
+                    events.append("19. terminal_classification_recording")
+                return orig_term(self_obj, attempt_id, classification, reason)
+
+            import campaign2.proxy
+            from campaign2.proxy import TaggedCodec
+            import types, re
+
+            class HermeticWorkerIPCMock:
+                def __init__(self, host_in=0, host_out=0, startup_deadline=0, proc=None):
+                    self.counter = 0
+                    self.last_status = "ok"
+                    self.candidate_process_error = None
+                    self.candidate_timeout = False
+                    self.infrastructure_error = None
+                    self.candidate_exception_occurred = False
+                    self.last_exception_message = ""
+                    self.phase = "execution"
+                    self.selector = mock.MagicMock()
+                    self.cand_dir = proc.cand_tmpdir if proc else ""
+                    self.candidate_mod = None
+                    self.host_callbacks = {}
+                    self.cb_counter = 0
+                    self.host_objects = {}
+                    self.hobj_counter = 0
+                    self.objects = {}
+                    self.obj_counter = 0
+                    self.object_cache = {}
+
+                def _read_framed_msg(self):
+                    return {"op": "ready", "status": "ok", "candidate_imported": False, "limits": {"cpu": [15, 16], "nofile": [64, 64], "fsize": [1024*1024, 1024*1024], "core": [0, 0]}}
+
+                def set_phase(self, phase, deadline):
+                    self.phase = phase
+
+                def make_host_callback_proxy(self, cb_id):
+                    return self.host_callbacks[cb_id]
+
+                def make_obj_proxy(self, obj_id):
+                    return self.object_cache.get(obj_id)
+
+                def register_callback(self, cb):
+                    self.cb_counter += 1
+                    cid = f"cb_{self.cb_counter}"
+                    self.host_callbacks[cid] = cb
+                    return cid
+
+                def register_host_object(self, obj):
+                    self.hobj_counter += 1
+                    hid = f"hobj_{self.hobj_counter}"
+                    self.host_objects[hid] = obj
+                    return hid
+
+                def register_obj(self, obj):
+                    self.obj_counter += 1
+                    oid = f"obj_{self.obj_counter}"
+                    self.objects[oid] = obj
+                    return oid
+
+                def send_request(self, req):
+                    # print(f"IPC OP: {req.get('op')}", flush=True)
+                    op = req.get("op")
+                    if op == "load_candidate":
+                        cand_p = os.path.join(self.cand_dir, "candidate.py")
+                        with open(cand_p, "r", encoding="utf-8") as f:
+                            code_text = f.read()
+                        m = re.search(r"```python\s*(.*?)\s*```", code_text, re.DOTALL)
+                        raw_py = m.group(1) if m else code_text
+                        self.candidate_mod = types.ModuleType("candidate")
+                        exec(raw_py, self.candidate_mod.__dict__)
+                        self.last_status = "ok"
+                        return {"phase": "candidate_import"}
+                    elif op == "call_func":
+                        if not self.candidate_mod or not hasattr(self.candidate_mod, req["func_name"]):
+                            self.last_status = "no_func"
+                            return None
+                        func_name = req["func_name"]
+                        func = getattr(self.candidate_mod, func_name)
+                        args = TaggedCodec.decode(req.get("args", []), self.make_host_callback_proxy, self.make_obj_proxy, lambda oid: self.objects[oid], lambda h_id: self.host_objects[h_id])
+                        kwargs = TaggedCodec.decode(req.get("kwargs", {}), self.make_host_callback_proxy, self.make_obj_proxy, lambda oid: self.objects[oid], lambda h_id: self.host_objects[h_id])
+                        try:
+                            res = func(*args, **kwargs)
+                            self.last_status = "ok"
+                            return res
+                        except Exception as e:
+                            self.candidate_exception_occurred = True
+                            self.last_exception_message = f"{type(e).__name__}: {e}"
+                            self.last_status = "exception"
+                            return e
+                    elif op == "create_obj":
+                        if not self.candidate_mod or not hasattr(self.candidate_mod, req["class_name"]):
+                            self.last_status = "no_class"
+                            return None
+                        cls_name = req["class_name"]
+                        cls = getattr(self.candidate_mod, cls_name)
+                        args = TaggedCodec.decode(req.get("args", []), self.make_host_callback_proxy, self.make_obj_proxy, lambda oid: self.objects[oid], lambda h_id: self.host_objects[h_id])
+                        kwargs = TaggedCodec.decode(req.get("kwargs", {}), self.make_host_callback_proxy, self.make_obj_proxy, lambda oid: self.objects[oid], lambda h_id: self.host_objects[h_id])
+                        try:
+                            obj = cls(*args, **kwargs)
+                            oid = self.register_obj(obj)
+                            self.last_status = "ok"
+                            return {"obj_id": oid}
+                        except Exception as e:
+                            self.candidate_exception_occurred = True
+                            self.last_exception_message = f"{type(e).__name__}: {e}"
+                            self.last_status = "exception"
+                            return e
+                    elif op == "get_attr":
+                        obj = self.objects[req["obj_id"]]
+                        attr_val = getattr(obj, req["attr_name"])
+                        self.last_status = "ok"
+                        if callable(attr_val) and not isinstance(attr_val, (dict, list, tuple, set, str, bytes)):
+                            return {"is_callable": True}
+                        else:
+                            return {"is_callable": False, "value": TaggedCodec.encode(attr_val, self.register_callback, self.register_obj, self.register_host_object)}
+                    elif op == "call_method":
+                        obj = self.objects[req["obj_id"]]
+                        fn = getattr(obj, req["method_name"])
+                        args = TaggedCodec.decode(req.get("args", []), self.make_host_callback_proxy, self.make_obj_proxy, lambda oid: self.objects[oid], lambda h_id: self.host_objects[h_id])
+                        kwargs = TaggedCodec.decode(req.get("kwargs", {}), self.make_host_callback_proxy, self.make_obj_proxy, lambda oid: self.objects[oid], lambda h_id: self.host_objects[h_id])
+                        try:
+                            res = fn(*args, **kwargs)
+                            self.last_status = "ok"
+                            return res
+                        except Exception as e:
+                            self.candidate_exception_occurred = True
+                            self.last_exception_message = f"{type(e).__name__}: {e}"
+                            self.last_status = "exception"
+                            return e
+                    elif op == "set_attr":
+                        obj = self.objects[req["obj_id"]]
+                        val = TaggedCodec.decode(req["value"], self.make_host_callback_proxy, self.make_obj_proxy, lambda oid: self.objects[oid], lambda h_id: self.host_objects[h_id])
+                        setattr(obj, req["attr_name"], val)
+                        self.last_status = "ok"
+                        return True
+
+            import subprocess as _real_sp
+            _orig_popen = _real_sp.Popen
+            def fake_popen(cmd, cwd=None, **kwargs):
+                cmd_str = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+                if "sandbox-exec" in cmd_str or "candidate" in cmd_str:
+                    p = mock.MagicMock()
+                    p.cand_tmpdir = cwd
+                    return p
+                return _orig_popen(cmd, cwd=cwd, **kwargs)
+
+            import contextlib
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(man_mod, "verify_campaign2_manifest", side_effect=wrap_manifest))
+                stack.enter_context(mock.patch.object(man_mod, "verify_campaign2_evidence_manifest", side_effect=wrap_evidence))
+                stack.enter_context(mock.patch.object(man_mod, "verify_campaign2_parity_matrix", side_effect=wrap_parity))
+                stack.enter_context(mock.patch.object(tier_mod, "verify_family_blocked_assignment", side_effect=wrap_tier))
+                stack.enter_context(mock.patch.object(reg_mod, "verify_master_registration", side_effect=wrap_reg))
+                stack.enter_context(mock.patch.object(lock_mod, "verify_launch_lock", side_effect=wrap_lock))
+                stack.enter_context(mock.patch.object(ident_mod, "create_attempt_identity", side_effect=wrap_ident))
+                stack.enter_context(mock.patch.object(life_mod.AttemptLedger, "verify_resume_admission", autospec=True, side_effect=wrap_resume))
+                stack.enter_context(mock.patch.object(dur_mod.CheckpointManager, "_open_or_recover", autospec=True, side_effect=wrap_open))
+                stack.enter_context(mock.patch("campaign2.model_provider.verify_codex_cli_version", side_effect=wrap_cli_ver))
+                stack.enter_context(mock.patch.object(cpu_mod, "run_prescientific_cpu_gate", side_effect=wrap_cpu))
+                stack.enter_context(mock.patch.object(pref_mod.PreflightRegistry, "_load_or_init", autospec=True, side_effect=wrap_load))
+                stack.enter_context(mock.patch.object(pref_mod, "run_pilot_canary", side_effect=wrap_canary))
+                stack.enter_context(mock.patch.object(life_mod, "publish_scientific_start", side_effect=wrap_start))
+                stack.enter_context(mock.patch.object(dur_mod.CheckpointManager, "commit_checkpoint_head", autospec=True, side_effect=wrap_save_ckpt))
+                stack.enter_context(mock.patch.object(ladder_mod, "evaluate_pilot_outcome_ladder", side_effect=wrap_ladder))
+                stack.enter_context(mock.patch.object(rep_mod, "publish_schema3_report", side_effect=wrap_report))
+                stack.enter_context(mock.patch.object(life_mod.AttemptLedger, "record_terminal_classification", autospec=True, side_effect=wrap_term))
+                stack.enter_context(mock.patch("campaign2.proxy.subprocess.Popen", side_effect=fake_popen))
+                stack.enter_context(mock.patch("campaign2.proxy.WorkerIPCClient", side_effect=HermeticWorkerIPCMock))
+                stack.enter_context(mock.patch("campaign2.model_provider.setup_credential_home"))
                 _run_campaign2(args, ctx)
 
-            # Assert key launch events occurred in exact relative sequence
-            self.assertIn("1. manifest_verification", events)
-            self.assertIn("3. parity_matrix_verification", events)
-            self.assertIn("6. launch_lock_verification", events)
-            self.assertIn("11. prescientific_cpu_gate", events)
-            self.assertIn("13. pilot_canary_execution_or_reconciliation", events)
-            self.assertIn("14. scientific_start_claim", events)
-            self.assertIn("18. schema3_report_generation_and_sealing", events)
-
-            idx_lock = events.index("6. launch_lock_verification")
-            idx_cpu = events.index("11. prescientific_cpu_gate")
-            idx_canary = events.index("13. pilot_canary_execution_or_reconciliation")
-            idx_start = events.index("14. scientific_start_claim")
-            idx_report = events.index("18. schema3_report_generation_and_sealing")
-
-            self.assertTrue(idx_lock < idx_cpu < idx_canary < idx_start < idx_report)
+            # Assert ALL 19 steps occurred in exact sequence
+            self.assertEqual(events, EXPECTED_LAUNCH_STEPS)
 
             # Assert clean-path accounting
             reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
             self.assertEqual(reg.data["total_logical_calls"], 173)  # 1 canary + 172 benchmark
             self.assertEqual(reg.data["total_local_invocation_attempts"], 173)
+            master_reg = verify_master_registration(tmp_dir)
+            max_active_time = float(master_reg["execution_limits"]["max_active_seconds"])
+            self.assertEqual(reg.data.get("cumulative_tokens"), 17300)
+            self.assertGreaterEqual(reg.data.get("cumulative_active_time"), 0.0)
+            self.assertLessEqual(reg.data.get("cumulative_active_time"), max_active_time)
 
-            # Report sealing verification
+            # Assert checkpoint and report sealing
+            ckpt_p = os.path.join(run_dir, "campaign2_pilot_checkpoint.json")
+            self.assertTrue(os.path.exists(ckpt_p))
+            self.assertEqual(stat.S_IMODE(os.stat(ckpt_p).st_mode), 0o444)
+
             report_p = os.path.join(run_dir, "campaign2_pilot_report.json")
             self.assertTrue(os.path.exists(report_p))
-            st_mode = stat.S_IMODE(os.stat(report_p).st_mode)
-            self.assertEqual(st_mode, 0o444)
+            self.assertEqual(stat.S_IMODE(os.stat(report_p).st_mode), 0o444)
+
+            # Assert terminal ledger state and completed classification
+            ledger_p = os.path.join(run_dir, "campaign2_pilot_ledger.jsonl")
+            from campaign2.attempt_lifecycle import AttemptLedger
+            ledger = AttemptLedger(ledger_p)
+            entries = ledger.get_entries()
+            term_recs = [e for e in entries if e.get("record_type") == "terminal_classification"]
+            self.assertEqual(len(term_recs), 1)
+            self.assertEqual(term_recs[0]["classification"], "completed")
+            self.assertIn("Ladder decision", term_recs[0].get("reason", ""))
 
     def test_h4_cpu_gate_stop_path_binding(self):
-        """Prove CPU gate failure stops launch before canary/start/tokens, and persists binding failing record."""
+        """Prove real CPU gate failure stops launch before canary/start/tokens, creates 0o444 record, and binds first result."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             subprocess.run(["git", "init"], cwd=tmp_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_dir, check=True)
@@ -2100,12 +2458,39 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
 
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_tier_assignment.json"), os.path.join(tmp_dir, "campaign2_tier_assignment.json"))
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_evidence_hashes.json"), os.path.join(tmp_dir, "campaign2_evidence_hashes.json"))
-            shutil.copy2(os.path.join(BASE_DIR, "campaign2_parity_matrix.json"), os.path.join(tmp_dir, "campaign2_parity_matrix.json"))
+            if os.path.exists(os.path.join(BASE_DIR, "campaign2_parity_matrix.json")):
+                shutil.copy2(os.path.join(BASE_DIR, "campaign2_parity_matrix.json"), os.path.join(tmp_dir, "campaign2_parity_matrix.json"))
+                os.chmod(os.path.join(tmp_dir, "campaign2_parity_matrix.json"), 0o444)
+
+            # Modify parity matrix in tmp_dir so row 0 specifies mock_cpu_sec: 3.5 (> 3.0 s threshold)
+            pm_path = os.path.join(tmp_dir, "campaign2_parity_matrix.json")
+            with open(os.path.join(BASE_DIR, "campaign2_parity_matrix.json"), "r", encoding="utf-8") as f:
+                pm_data = json.load(f)
+            pm_rows = list(pm_data.values()) if isinstance(pm_data, dict) and "matrix" not in pm_data else (pm_data["matrix"] if isinstance(pm_data, dict) else pm_data)
+            pm_rows[0]["mock_cpu_sec"] = 3.5
+            pm_bytes = (json.dumps(pm_data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            if os.path.exists(pm_path):
+                os.chmod(pm_path, 0o644)
+            with open(pm_path, "wb") as f:
+                f.write(pm_bytes)
+            os.chmod(pm_path, 0o444)
+
+            # Update evidence hashes in tmp_dir for modified parity matrix
+            ev_path = os.path.join(tmp_dir, "campaign2_evidence_hashes.json")
+            os.chmod(ev_path, 0o644)
+            with open(ev_path, "r", encoding="utf-8") as f:
+                ev_data = json.load(f)
+            ev_data["campaign2_parity_matrix.json"] = hashlib.sha256(pm_bytes).hexdigest()
+            ev_bytes = (json.dumps(ev_data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            with open(ev_path, "wb") as f:
+                f.write(ev_bytes)
+            os.chmod(ev_path, 0o444)
 
             from campaign2.registration import generate_master_registration
             from campaign2.manifest import generate_campaign2_manifest
             from campaign2.launch_lock import generate_launch_lock
             from campaign2.cpu_gate import run_prescientific_cpu_gate, CpuGateError, CpuGateLimitExceededError
+            from campaign2.preflight_registry import PreflightRegistry
 
             generate_master_registration(tmp_dir)
             generate_campaign2_manifest(tmp_dir)
@@ -2134,42 +2519,47 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
                 canary_calls[0] += 1
                 return orig_canary(*a, **k)
 
-            # 1. Execute run_prescientific_cpu_gate(tmp_dir, is_mock=False) with mocked getrusage (3.5s)
-            r_start = mock.MagicMock(ru_utime=0.0, ru_stime=0.0)
-            r_end = mock.MagicMock(ru_utime=3.5, ru_stime=0.0)
-            rusage_calls = [r_start, r_end]
-            call_idx = [0]
-            def mock_rusage(who):
-                val = rusage_calls[call_idx[0] % len(rusage_calls)]
-                call_idx[0] += 1
-                return val
-
-            def mock_eval_sandboxed(task_id, code, timeout_seconds=15, **kwargs):
-                return (10, 10, True, "")
-
-            with mock.patch("resource.getrusage", side_effect=mock_rusage), \
-                 mock.patch("campaign2.proxy.evaluate_candidate_code_sandboxed", side_effect=mock_eval_sandboxed):
-                with self.assertRaises(CpuGateLimitExceededError):
-                    run_prescientific_cpu_gate(tmp_dir, is_mock=False)
-
-            # Assert CPU gate record created with mode 0o444 and max_cpu_seconds = 3.5
-            rec_p = os.path.join(tmp_dir, "campaign2_cpu_gate_record.json")
-            self.assertTrue(os.path.exists(rec_p))
-            self.assertEqual(stat.S_IMODE(os.stat(rec_p).st_mode), 0o444)
-
-            # 2. Invocation of _run_campaign2(args, ctx) on same workspace MUST fail immediately on bound CPU gate
+            # Invoke REAL _run_campaign2 WITHOUT replacing run_prescientific_cpu_gate
             with mock.patch("campaign2.manifest.verify_campaign2_parity_matrix", return_value=True), \
-                 mock.patch.object(pref_mod, "run_pilot_canary", side_effect=count_canary), \
-                 mock.patch("campaign2.proxy.evaluate_candidate_code_sandboxed", side_effect=mock_eval_sandboxed):
-                with self.assertRaises((CpuGateError, ExperimentInvalidError)):
+                 mock.patch.object(pref_mod, "run_pilot_canary", side_effect=count_canary):
+                with self.assertRaises((CpuGateLimitExceededError, CpuGateError, ExperimentInvalidError)):
                     _run_campaign2(args, ctx)
 
-            # Assert canary was NEVER called
+            # Inspect registry and ledger accounting to prove 0 canary calls, 0 tokens, and no SCIENTIFIC_START published
             self.assertEqual(canary_calls[0], 0)
 
-            # Assert SCIENTIFIC_START was NEVER published
+            reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
+            self.assertEqual(reg.data.get("cumulative_tokens", 0), 0)
+            self.assertEqual(reg.data.get("total_logical_calls", 0), 0)
+            self.assertEqual(reg.data.get("total_local_invocation_attempts", 0), 0)
+
+            # Assert zero invocation-intent records in attempt ledger
+            ledger_p = os.path.join(run_dir, "campaign2_pilot_ledger.jsonl")
+            from campaign2.attempt_lifecycle import AttemptLedger
+            ledger = AttemptLedger(ledger_p)
+            intents = [e for e in ledger.get_entries() if e.get("record_type") == "invocation_intent"]
+            self.assertEqual(len(intents), 0)
+
+            # Assert zero trial records in checkpoint manager
+            ckpt_p = os.path.join(run_dir, "campaign2_pilot_checkpoint.json")
+            if os.path.exists(ckpt_p):
+                with open(ckpt_p, "r", encoding="utf-8") as f:
+                    ckpt_data = json.load(f)
+                self.assertEqual(len(ckpt_data.get("completed_trials", [])), 0)
+
             start_marker = os.path.join(tmp_dir, "history", "campaign2_pilot_scientific_start.json")
             self.assertFalse(os.path.exists(start_marker))
+
+            # Prove durable 0o444 CPU gate record was created on disk by real CPU gate
+            gate_rec_p = os.path.join(tmp_dir, "campaign2_cpu_gate_record.json")
+            self.assertTrue(os.path.exists(gate_rec_p))
+            self.assertEqual(stat.S_IMODE(os.stat(gate_rec_p).st_mode), 0o444)
+
+            # Prove FIRST-RESULT BINDING: calling real run_prescientific_cpu_gate a second time
+            # on existing 0o444 record WITHOUT ANY PATCHES raises CpuGateLimitExceededError off disk
+            with self.assertRaises(CpuGateLimitExceededError) as exc_ctx:
+                run_prescientific_cpu_gate(tmp_dir, is_mock=True)
+            self.assertIn("bound a failing max worker CPU time", str(exc_ctx.exception))
 
     def test_h5_launch_checklist_generator_and_verifier(self):
         """Verify launch checklist generation, sealing (0o444), machine derivation, and verifier fail-closed checks."""
@@ -2194,7 +2584,10 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
 
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_tier_assignment.json"), os.path.join(tmp_dir, "campaign2_tier_assignment.json"))
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_evidence_hashes.json"), os.path.join(tmp_dir, "campaign2_evidence_hashes.json"))
-            shutil.copy2(os.path.join(BASE_DIR, "campaign2_parity_matrix.json"), os.path.join(tmp_dir, "campaign2_parity_matrix.json"))
+            if os.path.exists(os.path.join(BASE_DIR, "campaign2_parity_matrix.json")):
+                shutil.copy2(os.path.join(BASE_DIR, "campaign2_parity_matrix.json"), os.path.join(tmp_dir, "campaign2_parity_matrix.json"))
+                os.chmod(os.path.join(tmp_dir, "campaign2_parity_matrix.json"), 0o444)
+                os.chmod(os.path.join(tmp_dir, "campaign2_parity_matrix.json"), 0o444)
 
             from campaign2.registration import generate_master_registration
             from campaign2.manifest import generate_campaign2_manifest
@@ -2231,9 +2624,91 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
                 verify_launch_checklist(tmp_dir)
             self.assertIn("uncommitted changes", str(ctx.exception))
 
+    def test_h2_launch_checklist_arithmetic_derivation_mismatch_matrix(self):
+        """Verify launch checklist generator fails closed with exact error messages when master registration contains missing keys or arithmetic mismatches."""
+        from campaign2.launch_checklist import write_sealed_launch_checklist, LaunchChecklistError
+        from campaign2.registration import generate_master_registration
+        from campaign2.manifest import generate_campaign2_manifest
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subprocess.run(["git", "init"], cwd=tmp_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_dir, check=True)
+
+            for f_item in ["README.md", "rsi_loop.py", "run_tests.py", "generator.sb.template"]:
+                if os.path.exists(os.path.join(BASE_DIR, f_item)):
+                    shutil.copy2(os.path.join(BASE_DIR, f_item), os.path.join(tmp_dir, f_item))
+            os.makedirs(os.path.join(tmp_dir, "docs"), exist_ok=True)
+            shutil.copy2(os.path.join(BASE_DIR, "docs", "walkthrough.md"), os.path.join(tmp_dir, "docs", "walkthrough.md"))
+
+            shutil.copytree(os.path.join(BASE_DIR, "campaign2"), os.path.join(tmp_dir, "campaign2"))
+            shutil.copytree(os.path.join(BASE_DIR, "benchmarks"), os.path.join(tmp_dir, "benchmarks"))
+            if os.path.exists(os.path.join(BASE_DIR, "campaign2_archive")):
+                shutil.copytree(os.path.join(BASE_DIR, "campaign2_archive"), os.path.join(tmp_dir, "campaign2_archive"))
+
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_tier_assignment.json"), os.path.join(tmp_dir, "campaign2_tier_assignment.json"))
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_evidence_hashes.json"), os.path.join(tmp_dir, "campaign2_evidence_hashes.json"))
+            if os.path.exists(os.path.join(BASE_DIR, "campaign2_parity_matrix.json")):
+                shutil.copy2(os.path.join(BASE_DIR, "campaign2_parity_matrix.json"), os.path.join(tmp_dir, "campaign2_parity_matrix.json"))
+                os.chmod(os.path.join(tmp_dir, "campaign2_parity_matrix.json"), 0o444)
+
+            generate_master_registration(tmp_dir)
+            generate_campaign2_manifest(tmp_dir)
+
+            subprocess.run(["git", "add", "."], cwd=tmp_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init hermetic"], cwd=tmp_dir, check=True)
+
+            reg_p = os.path.join(tmp_dir, "campaign2_master_registration.json")
+            anchor_p = os.path.join(tmp_dir, "campaign2_registration_anchor.hash")
+            with open(reg_p, "r", encoding="utf-8") as f:
+                base_reg_data = json.load(f)
+
+            def test_bad_registration_mocked(mock_reg_data, expected_error_substring):
+                with mock.patch("campaign2.registration.verify_master_registration", return_value=mock_reg_data):
+                    with self.assertRaises(LaunchChecklistError) as exc_ctx:
+                        write_sealed_launch_checklist(tmp_dir)
+                    self.assertIn(expected_error_substring.lower(), str(exc_ctx.exception).lower())
+
+            # 1. Missing call_arithmetic key -> raises LaunchChecklistError
+            bad1 = json.loads(json.dumps(base_reg_data))
+            del bad1["call_arithmetic"]
+            test_bad_registration_mocked(bad1, "missing required call_arithmetic")
+
+            # 1b. Missing pilot_limits key -> raises LaunchChecklistError
+            bad1b = json.loads(json.dumps(base_reg_data))
+            del bad1b["pilot_limits"]
+            test_bad_registration_mocked(bad1b, "missing required call_arithmetic")
+
+            # 2. Missing key inside call_arithmetic
+            bad2 = json.loads(json.dumps(base_reg_data))
+            del bad2["call_arithmetic"]["per_trial_benchmark_logical_calls"]
+            test_bad_registration_mocked(bad2, "per_trial_benchmark_logical_calls")
+
+            # 3. Missing key inside execution_limits
+            bad3 = json.loads(json.dumps(base_reg_data))
+            del bad3["execution_limits"]["max_active_seconds"]
+            test_bad_registration_mocked(bad3, "max_active_seconds")
+
+            # 4. Per-trial call arithmetic mismatch (per_trial * num_trials != pilot_total_benchmark_logical_calls)
+            bad4 = json.loads(json.dumps(base_reg_data))
+            bad4["call_arithmetic"]["pilot_total_benchmark_logical_calls"] = 999
+            test_bad_registration_mocked(bad4, "per-trial call arithmetic mismatch")
+
+            # 5. Total logical call ceiling arithmetic mismatch (benchmark + canary != pilot_max_logical_calls)
+            bad5 = json.loads(json.dumps(base_reg_data))
+            bad5["call_arithmetic"]["pilot_max_logical_calls"] = 50
+            bad5["execution_limits"]["max_logical_calls"] = 50
+            test_bad_registration_mocked(bad5, "total logical call ceiling arithmetic mismatch")
+
+            # 6. Attempt ceiling arithmetic mismatch (total_ceiling * max_attempts != max_local_invocation_attempts)
+            bad6 = json.loads(json.dumps(base_reg_data))
+            bad6["call_arithmetic"]["max_local_invocation_attempts"] = 100
+            bad6["execution_limits"]["max_local_invocation_attempts"] = 100
+            test_bad_registration_mocked(bad6, "attempt ceiling arithmetic mismatch")
+
     def test_h6_production_workspace_root_override_refusal(self):
         """Verify production mode (args.mock=False) refuses ctx.workspace_root redirection and uses BASE_DIR."""
-        from rsi_loop import _run_campaign2, RunContext
+        from rsi_loop import _run_campaign2, RunContext, BASE_DIR
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             args = SimpleNamespace(stage="pilot", mock=False, resume=False)
@@ -2242,12 +2717,12 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
             ctx.run_dir = os.path.join(tmp_dir, "history", ctx.run_id)
             ctx.workspace_root = "/tmp/fake_nonexistent_override_workspace"
 
-            # In production mode (args.mock=False), Phase 0 MUST use BASE_DIR, which has valid files,
-            # but will raise PreflightRegistryError / LaunchLockError due to missing lock or preflight check on BASE_DIR,
-            # NOT FileNotFoundError on /tmp/fake_nonexistent_override_workspace!
-            with self.assertRaises(Exception) as ctx_err:
-                _run_campaign2(args, ctx)
-            self.assertNotIn("/tmp/fake_nonexistent_override_workspace", str(ctx_err.exception))
+            with mock.patch("campaign2.manifest.verify_campaign2_manifest", return_value=(True, 145)) as mock_ver:
+                try:
+                    _run_campaign2(args, ctx)
+                except Exception:
+                    pass
+                mock_ver.assert_called_once_with(BASE_DIR)
 
 
 if __name__ == "__main__":

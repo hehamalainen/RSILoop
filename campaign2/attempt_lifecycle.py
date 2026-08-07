@@ -643,9 +643,11 @@ class AttemptLedger:
 
                 if not is_valid_nonempty_sha256_digest(entry.get("prompt_hash")):
                     raise AttemptLifecycleError(f"invocation_intent prompt_hash invalid digest shape for key {key}: {entry.get('prompt_hash')}")
-                tf_hash = entry.get("task_file_hash")
+                if "task_file_hash" not in entry:
+                    raise AttemptLifecycleError(f"invocation_intent missing task_file_hash for key {key}")
+                tf_hash = entry["task_file_hash"]
                 if tf_hash is None:
-                    tf_hash = ""
+                    raise AttemptLifecycleError(f"invocation_intent task_file_hash cannot be None for key {key}")
                 is_canary = (cid == "canary_pilot_att_01" or cid.startswith("canary_") or cid.startswith("canary"))
                 if is_canary:
                     if not is_valid_sha256_digest_or_empty(tf_hash):
@@ -699,12 +701,10 @@ class AttemptLedger:
                     raise AttemptLifecycleError(f"invocation_completion intent_record_hash invalid digest shape for key {key}: {entry.get('intent_record_hash')}")
                 if not is_valid_sha256_digest_or_empty(entry.get("started_record_hash")):
                     raise AttemptLifecycleError(f"invocation_completion started_record_hash invalid digest shape for key {key}: {entry.get('started_record_hash')}")
-                stdout_d = entry.get("raw_stdout_digest") or hashlib.sha256(b"").hexdigest()
-                if not is_valid_nonempty_sha256_digest(stdout_d):
-                    raise AttemptLifecycleError(f"invocation_completion raw_stdout_digest invalid digest shape for key {key}: {entry.get('raw_stdout_digest')}")
-                stderr_d = entry.get("raw_stderr_digest") or hashlib.sha256(b"").hexdigest()
-                if not is_valid_nonempty_sha256_digest(stderr_d):
-                    raise AttemptLifecycleError(f"invocation_completion raw_stderr_digest invalid digest shape for key {key}: {entry.get('raw_stderr_digest')}")
+                if "raw_stdout_digest" not in entry or not is_valid_nonempty_sha256_digest(entry["raw_stdout_digest"]):
+                    raise AttemptLifecycleError(f"invocation_completion missing or invalid raw_stdout_digest for key {key}: {entry.get('raw_stdout_digest')}")
+                if "raw_stderr_digest" not in entry or not is_valid_nonempty_sha256_digest(entry["raw_stderr_digest"]):
+                    raise AttemptLifecycleError(f"invocation_completion missing or invalid raw_stderr_digest for key {key}: {entry.get('raw_stderr_digest')}")
                 if not is_valid_sha256_digest_or_empty(entry.get("text_hash")):
                     raise AttemptLifecycleError(f"invocation_completion text_hash invalid digest shape for key {key}: {entry.get('text_hash')}")
 
