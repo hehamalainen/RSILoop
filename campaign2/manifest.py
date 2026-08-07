@@ -105,6 +105,7 @@ def get_expected_frozen_inventory(workspace_root: str = BASE_DIR) -> List[str]:
         "campaign2/envelope.py",
         "campaign2/cpu_gate.py",
         "campaign2/preflight_registry.py",
+        "campaign2/launch_checklist.py",
         "generator.sb.template",
     ]
 

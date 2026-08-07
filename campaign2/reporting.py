@@ -11,6 +11,8 @@ P0-5 — COMPLETE RATIONAL SCHEMA 3 REPORTING:
 import os
 import json
 import time
+import stat
+import tempfile
 import hashlib
 import resource
 from datetime import datetime, timezone
@@ -18,6 +20,11 @@ from typing import Dict, Any, List, Optional
 from fractions import Fraction
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class ReportingError(RuntimeError):
+    """Raised when report generation or publication fails."""
+    pass
 
 
 def _fraction_mean(fracs: List[Fraction]) -> Fraction:
@@ -172,14 +179,63 @@ def publish_schema3_report(
     report: Dict[str, Any],
     output_path: str,
 ) -> str:
-    """Write the Schema 3 report to disk with os.fsync."""
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    dir_fd = os.open(os.path.dirname(output_path), os.O_RDONLY)
+    """
+    Publish Schema 3 report with atomic sealed publication (0o444).
+    Write temp -> flush -> fchmod(0o444) -> fsync(fd) -> close -> atomic replace -> fsync(parent).
+
+    Fail-closed:
+    - If output_path already exists (or is a symlink / dangling symlink / non-regular file / mode != 0o444):
+      - If it is a symlink, dangling symlink, non-regular file, or permission mode != 0o444: raise ReportingError
+      - If existing file contains identical bytes: accept idempotently (return output_path)
+      - If existing file contains DIFFERENT bytes: raise ReportingError (NEVER overwrite differing sealed report)
+    """
+    new_bytes = (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+    parent_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(parent_dir, exist_ok=True)
+
+    if os.path.lexists(output_path):
+        if os.path.islink(output_path) or not os.path.isfile(output_path):
+            raise ReportingError(f"Existing report path is a symlink or non-regular file: {output_path}")
+        st_mode = stat.S_IMODE(os.stat(output_path).st_mode)
+        if st_mode != 0o444:
+            raise ReportingError(f"Existing report file permission mode must be 0o444, got {oct(st_mode)} for {output_path}")
+        with open(output_path, "rb") as f:
+            existing_bytes = f.read()
+        if existing_bytes == new_bytes:
+            return output_path
+        raise ReportingError(f"Sealed report already exists at '{output_path}' with differing content; refusing overwrite")
+
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=parent_dir, prefix=".report_tmp_")
     try:
-        os.fsync(dir_fd)
+        written = 0
+        while written < len(new_bytes):
+            n = os.write(tmp_fd, new_bytes[written:])
+            if n <= 0:
+                raise ReportingError(f"Short write while saving report to {tmp_path}")
+            written += n
+        os.fchmod(tmp_fd, 0o444)
+        os.fsync(tmp_fd)
+        os.close(tmp_fd)
+        tmp_fd = None
+        os.replace(tmp_path, output_path)
+    except Exception:
+        if tmp_fd is not None:
+            try:
+                os.close(tmp_fd)
+            except Exception:
+                pass
+        if os.path.lexists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        raise
     finally:
-        os.close(dir_fd)
+        dir_fd = os.open(parent_dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
     return output_path

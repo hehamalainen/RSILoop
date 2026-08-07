@@ -11,10 +11,26 @@ import stat
 import time
 import math
 import hashlib
+import re
 from typing import Dict, Any, List, Optional, Tuple
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LEDGER_SCHEMA_VERSION = "1"
+SHA256_HEX_REGEX = re.compile(r"^[0-9a-f]{64}$")
+
+
+def is_valid_sha256_digest_or_empty(val: Any) -> bool:
+    if type(val) is not str:
+        return False
+    if val == "":
+        return True
+    return bool(SHA256_HEX_REGEX.match(val))
+
+
+def is_valid_nonempty_sha256_digest(val: Any) -> bool:
+    if type(val) is not str:
+        return False
+    return bool(SHA256_HEX_REGEX.match(val))
 
 
 class AttemptLifecycleError(RuntimeError):
@@ -51,7 +67,7 @@ def is_permitted_local_retry(comp: Dict[str, Any], has_process_started: bool) ->
     2. transient_infrastructure_error:
        - has_process_started is True
        - comp.get("classification") == "transient_infrastructure_error"
-       - comp.get("parse_state") in ("nonzero_exit", "transient_infrastructure_error")
+       - comp.get("parse_state") == "nonzero_exit"
        - comp.get("usage_known") is False (explicit boolean False)
        - comp.get("tokens") == 0 (int 0)
        - comp.get("return_code") is int, return_code != 0
@@ -92,7 +108,7 @@ def is_permitted_local_retry(comp: Dict[str, Any], has_process_started: bool) ->
     if type(raw_stdout_digest) is not str or raw_stdout_digest != empty_sha256:
         return False
 
-    if type(raw_stderr_digest) is not str or len(raw_stderr_digest) != 64:
+    if type(raw_stderr_digest) is not str or not is_valid_nonempty_sha256_digest(raw_stderr_digest):
         return False
 
     if classification == "spawn_failure":
@@ -109,7 +125,7 @@ def is_permitted_local_retry(comp: Dict[str, Any], has_process_started: bool) ->
     elif classification == "transient_infrastructure_error":
         return (
             has_process_started is True
-            and parse_state in ("nonzero_exit", "transient_infrastructure_error")
+            and parse_state == "nonzero_exit"
             and usage_known is False
             and type(usage_known) is bool
             and type(return_code) is int
@@ -625,6 +641,15 @@ class AttemptLedger:
                 if key in intents:
                     raise AttemptLifecycleError(f"Duplicate invocation_intent for key {key}")
 
+                if not is_valid_nonempty_sha256_digest(entry.get("prompt_hash")):
+                    raise AttemptLifecycleError(f"invocation_intent prompt_hash invalid digest shape for key {key}: {entry.get('prompt_hash')}")
+                if not is_valid_sha256_digest_or_empty(entry.get("task_file_hash")):
+                    raise AttemptLifecycleError(f"invocation_intent task_file_hash invalid digest shape for key {key}: {entry.get('task_file_hash')}")
+
+                for h_field in ("argv_hash", "env_hash", "cwd_hash", "sandbox_profile_hash", "input_hash"):
+                    if h_field in entry and not is_valid_nonempty_sha256_digest(entry[h_field]):
+                        raise AttemptLifecycleError(f"invocation_intent {h_field} invalid digest shape for key {key}: {entry.get(h_field)}")
+
                 expected_ord = len(call_ordinals.get(cid, [])) + 1
                 if ord_num != expected_ord:
                     raise AttemptLifecycleError(f"Non-contiguous or non-monotonic invocation_ordinal for call_id '{cid}': expected {expected_ord}, got {ord_num}")
@@ -641,6 +666,13 @@ class AttemptLedger:
                     raise AttemptLifecycleError(f"process_started recorded after invocation_completion for key {key}")
                 if key not in intents:
                     raise AttemptLifecycleError(f"process_started recorded before invocation_intent for key {key}")
+                if not is_valid_nonempty_sha256_digest(entry.get("intent_record_hash")):
+                    raise AttemptLifecycleError(f"process_started intent_record_hash invalid digest shape for key {key}: {entry.get('intent_record_hash')}")
+
+                for h_field in ("argv_hash", "env_hash", "cwd_hash", "sandbox_profile_hash", "input_hash"):
+                    if h_field in entry and not is_valid_nonempty_sha256_digest(entry[h_field]):
+                        raise AttemptLifecycleError(f"process_started {h_field} invalid digest shape for key {key}: {entry.get(h_field)}")
+
                 intent_rec, intent_hash, intent_idx = intents[key]
                 if idx < intent_idx:
                     raise AttemptLifecycleError(f"process_started index {idx} precedes invocation_intent index {intent_idx} for key {key}")
@@ -655,6 +687,20 @@ class AttemptLedger:
                     raise AttemptLifecycleError(f"Duplicate invocation_completion for key {key}")
                 if key not in intents:
                     raise AttemptLifecycleError(f"invocation_completion recorded before invocation_intent for key {key}")
+                if not is_valid_nonempty_sha256_digest(entry.get("intent_record_hash")):
+                    raise AttemptLifecycleError(f"invocation_completion intent_record_hash invalid digest shape for key {key}: {entry.get('intent_record_hash')}")
+                if not is_valid_sha256_digest_or_empty(entry.get("started_record_hash")):
+                    raise AttemptLifecycleError(f"invocation_completion started_record_hash invalid digest shape for key {key}: {entry.get('started_record_hash')}")
+                if not is_valid_nonempty_sha256_digest(entry.get("raw_stdout_digest")):
+                    raise AttemptLifecycleError(f"invocation_completion raw_stdout_digest invalid digest shape for key {key}: {entry.get('raw_stdout_digest')}")
+                if not is_valid_nonempty_sha256_digest(entry.get("raw_stderr_digest")):
+                    raise AttemptLifecycleError(f"invocation_completion raw_stderr_digest invalid digest shape for key {key}: {entry.get('raw_stderr_digest')}")
+                if not is_valid_sha256_digest_or_empty(entry.get("text_hash")):
+                    raise AttemptLifecycleError(f"invocation_completion text_hash invalid digest shape for key {key}: {entry.get('text_hash')}")
+
+                for h_field in ("argv_hash", "env_hash", "cwd_hash", "sandbox_profile_hash", "input_hash"):
+                    if h_field in entry and not is_valid_nonempty_sha256_digest(entry[h_field]):
+                        raise AttemptLifecycleError(f"invocation_completion {h_field} invalid digest shape for key {key}: {entry.get(h_field)}")
                 intent_rec, intent_hash, intent_idx = intents[key]
                 if idx < intent_idx:
                     raise AttemptLifecycleError(f"invocation_completion index {idx} precedes invocation_intent index {intent_idx} for key {key}")

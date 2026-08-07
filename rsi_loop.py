@@ -3341,32 +3341,33 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
         raise NotImplementedError("Campaign 2 full stage requires Work Order C implementation")
 
     # 1. Preflight verifications
-    verify_campaign2_manifest(BASE_DIR)
-    verify_campaign2_evidence_manifest(BASE_DIR)
-    verify_campaign2_parity_matrix(BASE_DIR)
-    verify_family_blocked_assignment(BASE_DIR)
-    reg_data = verify_master_registration(BASE_DIR)
+    ws_root = getattr(ctx, "workspace_root", BASE_DIR)
+    verify_campaign2_manifest(ws_root)
+    verify_campaign2_evidence_manifest(ws_root)
+    verify_campaign2_parity_matrix(ws_root)
+    verify_family_blocked_assignment(ws_root)
+    reg_data = verify_master_registration(ws_root)
 
     # Launch lock check
-    lock_path = os.path.join(BASE_DIR, "campaign2_launch_lock.json")
+    lock_path = os.path.join(ws_root, "campaign2_launch_lock.json")
     lock_hash = ""
     if not args.mock:
         # MANDATORY launch lock for scientific launch
-        lock_data = verify_launch_lock(BASE_DIR)
+        lock_data = verify_launch_lock(ws_root)
         with open(lock_path, "rb") as f:
             lock_hash = hashlib.sha256(f.read()).hexdigest()
     else:
         # In mock mode: verify lock if it exists, otherwise note mock testing mode
         if os.path.exists(lock_path):
-            lock_data = verify_launch_lock(BASE_DIR)
+            lock_data = verify_launch_lock(ws_root)
             with open(lock_path, "rb") as f:
                 lock_hash = hashlib.sha256(f.read()).hexdigest()
         else:
             sys.stdout.write("[mock mode] Proceeding without operator launch lock for vertical slice testing.\n")
 
-    ta_data = generate_family_blocked_assignment()
+    ta_data = generate_family_blocked_assignment(ws_root)
     suite = "suite_p" if stage == "pilot" else "suite_c"
-    with open(os.path.join(BASE_DIR, "campaign2_master_registration.json"), "rb") as reg_file:
+    with open(os.path.join(ws_root, "campaign2_master_registration.json"), "rb") as reg_file:
         registration_sha256 = hashlib.sha256(reg_file.read()).hexdigest()
 
     # 2. Bind all resume state to one explicit, sealed attempt identity.

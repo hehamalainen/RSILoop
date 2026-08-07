@@ -118,7 +118,7 @@ class TestCampaign2(unittest.TestCase):
         """Verifies all 144 Git-tracked Category 1 files pass the SHA-256 preflight manifest."""
         ok, count = verify_campaign2_manifest(BASE_DIR)
         self.assertTrue(ok)
-        self.assertEqual(count, 144)
+        self.assertEqual(count, 145)
 
     def test_02_task_defects_structure_and_monotonicity(self):
         """Verifies strict monotonicity of defect ladders (ref > rung1 > rung2 > rung3) across all 30 tasks."""
@@ -216,7 +216,7 @@ def parse_log_stream(stream):
         """Verifies campaign2_preflight_hashes.json authenticates the full Category 1 inventory."""
         ok, count = verify_campaign2_manifest(BASE_DIR)
         self.assertTrue(ok)
-        self.assertEqual(count, 144)
+        self.assertEqual(count, 145)
 
     def test_08_production_parity_matrix_verification(self):
         """Finding 1 [P0] FIX: Verifies campaign2_parity_matrix.json recomputes code and harness hashes for all 120 rows on disk."""

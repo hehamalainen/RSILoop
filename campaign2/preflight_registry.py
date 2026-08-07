@@ -55,18 +55,28 @@ class PreflightRegistry:
 
     def _load_or_init(self) -> Dict[str, Any]:
         reg_file_p = os.path.join(self.workspace_root, "campaign2_master_registration.json")
+        reg_entry_exists = os.path.lexists(reg_file_p)
         reg_hash = ""
-        if os.path.exists(reg_file_p):
+        if reg_entry_exists:
+            if os.path.islink(reg_file_p) or not os.path.isfile(reg_file_p):
+                raise PreflightRegistryError(
+                    f"Bound master registration file missing or invalid (symlinks forbidden): {reg_file_p}"
+                )
             with open(reg_file_p, "rb") as f:
                 reg_hash = hashlib.sha256(f.read()).hexdigest()
 
         lock_file_p = os.path.join(self.workspace_root, "campaign2_launch_lock.json")
+        lock_entry_exists = os.path.lexists(lock_file_p)
         lock_hash = ""
-        if os.path.exists(lock_file_p):
+        if lock_entry_exists:
+            if os.path.islink(lock_file_p) or not os.path.isfile(lock_file_p):
+                raise PreflightRegistryError(
+                    f"Bound launch lock file missing or invalid (symlinks forbidden): {lock_file_p}"
+                )
             with open(lock_file_p, "rb") as f:
                 lock_hash = hashlib.sha256(f.read()).hexdigest()
 
-        if os.path.exists(self.registry_path):
+        if os.path.lexists(self.registry_path):
             if os.path.islink(self.registry_path) or not os.path.isfile(self.registry_path):
                 raise PreflightRegistryError(f"Preflight registry must be a regular non-symlink file: {self.registry_path}")
             st_mode = stat.S_IMODE(os.stat(self.registry_path).st_mode)
@@ -81,21 +91,34 @@ class PreflightRegistry:
             stored_reg_hash = data.get("registration_hash", "")
             stored_lock_hash = data.get("launch_lock_hash", "")
 
-            # If disk hash is present, registry MUST match disk hash
-            if reg_hash and stored_reg_hash != reg_hash:
-                raise PreflightRegistryError(
-                    f"Preflight registry registration_hash mismatch: registry has '{stored_reg_hash}', disk has '{reg_hash}'"
-                )
-            if lock_hash and stored_lock_hash != lock_hash:
-                raise PreflightRegistryError(
-                    f"Preflight registry launch_lock_hash mismatch: registry has '{stored_lock_hash}', disk has '{lock_hash}'"
-                )
+            if reg_entry_exists or stored_reg_hash:
+                if not reg_entry_exists or os.path.islink(reg_file_p) or not os.path.isfile(reg_file_p):
+                    raise PreflightRegistryError(
+                        f"Bound master registration file missing or invalid (symlinks forbidden): {reg_file_p}"
+                    )
+                if not stored_reg_hash:
+                    raise PreflightRegistryError(
+                        f"Preflight registry missing stored registration_hash for existing bound file: {reg_file_p}"
+                    )
+                if stored_reg_hash != reg_hash:
+                    raise PreflightRegistryError(
+                        f"Preflight registry registration_hash mismatch: registry has '{stored_reg_hash}', disk has '{reg_hash}'"
+                    )
 
-            # If registry stored a non-empty hash, disk file MUST still exist and match
-            if stored_reg_hash and not reg_hash:
-                raise PreflightRegistryError("Preflight registry bound registration_hash, but master registration file is missing on disk")
-            if stored_lock_hash and not lock_hash:
-                raise PreflightRegistryError("Preflight registry bound launch_lock_hash, but launch lock file is missing on disk")
+            if lock_entry_exists or stored_lock_hash:
+                if not lock_entry_exists or os.path.islink(lock_file_p) or not os.path.isfile(lock_file_p):
+                    raise PreflightRegistryError(
+                        f"Bound launch lock file missing or invalid (symlinks forbidden): {lock_file_p}"
+                    )
+                if not stored_lock_hash:
+                    raise PreflightRegistryError(
+                        f"Preflight registry missing stored launch_lock_hash for existing bound file: {lock_file_p}"
+                    )
+                if stored_lock_hash != lock_hash:
+                    raise PreflightRegistryError(
+                        f"Preflight registry launch_lock_hash mismatch: registry has '{stored_lock_hash}', disk has '{lock_hash}'"
+                    )
+
             return data
 
         initial_data = {
@@ -305,7 +328,7 @@ class PreflightRegistry:
         if type(logical_calls) is bool or not isinstance(logical_calls, int) or logical_calls < 0:
             raise PreflightRegistryError(f"Invalid logical_calls in record_usage: {logical_calls}")
 
-        if type(local_attempts) is bool or not isinstance(local_attempts, int) or local_attempts < 0:
+        if type(local_attempts) is bool or not isinstance(local_attempts, int) or local_attempts <= 0:
             raise PreflightRegistryError(f"Invalid local_attempts in record_usage: {local_attempts}")
 
         self._reload()

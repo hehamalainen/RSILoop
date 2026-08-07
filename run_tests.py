@@ -28,7 +28,7 @@ def main():
     from campaign2.tier_assignment import verify_family_blocked_assignment
 
     ok, manifest_count = verify_campaign2_manifest(workspace_root)
-    if not ok or manifest_count != 144:
+    if not ok or manifest_count != 145:
         sys.stderr.write(f"FATAL: Campaign 2 preflight manifest verification failed (ok={ok}, count={manifest_count})\n")
         sys.exit(1)
 
