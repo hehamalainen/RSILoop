@@ -176,13 +176,19 @@ class PreflightRegistry:
         if data.get("stage") != self.stage:
             raise PreflightRegistryError(f"Preflight registry stage mismatch: expected '{self.stage}', got '{data.get('stage')}'")
 
-        # Verify registration and launch lock hashes match workspace files (P0-4)
+        # Verify registration and launch lock hashes match workspace files (P0-4, bidirectional)
+        reg_file = os.path.join(self.workspace_root, "campaign2_master_registration.json")
+        reg_exists = os.path.exists(reg_file)
         stored_reg_hash = data.get("registration_hash", "")
-        if stored_reg_hash:
-            reg_file = os.path.join(self.workspace_root, "campaign2_master_registration.json")
-            if not os.path.exists(reg_file) or os.path.islink(reg_file) or not os.path.isfile(reg_file):
+
+        if reg_exists or stored_reg_hash:
+            if not reg_exists or os.path.islink(reg_file) or not os.path.isfile(reg_file):
                 raise PreflightRegistryError(
                     f"Bound master registration file missing or invalid: {reg_file}"
+                )
+            if not stored_reg_hash:
+                raise PreflightRegistryError(
+                    f"Preflight registry missing stored registration_hash for existing bound file: {reg_file}"
                 )
             with open(reg_file, "rb") as f:
                 curr_reg_hash = hashlib.sha256(f.read()).hexdigest()
@@ -191,12 +197,18 @@ class PreflightRegistry:
                     f"Preflight registry registration_hash mismatch: stored '{stored_reg_hash}' vs current '{curr_reg_hash}'"
                 )
 
+        lock_file = os.path.join(self.workspace_root, "campaign2_launch_lock.json")
+        lock_exists = os.path.exists(lock_file)
         stored_lock_hash = data.get("launch_lock_hash", "")
-        if stored_lock_hash:
-            lock_file = os.path.join(self.workspace_root, "campaign2_launch_lock.json")
-            if not os.path.exists(lock_file) or os.path.islink(lock_file) or not os.path.isfile(lock_file):
+
+        if lock_exists or stored_lock_hash:
+            if not lock_exists or os.path.islink(lock_file) or not os.path.isfile(lock_file):
                 raise PreflightRegistryError(
                     f"Bound launch lock file missing or invalid: {lock_file}"
+                )
+            if not stored_lock_hash:
+                raise PreflightRegistryError(
+                    f"Preflight registry missing stored launch_lock_hash for existing bound file: {lock_file}"
                 )
             with open(lock_file, "rb") as f:
                 curr_lock_hash = hashlib.sha256(f.read()).hexdigest()
@@ -456,15 +468,20 @@ def run_pilot_canary(
                         registry.record_usage(tokens, duration, 1, 1, cid, inv_ordinal, comp_hash)
 
                 if call_completes:
-                    # Authenticate preceding completions against permitted retry taxonomy before considering terminal result (P0-1)
-                    PERMITTED_LOCAL_RETRIES = {"spawn_failure", "transient_infrastructure_error"}
+                    # Authenticate preceding completions against shared retry predicate before considering terminal result (P0-1)
+                    from campaign2.attempt_lifecycle import is_permitted_local_retry
                     for prec_intent, prec_comp in call_completes[:-1]:
-                        classification = prec_comp.get("classification")
-                        usage_known = prec_comp.get("usage_known", True if classification in PERMITTED_LOCAL_RETRIES else False)
-                        if classification not in PERMITTED_LOCAL_RETRIES or usage_known is not True:
+                        ord_num = prec_intent.get("invocation_ordinal", 1)
+                        has_started = any(
+                            e.get("record_type") == "process_started"
+                            and e.get("logical_call_id") == cid
+                            and e.get("invocation_ordinal") == ord_num
+                            for e in entries
+                        )
+                        if not is_permitted_local_retry(prec_comp, has_started):
                             reason = (
                                 f"Preflight canary call '{cid}' contains unauthorized intermediate retry attempt "
-                                f"(ordinal {prec_intent.get('invocation_ordinal')}, classification='{classification}', usage_known={usage_known})"
+                                f"(ordinal {ord_num}, classification='{prec_comp.get('classification')}', parse_state='{prec_comp.get('parse_state')}', usage_known={prec_comp.get('usage_known')})"
                             )
                             registry.record_canary_attempt(
                                 attempt_id, "invalidated", prec_comp.get("tokens", 0), prec_comp.get("duration", 0.0), False, call_id=cid

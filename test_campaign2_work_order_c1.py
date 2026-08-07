@@ -1033,7 +1033,9 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "logical_call_id": "canary_pilot_att_r28_002_01",
                 "invocation_ordinal": 1,
                 "intent_record_hash": intent1_hash,
-                "started_record_hash": started1_hash,
+                "started_record_hash": "",
+                "parse_state": "spawn_failure",
+                "usage_known": True,
                 "classification": "spawn_failure",
                 "return_code": -1,
                 "text_hash": "",
@@ -1078,7 +1080,7 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "timestamp": time.time(),
             }
 
-            for r in (intent1, started1, comp1, intent2, started2, comp2):
+            for r in (intent1, comp1, intent2, started2, comp2):
                 ledger._append_record(r)
 
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_master_registration.json"), os.path.join(tmp_dir, "campaign2_master_registration.json"))
@@ -1363,7 +1365,8 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
             lock_hash = hashlib.sha256(b'{"lock": true}\n').hexdigest()
 
             reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
-            reg.data["registration_hash"] = hashlib.sha256(open(os.path.join(tmp_dir, "campaign2_master_registration.json"), "rb").read()).hexdigest()
+            with open(os.path.join(tmp_dir, "campaign2_master_registration.json"), "rb") as f:
+                reg.data["registration_hash"] = hashlib.sha256(f.read()).hexdigest()
             reg.data["launch_lock_hash"] = lock_hash
             reg._save_data(reg.data)
 
@@ -1374,6 +1377,159 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
             with self.assertRaises(PreflightRegistryError) as ctx:
                 reg._reload()
             self.assertIn("Bound launch lock file missing", str(ctx.exception))
+
+    def test_round30_live_and_recovery_retry_parity_transient_infrastructure_error(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from campaign2.preflight_registry import PreflightRegistry, run_pilot_canary, CANARY_NEUTRAL_PROMPT, CANARY_EXPECTED_RESPONSE
+            from campaign2.attempt_lifecycle import AttemptLedger
+
+            cid = "canary_pilot_att_r30_001_01"
+            ledger_path = os.path.join(tmp_dir, "campaign2_pilot_ledger.jsonl")
+            ledger = AttemptLedger(ledger_path)
+
+            canary_prompt_hash = hashlib.sha256(CANARY_NEUTRAL_PROMPT.encode("utf-8")).hexdigest()
+            canary_text_hash = hashlib.sha256(CANARY_EXPECTED_RESPONSE.encode("utf-8")).hexdigest()
+
+            # Ordinal 1: transient_infrastructure_error with process_started=True, parse_state=transient_infrastructure_error, usage_known=False
+            intent1 = {
+                "record_type": "invocation_intent",
+                "logical_call_id": cid,
+                "invocation_ordinal": 1,
+                "prompt_hash": canary_prompt_hash,
+                "timestamp": time.time(),
+            }
+            intent1_bytes = (json.dumps(intent1, sort_keys=True) + "\n").encode("utf-8")
+            intent1_hash = hashlib.sha256(intent1_bytes).hexdigest()
+
+            started1 = {
+                "record_type": "process_started",
+                "logical_call_id": cid,
+                "invocation_ordinal": 1,
+                "pid": 44441,
+                "intent_record_hash": intent1_hash,
+                "timestamp": time.time(),
+            }
+            started1_bytes = (json.dumps(started1, sort_keys=True) + "\n").encode("utf-8")
+            started1_hash = hashlib.sha256(started1_bytes).hexdigest()
+
+            comp1 = {
+                "record_type": "invocation_completion",
+                "logical_call_id": cid,
+                "invocation_ordinal": 1,
+                "intent_record_hash": intent1_hash,
+                "started_record_hash": started1_hash,
+                "return_code": 1,
+                "raw_stdout_digest": hashlib.sha256(b"").hexdigest(),
+                "raw_stderr_digest": hashlib.sha256(b"").hexdigest(),
+                "text_hash": "",
+                "parse_state": "transient_infrastructure_error",
+                "usage_known": False,
+                "tokens": 0,
+                "duration": 0.5,
+                "classification": "transient_infrastructure_error",
+                "error": "transient http 429",
+                "timestamp": time.time(),
+            }
+
+            # Ordinal 2: valid pass
+            intent2 = {
+                "record_type": "invocation_intent",
+                "logical_call_id": cid,
+                "invocation_ordinal": 2,
+                "prompt_hash": canary_prompt_hash,
+                "timestamp": time.time(),
+            }
+            intent2_bytes = (json.dumps(intent2, sort_keys=True) + "\n").encode("utf-8")
+            intent2_hash = hashlib.sha256(intent2_bytes).hexdigest()
+
+            started2 = {
+                "record_type": "process_started",
+                "logical_call_id": cid,
+                "invocation_ordinal": 2,
+                "pid": 44442,
+                "intent_record_hash": intent2_hash,
+                "timestamp": time.time(),
+            }
+            started2_bytes = (json.dumps(started2, sort_keys=True) + "\n").encode("utf-8")
+            started2_hash = hashlib.sha256(started2_bytes).hexdigest()
+
+            comp2 = {
+                "record_type": "invocation_completion",
+                "logical_call_id": cid,
+                "invocation_ordinal": 2,
+                "intent_record_hash": intent2_hash,
+                "started_record_hash": started2_hash,
+                "classification": "valid",
+                "return_code": 0,
+                "text_hash": canary_text_hash,
+                "tokens": 7,
+                "duration": 0.2,
+                "usage_known": True,
+                "timestamp": time.time(),
+            }
+
+            for r in (intent1, started1, comp1, intent2, started2, comp2):
+                ledger._append_record(r)
+
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_master_registration.json"), os.path.join(tmp_dir, "campaign2_master_registration.json"))
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
+
+            model = mock.MagicMock()
+            data = run_pilot_canary("pilot", "att_r30_001", model, workspace_root=tmp_dir, ledger=ledger)
+            self.assertTrue(data["canary_passed"])
+
+            reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
+            self.assertEqual(reg.data["total_logical_calls"], 1)
+            self.assertEqual(reg.data["total_local_invocation_attempts"], 2)
+
+    def test_round30_empty_stored_hash_with_present_artifact_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from campaign2.preflight_registry import PreflightRegistry, PreflightRegistryError
+
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_master_registration.json"), os.path.join(tmp_dir, "campaign2_master_registration.json"))
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
+
+            reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
+            reg.data["registration_hash"] = ""
+            reg._save_data(reg.data)
+
+            with self.assertRaises(PreflightRegistryError) as ctx:
+                reg._reload()
+            self.assertIn("missing stored registration_hash", str(ctx.exception))
+
+    def test_round30_attempt_scoped_scratch_residue_scan(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from campaign2.model_provider import SolModelProvider
+            from campaign2.attempt_lifecycle import AttemptLedger, AttemptLifecycleError
+
+            run_dir = os.path.join(tmp_dir, "att_r30_residue")
+            os.makedirs(run_dir, exist_ok=True)
+            ledger_p = os.path.join(run_dir, "campaign2_pilot_ledger.jsonl")
+            ledger = AttemptLedger(ledger_p)
+
+            provider = SolModelProvider(workspace_root=tmp_dir, ledger=ledger, mock_subprocess=True, attempt_id="att_r30_residue")
+            self.assertEqual(provider.attempt_id, "att_r30_residue")
+
+            # Execute provider call (mocked) to write intent log with scratch_dir
+            provider._execute_cli_call("canary_pilot_att_r30_residue_01", b"CANARY_NEUTRAL_PROMPT")
+
+            entries = ledger.get_entries()
+            intents = [e for e in entries if e.get("record_type") == "invocation_intent"]
+            self.assertTrue(len(intents) > 0)
+            scratch_dir = intents[0].get("scratch_dir")
+            self.assertTrue(scratch_dir and "rsi_codex_scratch_att_r30_residue_" in scratch_dir)
+
+            # Create credential residue in actual scratch dir created by provider
+            codex_dir = os.path.join(scratch_dir, ".codex")
+            os.makedirs(codex_dir, exist_ok=True)
+            auth_file = os.path.join(codex_dir, "auth.json")
+            with open(auth_file, "w") as f:
+                f.write('{"auth": "secret"}\n')
+
+            # verify_resume_admission MUST detect residue in this attempt-scoped scratch dir
+            with self.assertRaises(AttemptLifecycleError) as ctx:
+                ledger.verify_resume_admission()
+            self.assertIn("Credential residue found", str(ctx.exception))
 
 
 class TestC1_13_FullStageRefusal(unittest.TestCase):

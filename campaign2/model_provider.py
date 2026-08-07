@@ -507,6 +507,7 @@ class SolModelProvider(ModelProvider):
         state_root: Optional[str] = None,
         ledger: Optional[Any] = None,
         mock_subprocess: bool = False,
+        attempt_id: Optional[str] = None,
     ):
         self.model_name = model_name
         self.workspace_root = workspace_root
@@ -515,6 +516,12 @@ class SolModelProvider(ModelProvider):
         self.ledger = ledger
         self.mock_subprocess = mock_subprocess
         self.is_mock = mock_subprocess
+        if attempt_id:
+            self.attempt_id = attempt_id
+        elif ledger and hasattr(ledger, "ledger_path") and ledger.ledger_path:
+            self.attempt_id = os.path.basename(os.path.dirname(os.path.abspath(ledger.ledger_path)))
+        else:
+            self.attempt_id = ""
 
     def _execute_cli_call(
         self,
@@ -553,7 +560,7 @@ class SolModelProvider(ModelProvider):
             t0_wall = time.time()
 
             try:
-                scratch_dir = create_fresh_invocation_scratch_dir(workspace_root=self.state_root, is_mock=self.mock_subprocess)
+                scratch_dir = create_fresh_invocation_scratch_dir(workspace_root=self.state_root, is_mock=self.mock_subprocess, attempt_id=self.attempt_id)
                 sb_path = render_seatbelt_profile(scratch_dir, self.artifact_root)
 
                 # Bind sandbox_profile_hash to rendered generator.sb bytes (P1-5)
@@ -583,6 +590,8 @@ class SolModelProvider(ModelProvider):
                     "argv_hash": argv_hash,
                     "env_hash": env_hash,
                     "cwd_hash": cwd_hash,
+                    "scratch_dir": scratch_dir,
+                    "cwd": scratch_dir,
                     "prompt_hash": prompt_hash,
                     "task_file_hash": task_file_hash,
                     "sandbox_profile_hash": sandbox_profile_hash,
@@ -796,8 +805,9 @@ class SolModelProvider(ModelProvider):
             setattr(last_exception, "usage_known", parsed["usage_known"])
             setattr(last_exception, "tokens_used", parsed["tokens"])
 
-            events_parsed = parsed.get("events_parsed", 0)
-            if parsed["classification"] in ("spawn_failure", "transient_infrastructure_error") and events_parsed == 0 and not parsed.get("usage_known", False) and invocation_ordinal < max_attempts:
+            from campaign2.attempt_lifecycle import is_permitted_local_retry
+            has_started = (started_hash != "")
+            if is_permitted_local_retry(completion_record, has_started) and invocation_ordinal < max_attempts:
                 time.sleep(0.1 * (2 ** (invocation_ordinal - 1)))
                 continue
             raise last_exception

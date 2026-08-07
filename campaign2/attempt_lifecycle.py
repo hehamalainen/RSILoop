@@ -26,6 +26,58 @@ class AttemptInvalidatedError(AttemptLifecycleError):
     pass
 
 
+PERMITTED_LOCAL_RETRIES = {"spawn_failure", "transient_infrastructure_error"}
+
+
+def is_permitted_local_retry(comp: Dict[str, Any], has_process_started: bool) -> bool:
+    """
+    Shared strict retry-eligibility predicate for both live execution and recovery.
+
+    A completion record is a permitted local retry IF AND ONLY IF it matches one of:
+    1. spawn_failure:
+       - has_process_started is False
+       - comp.get("classification") == "spawn_failure"
+       - comp.get("parse_state") == "spawn_failure"
+       - comp.get("usage_known") is True (explicit boolean True)
+       - comp.get("tokens") == 0
+       - comp.get("return_code") != 0
+    2. transient_infrastructure_error:
+       - has_process_started is True
+       - comp.get("classification") == "transient_infrastructure_error"
+       - comp.get("parse_state") == "transient_infrastructure_error"
+       - comp.get("usage_known") is False (explicit boolean False)
+    """
+    if not isinstance(comp, dict):
+        return False
+
+    classification = comp.get("classification")
+    parse_state = comp.get("parse_state")
+    usage_known = comp.get("usage_known")
+
+    if classification not in PERMITTED_LOCAL_RETRIES:
+        return False
+
+    if classification == "spawn_failure":
+        return (
+            has_process_started is False
+            and parse_state == "spawn_failure"
+            and usage_known is True
+            and type(usage_known) is bool
+            and comp.get("tokens") == 0
+            and type(comp.get("tokens")) is int
+            and comp.get("return_code") != 0
+        )
+    elif classification == "transient_infrastructure_error":
+        return (
+            has_process_started is True
+            and parse_state == "transient_infrastructure_error"
+            and usage_known is False
+            and type(usage_known) is bool
+        )
+
+    return False
+
+
 def publish_scientific_start(stage: str, attempt_id: str, workspace_root: str = BASE_DIR) -> str:
     """
     Publish stage-global scientific start claim marker file with descriptor fchmod, fsync, and parent dir fsync.
