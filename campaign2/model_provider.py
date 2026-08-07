@@ -311,12 +311,34 @@ def create_fresh_invocation_scratch_dir(workspace_root: str = BASE_DIR, is_mock:
 
 def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, return_code: int = 0) -> Dict[str, Any]:
     """
-    Parses CLI JSONL output and classifies response strictly (C1-11, P1-2).
+    Parses CLI JSONL output and classifies response strictly (C1-11, P0-3, P0-4).
     Raw bytes hashed BEFORE strict UTF-8 decoding.
-    Categorizes transient zero-event infrastructure errors (DNS/TLS/429/503) as retryable.
+    Enforces load-bearing zero-event retry invariant: if ANY JSONL event exists,
+    classification is invalidated and retries are strictly forbidden.
+    Requires exactly one turn.completed event as final line and non-empty final agent message.
     """
     stdout_hash = hashlib.sha256(stdout_bytes).hexdigest()
     stderr_hash = hashlib.sha256(stderr_bytes).hexdigest()
+
+    text = ""
+    lines = []
+    events = []
+    try:
+        text = stdout_bytes.decode("utf-8")
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for idx, l in enumerate(lines):
+            try:
+                ev = json.loads(l)
+                if isinstance(ev, dict):
+                    events.append(ev)
+                else:
+                    break
+            except Exception:
+                break
+    except Exception:
+        pass
+
+    events_parsed = len(events)
 
     if return_code != 0:
         err_text = (stdout_bytes + b"\n" + stderr_bytes).decode("utf-8", errors="replace")
@@ -326,7 +348,13 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
             "ConnectionRefusedError", "connect ETIMEDOUT", "rate_limit_exceeded"
         )
         is_transient = any(kw in err_text for kw in transient_kw)
-        classification = "transient_infrastructure_error" if is_transient else "invalidated"
+
+        # Zero-Event Load-Bearing Invariant: If ANY JSONL event was emitted, retry is strictly forbidden!
+        if events_parsed > 0 or not is_transient:
+            classification = "invalidated"
+        else:
+            classification = "transient_infrastructure_error"
+
         return {
             "parse_state": "nonzero_exit",
             "classification": classification,
@@ -335,12 +363,11 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
             "text": "",
             "stdout_hash": stdout_hash,
             "stderr_hash": stderr_hash,
-            "error": f"Process exited with non-zero return code {return_code}",
+            "events_parsed": events_parsed,
+            "error": f"Process exited with non-zero return code {return_code} (events_parsed={events_parsed})",
         }
 
-    try:
-        text = stdout_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
+    if not lines or len(lines) != len(events):
         return {
             "parse_state": "malformed_jsonl",
             "classification": "invalidated",
@@ -349,11 +376,13 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
             "text": "",
             "stdout_hash": stdout_hash,
             "stderr_hash": stderr_hash,
-            "error": f"UTF-8 decode error: {exc}",
+            "events_parsed": events_parsed,
+            "error": "Malformed JSONL or unparseable lines present",
         }
 
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines:
+    # Verify EXACTLY ONE turn.completed event exists and is the absolute LAST event
+    turn_completed_events = [ev for ev in events if ev.get("type") == "turn.completed"]
+    if len(turn_completed_events) != 1 or events[-1].get("type") != "turn.completed":
         return {
             "parse_state": "malformed_jsonl",
             "classification": "invalidated",
@@ -362,46 +391,14 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
             "text": "",
             "stdout_hash": stdout_hash,
             "stderr_hash": stderr_hash,
-            "error": "Empty JSONL stdout",
-        }
-
-    events = []
-    for idx, l in enumerate(lines):
-        try:
-            ev = json.loads(l)
-            if not isinstance(ev, dict):
-                raise ValueError(f"Line {idx} is not a dict")
-            events.append(ev)
-        except Exception as exc:
-            return {
-                "parse_state": "malformed_jsonl",
-                "classification": "invalidated",
-                "usage_known": False,
-                "tokens": 0,
-                "text": "",
-                "stdout_hash": stdout_hash,
-                "stderr_hash": stderr_hash,
-                "error": f"Malformed JSON line #{idx}: {exc}",
-            }
-
-    if events[-1].get("type") != "turn.completed":
-        return {
-            "parse_state": "malformed_jsonl",
-            "classification": "invalidated",
-            "usage_known": False,
-            "tokens": 0,
-            "text": "",
-            "stdout_hash": stdout_hash,
-            "stderr_hash": stderr_hash,
-            "error": f"turn.completed must be final event, got {events[-1].get('type')}",
+            "events_parsed": events_parsed,
+            "error": f"Expected exactly 1 final turn.completed event, got count={len(turn_completed_events)}",
         }
 
     agent_messages = []
-    turn_completed_seen = False
-
-    for ev in events:
+    for ev in events[:-1]:
         ev_type = ev.get("type", "")
-        if turn_completed_seen and ev_type != "turn.completed":
+        if ev_type == "turn.completed":
             return {
                 "parse_state": "malformed_jsonl",
                 "classification": "invalidated",
@@ -410,16 +407,14 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
                 "text": "",
                 "stdout_hash": stdout_hash,
                 "stderr_hash": stderr_hash,
-                "error": "Events occurred after turn.completed",
+                "events_parsed": events_parsed,
+                "error": "Duplicate turn.completed event before final event",
             }
-
         if ev_type == "item.completed":
             item = ev.get("item", {})
             if isinstance(item, dict) and item.get("type") == "agent_message":
                 text_content = item.get("text", "") or item.get("content", "")
                 agent_messages.append(text_content)
-        elif ev_type == "turn.completed":
-            turn_completed_seen = True
 
     turn_ev = events[-1]
     usage = turn_ev.get("usage")
@@ -432,6 +427,7 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
             "text": "",
             "stdout_hash": stdout_hash,
             "stderr_hash": stderr_hash,
+            "events_parsed": events_parsed,
             "error": "turn.completed usage dictionary missing explicit output_tokens key",
         }
 
@@ -445,6 +441,7 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
             "text": "",
             "stdout_hash": stdout_hash,
             "stderr_hash": stderr_hash,
+            "events_parsed": events_parsed,
             "error": f"Invalid output_tokens value: {output_tokens}",
         }
 
@@ -457,10 +454,25 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
             "text": "",
             "stdout_hash": stdout_hash,
             "stderr_hash": stderr_hash,
+            "events_parsed": events_parsed,
             "error": "No agent_message items found in stdout JSONL",
         }
 
-    final_text = "\n".join(agent_messages)
+    # Extract ONLY the final agent message (not concatenation of all messages)
+    final_text = agent_messages[-1]
+    if not final_text or len(final_text.strip()) == 0:
+        return {
+            "parse_state": "malformed_jsonl",
+            "classification": "invalidated",
+            "usage_known": True,
+            "tokens": output_tokens,
+            "text": "",
+            "stdout_hash": stdout_hash,
+            "stderr_hash": stderr_hash,
+            "events_parsed": events_parsed,
+            "error": "Final agent_message is empty or whitespace-only",
+        }
+
     return {
         "parse_state": "valid",
         "classification": "valid",
@@ -469,6 +481,7 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
         "text": final_text,
         "stdout_hash": stdout_hash,
         "stderr_hash": stderr_hash,
+        "events_parsed": events_parsed,
         "error": "",
     }
 
@@ -752,7 +765,8 @@ class SolModelProvider(ModelProvider):
             setattr(last_exception, "usage_known", parsed["usage_known"])
             setattr(last_exception, "tokens_used", parsed["tokens"])
 
-            if parsed["classification"] in ("spawn_failure", "transient_infrastructure_error") and invocation_ordinal < max_attempts:
+            events_parsed = parsed.get("events_parsed", 0)
+            if parsed["classification"] in ("spawn_failure", "transient_infrastructure_error") and events_parsed == 0 and not parsed.get("usage_known", False) and invocation_ordinal < max_attempts:
                 time.sleep(0.1 * (2 ** (invocation_ordinal - 1)))
                 continue
             raise last_exception

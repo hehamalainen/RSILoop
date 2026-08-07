@@ -168,8 +168,10 @@ def generate_master_registration(workspace_root: str = BASE_DIR) -> Tuple[str, s
 
     PILOT_LIMITS = {
         "num_trials": 2,
+        "mutation_depth_M": 3,
+        "generation_replicates_k": 2,
+        "max_mutations_per_trial": 3,
         "max_candidates_per_task": 3,
-        "max_mutations_per_trial": 2,
         "trio_slots": 3,
         "optimization_tasks": 2,
         "selection_tasks": 2,
@@ -357,8 +359,10 @@ def verify_master_registration(workspace_root: str = BASE_DIR) -> Dict[str, Any]
     p_lims = data.get("pilot_limits", {})
     expected_p_lims = {
         "num_trials": 2,
+        "mutation_depth_M": 3,
+        "generation_replicates_k": 2,
+        "max_mutations_per_trial": 3,
         "max_candidates_per_task": 3,
-        "max_mutations_per_trial": 2,
         "trio_slots": 3,
         "optimization_tasks": 2,
         "selection_tasks": 2,

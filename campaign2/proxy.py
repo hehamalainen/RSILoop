@@ -30,7 +30,7 @@ from typing import Dict, Any, List, Tuple
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCHMARKS_DIR = os.path.join(BASE_DIR, "benchmarks", "campaign2")
 MAX_FRAME_SIZE = 1 * 1024 * 1024  # 1 MB max framed IPC payload limit
-WORKER_STARTUP_TIMEOUT_SECONDS = 10
+WORKER_STARTUP_TIMEOUT_SECONDS = 5
 
 
 class InfrastructureError(RuntimeError):

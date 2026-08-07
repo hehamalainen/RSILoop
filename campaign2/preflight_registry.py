@@ -243,36 +243,57 @@ def run_pilot_canary(
         return registry.data
 
     # Check AttemptLedger to reconcile completed canary call if provider completion succeeded before registry update
-    ledger_p = os.path.join(registry.history_dir, f"campaign2_{attempt_id}_attempt_ledger.jsonl")
-    if not os.path.exists(ledger_p):
-        ledger_p = os.path.join(workspace_root, "ledger.jsonl")
+    candidate_ledger_paths = [
+        os.path.join(workspace_root, attempt_id, f"campaign2_{stage}_ledger.jsonl"),
+        os.path.join(workspace_root, attempt_id, "ledger.jsonl"),
+        os.path.join(registry.history_dir, f"campaign2_{attempt_id}_attempt_ledger.jsonl"),
+        os.path.join(workspace_root, "ledger.jsonl"),
+    ]
 
-    if os.path.exists(ledger_p):
-        try:
+    expected_canary_prompt_hash = hashlib.sha256(CANARY_NEUTRAL_PROMPT.encode("utf-8")).hexdigest()
+
+    for ledger_p in candidate_ledger_paths:
+        if os.path.exists(ledger_p) and os.path.isfile(ledger_p) and os.path.getsize(ledger_p) > 0:
             ledger = AttemptLedger(ledger_p)
+            ledger.verify_three_record_protocol()
             entries = ledger.get_entries()
-            canary_completes = [
-                e for e in entries
-                if e.get("record_type") == "invocation_completion"
-                and str(e.get("logical_call_id", "")).startswith(f"canary_{stage}")
-                and e.get("classification") == "valid"
-            ]
-            if canary_completes:
-                latest_canary = canary_completes[-1]
-                canary_record = {
-                    "call_id": latest_canary.get("logical_call_id", ""),
-                    "status": "passed",
-                    "tokens": latest_canary.get("tokens", 10),
-                    "duration": latest_canary.get("duration", 0.1),
-                    "attempts": 1,
-                    "usage_known": True,
-                }
-                registry.record_canary_attempt(attempt_id, "passed", canary_record["tokens"], canary_record["duration"], True)
-                registry.record_canary_passed(attempt_id, [canary_record], canary_record["tokens"], canary_record["duration"])
-                publish_scientific_start(stage=stage, attempt_id=attempt_id, workspace_root=workspace_root)
-                return registry.data
-        except Exception:
-            pass
+
+            intents = {
+                e["logical_call_id"]: (e, hashlib.sha256((json.dumps(e, sort_keys=True) + "\n").encode("utf-8")).hexdigest())
+                for e in entries
+                if e.get("record_type") == "invocation_intent"
+                and str(e.get("logical_call_id", "")).startswith(f"canary_{stage}_{attempt_id}")
+            }
+
+            for call_id, (intent_rec, intent_hash) in intents.items():
+                if intent_rec.get("prompt_hash") != expected_canary_prompt_hash:
+                    raise CanaryFailureError(f"Ledger canary intent '{call_id}' prompt_hash mismatch during reconciliation")
+
+                matching_completes = [
+                    e for e in entries
+                    if e.get("record_type") == "invocation_completion"
+                    and e.get("logical_call_id") == call_id
+                    and e.get("intent_record_hash") == intent_hash
+                    and e.get("classification") == "valid"
+                    and e.get("return_code") == 0
+                ]
+
+                if matching_completes:
+                    comp = matching_completes[-1]
+                    tokens = comp.get("tokens", 0)
+                    duration = comp.get("duration", 0.0)
+                    canary_record = {
+                        "call_id": call_id,
+                        "status": "passed",
+                        "tokens": tokens,
+                        "duration": duration,
+                        "attempts": intent_rec.get("invocation_ordinal", 1),
+                        "usage_known": True,
+                    }
+                    registry.record_canary_attempt(attempt_id, "passed", tokens, duration, True)
+                    registry.record_canary_passed(attempt_id, [canary_record], tokens, duration)
+                    publish_scientific_start(stage=stage, attempt_id=attempt_id, workspace_root=workspace_root)
+                    return registry.data
 
     # Check max canary attempts cap (3 attempts max)
     attempts_log = registry.data.get("canary_attempts", [])

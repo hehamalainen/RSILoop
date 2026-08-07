@@ -12,6 +12,7 @@ import os
 import json
 import stat
 import time
+import math
 from typing import Dict, Any
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -104,15 +105,53 @@ def run_prescientific_cpu_gate(workspace_root: str = BASE_DIR, is_mock: bool = F
         if data.get("allowed_limit_seconds") != MAX_ALLOWED_CPU_SECONDS:
             raise CpuGateError(f"Existing CPU gate record allowed_limit_seconds mismatch: {data.get('allowed_limit_seconds')}")
 
+        # Authenticate exact (row_id, task_id) sequence against parity matrix
+        from campaign2.manifest import PARITY_MATRIX_PATH
+        if not os.path.exists(PARITY_MATRIX_PATH):
+            raise CpuGateError(f"Missing parity matrix file: {PARITY_MATRIX_PATH}")
+
+        with open(PARITY_MATRIX_PATH, "r", encoding="utf-8") as f:
+            parity_matrix = json.load(f)
+
+        if isinstance(parity_matrix, dict):
+            expected_rows = list(parity_matrix.values()) if "matrix" not in parity_matrix else parity_matrix["matrix"]
+        else:
+            expected_rows = parity_matrix
+
         measurements = data.get("row_measurements", [])
-        if not isinstance(measurements, list) or len(measurements) != 120:
-            raise CpuGateError(f"Existing CPU gate record must contain 120 row measurements, got {len(measurements)}")
+        if not isinstance(measurements, list) or len(measurements) != 120 or len(expected_rows) != 120:
+            raise CpuGateError(f"Existing CPU gate record must contain exactly 120 row measurements, got {len(measurements)}")
+
+        seen_row_ids = set()
+        calc_max_cpu = 0.0
 
         for idx, m in enumerate(measurements):
-            if not isinstance(m, dict) or not m.get("row_id") or not m.get("task_id") or "worker_cpu_seconds" not in m:
+            exp_row = expected_rows[idx]
+            exp_task_id = exp_row["task_id"]
+            exp_row_id = exp_row.get("row_id", f"{exp_task_id}_{exp_row.get('variant', 'unknown')}")
+
+            if not isinstance(m, dict):
                 raise CpuGateError(f"Invalid measurement entry at index {idx} in CPU gate record: {m}")
 
-        calc_max_cpu = max(float(m["worker_cpu_seconds"]) for m in measurements)
+            m_row_id = m.get("row_id")
+            m_task_id = m.get("task_id")
+            cpu_sec = m.get("worker_cpu_seconds")
+
+            if m_row_id != exp_row_id or m_task_id != exp_task_id:
+                raise CpuGateError(
+                    f"CPU gate record row sequence mismatch at index {idx}: expected ({exp_row_id}, {exp_task_id}), got ({m_row_id}, {m_task_id})"
+                )
+
+            if not isinstance(cpu_sec, (int, float)) or not math.isfinite(cpu_sec) or cpu_sec < 0.0:
+                raise CpuGateError(f"CPU gate record contains non-numeric or negative worker CPU seconds at index {idx}: {cpu_sec}")
+
+            if m_row_id in seen_row_ids:
+                raise CpuGateError(f"Duplicate row_id '{m_row_id}' in CPU gate record at index {idx}")
+            seen_row_ids.add(m_row_id)
+
+            if cpu_sec > calc_max_cpu:
+                calc_max_cpu = cpu_sec
+
         if abs(calc_max_cpu - float(data.get("max_cpu_seconds", -1.0))) > 1e-6:
             raise CpuGateError(
                 f"CPU gate record max_cpu_seconds mismatch: recorded {data.get('max_cpu_seconds')}, calculated {calc_max_cpu:.6f}"
@@ -187,28 +226,26 @@ def run_prescientific_cpu_gate(workspace_root: str = BASE_DIR, is_mock: bool = F
         "row_measurements": row_measurements,
     }
 
-    # Fail closed if max exceeds 3.0s BEFORE persisting
-    if max_cpu_seconds > MAX_ALLOWED_CPU_SECONDS:
-        raise CpuGateLimitExceededError(
-            f"Pre-scientific CPU gate FAILED: Max worker CPU time for row '{max_row_id}' "
-            f"was {max_cpu_seconds:.4f} s, exceeding limit of {MAX_ALLOWED_CPU_SECONDS} s"
-        )
-
-    # Persist binding record with 0o444 permissions
-    content_bytes = (json.dumps(gate_record, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    tmp_path = f"{record_path}_{os.getpid()}.tmp"
-    with open(tmp_path, "wb") as f:
-        f.write(content_bytes)
+    # Write gate record to disk FIRST (0o444) so failing attempts persist and block re-runs
+    record_bytes = (json.dumps(gate_record, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    tmp_p = f"{record_path}_{os.getpid()}.tmp"
+    with open(tmp_p, "wb") as f:
+        f.write(record_bytes)
         f.flush()
         os.fsync(f.fileno())
-
-    os.chmod(tmp_path, 0o444)
-    os.replace(tmp_path, record_path)
+    os.chmod(tmp_p, 0o444)
+    os.replace(tmp_p, record_path)
 
     dir_fd = os.open(workspace_root, os.O_RDONLY)
     try:
         os.fsync(dir_fd)
     finally:
         os.close(dir_fd)
+
+    if max_cpu_seconds > MAX_ALLOWED_CPU_SECONDS:
+        raise CpuGateLimitExceededError(
+            f"Pre-scientific CPU gate FAILED: Max worker CPU time for row '{max_row_id}' "
+            f"({max_cpu_seconds:.4f} s) exceeds allowed limit of {MAX_ALLOWED_CPU_SECONDS:.4f} s."
+        )
 
     return gate_record

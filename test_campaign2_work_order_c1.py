@@ -32,6 +32,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+
+def setUpModule():
+    for f in ["campaign2_cpu_gate_record.json", "history/campaign2_pilot_preflight_registry.json"]:
+        p = os.path.join(BASE_DIR, f)
+        if os.path.exists(p):
+            try:
+                os.chmod(p, 0o644)
+                os.remove(p)
+            except Exception:
+                pass
+
 from campaign2.model_provider import (
     ProductionTaskEvaluator,
     MockTaskEvaluator,
@@ -89,16 +100,17 @@ class TestC1_1_EvaluatorNeverNone(unittest.TestCase):
                 "structural_holdout": ["p_f4_01_bgp_peer_fsm"],
             }
         }
-        orch = Campaign2Orchestrator(
-            model_provider=MockModelProvider(),
-            task_evaluator=None,  # Passed None
-            tier_assignment=ta,
-            registration=reg,
-            suite="suite_p",
-            workspace_root=BASE_DIR,
-        )
-        self.assertIsNotNone(orch.evaluator)
-        self.assertIsInstance(orch.evaluator, ProductionTaskEvaluator)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            orch = Campaign2Orchestrator(
+                model_provider=MockModelProvider(),
+                task_evaluator=None,  # Passed None
+                tier_assignment=ta,
+                registration=reg,
+                suite="suite_p",
+                workspace_root=tmp_dir,
+            )
+            self.assertIsNotNone(orch.evaluator)
+            self.assertIsInstance(orch.evaluator, ProductionTaskEvaluator)
 
 
 class TestC1_2_ExecutableBoundary(unittest.TestCase):
@@ -165,7 +177,7 @@ class TestC1_3_ThreeRecordLedger(unittest.TestCase):
             ledger_p = os.path.join(tmp_dir, "ledger.jsonl")
             ledger = AttemptLedger(ledger_p)
 
-            provider = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=BASE_DIR, ledger=ledger, mock_subprocess=True)
+            provider = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=tmp_dir, ledger=ledger, mock_subprocess=True)
             code, tokens = provider.generate_candidate("c_f1_01_log_stream_parser", "def solve(): pass", "call_1")
             self.assertIn("def solve()", code)
 
@@ -248,7 +260,7 @@ class TestC1_5_ActiveTimeAccumulatorAndLimits(unittest.TestCase):
 class TestC1_6_NarrowedRetry(unittest.TestCase):
     def test_post_spawn_failure_is_non_retryable(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            provider = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=BASE_DIR, mock_subprocess=False)
+            provider = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=tmp_dir, mock_subprocess=False)
 
             def mock_popen(*args, **kwargs):
                 proc = mock.MagicMock()
@@ -265,10 +277,11 @@ class TestC1_6_NarrowedRetry(unittest.TestCase):
                 self.assertIn("failed", str(ctx.exception))
 
     def test_mutation_transport_failure_fails_closed(self):
-        provider = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=BASE_DIR, mock_subprocess=False)
-        with mock.patch.object(provider, "_execute_cli_call", side_effect=ExecutableBoundaryError("timeout")):
-            with self.assertRaises(ExecutableBoundaryError):
-                provider.mutate_prompt("body", "ctx", "mut_call")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            provider = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=tmp_dir, mock_subprocess=False)
+            with mock.patch.object(provider, "_execute_cli_call", side_effect=ExecutableBoundaryError("timeout")):
+                with self.assertRaises(ExecutableBoundaryError):
+                    provider.mutate_prompt("body", "ctx", "mut_call")
 
 
 class TestC1_7_CredentialEnvAndResidue(unittest.TestCase):
@@ -299,9 +312,11 @@ class TestC1_8_FrozenDesignEquality(unittest.TestCase):
 
 class TestC1_9_PrescientificCpuGate(unittest.TestCase):
     def test_cpu_gate_execution_and_persisted_record(self):
-        record = run_prescientific_cpu_gate(workspace_root=BASE_DIR, is_mock=True)
-        self.assertEqual(record["total_rows_evaluated"], 120)
-        self.assertLessEqual(record["max_cpu_seconds"], 3.0)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_parity_matrix.json"), os.path.join(tmp_dir, "campaign2_parity_matrix.json"))
+            record = run_prescientific_cpu_gate(workspace_root=tmp_dir, is_mock=True)
+            self.assertEqual(record["total_rows_evaluated"], 120)
+            self.assertLessEqual(record["max_cpu_seconds"], 3.0)
 
     def test_cpu_gate_rejects_missing_is_mock_key(self):
         from campaign2.cpu_gate import CpuGateError
@@ -316,20 +331,21 @@ class TestC1_9_PrescientificCpuGate(unittest.TestCase):
 
 class TestC1_10_PromptsAndProblemText(unittest.TestCase):
     def test_candidate_prompt_includes_authenticated_problem_text_single_envelope(self):
-        provider = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=BASE_DIR, mock_subprocess=True)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            provider = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=tmp_dir, mock_subprocess=True)
 
-        captured_stdin = []
-        def fake_execute(call_id, stdin_bytes, task_id="", problem_bytes=b""):
-            captured_stdin.append(stdin_bytes)
-            return "```python\ndef solve(): pass\n```", 50, {"classification": "valid"}
+            captured_stdin = []
+            def fake_execute(call_id, stdin_bytes, task_id="", problem_bytes=b""):
+                captured_stdin.append(stdin_bytes)
+                return "```python\ndef solve(): pass\n```", 50, {"classification": "valid"}
 
-        with mock.patch.object(provider, "_execute_cli_call", side_effect=fake_execute):
-            code, tokens = provider.generate_candidate("c_f1_01_log_stream_parser", "def solve(): pass", "call_task_spec")
-            self.assertEqual(len(captured_stdin), 1)
-            stdin_str = captured_stdin[0].decode("utf-8")
-            self.assertEqual(stdin_str.count("---PROBLEM SPECIFICATION---"), 1)
-            self.assertEqual(stdin_str.count("You are an expert Python coder"), 1)
-            self.assertIn("log_stream_parser", stdin_str)
+            with mock.patch.object(provider, "_execute_cli_call", side_effect=fake_execute):
+                code, tokens = provider.generate_candidate("c_f1_01_log_stream_parser", "def solve(): pass", "call_task_spec")
+                self.assertEqual(len(captured_stdin), 1)
+                stdin_str = captured_stdin[0].decode("utf-8")
+                self.assertEqual(stdin_str.count("---PROBLEM SPECIFICATION---"), 1)
+                self.assertEqual(stdin_str.count("You are an expert Python coder"), 1)
+                self.assertIn("log_stream_parser", stdin_str)
 
 
 class TestC1_11_JSONLClassifications(unittest.TestCase):
@@ -379,10 +395,13 @@ class TestC1_12_MockAndProductionParity(unittest.TestCase):
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
             shutil.copy2(os.path.join(BASE_DIR, "generator.sb.template"), os.path.join(tmp_dir, "generator.sb.template"))
 
-            # Patch launch lock and parity matrix verification, and mock ProductionTaskEvaluator to avoid sandbox-in-sandbox nesting
+            def mock_eval_sandboxed(task_id, code, timeout_seconds=15):
+                return (10, 10, True, "")
+
+            # Patch launch lock and parity matrix verification, and mock evaluate_candidate_code_sandboxed to run production evaluator
             with mock.patch("campaign2.launch_lock.verify_launch_lock", return_value=True), \
                  mock.patch("campaign2.manifest.verify_campaign2_parity_matrix", return_value=True), \
-                 mock.patch("campaign2.model_provider.ProductionTaskEvaluator", MockTaskEvaluator):
+                 mock.patch("campaign2.proxy.evaluate_candidate_code_sandboxed", side_effect=mock_eval_sandboxed):
 
                 _run_campaign2(args, ctx)
 
@@ -392,9 +411,14 @@ class TestC1_12_MockAndProductionParity(unittest.TestCase):
                     report_data = json.load(f)
                 self.assertEqual(report_data["schema_version"], "3")
                 self.assertTrue(report_data["is_mock"])
+                self.assertEqual(report_data["num_trials"], 2)
+                self.assertIn("primary_outcome", report_data)
+                self.assertEqual(len(report_data["per_family_deltas"]), 4)
+                self.assertEqual(len(report_data["per_tier_deltas"]), 4)
+                self.assertEqual(report_data["prescientific_cpu_gate"]["total_rows_evaluated"], 120)
 
 
-class TestC1_14_Round23Invariants(unittest.TestCase):
+class TestC1_14_Round24Invariants(unittest.TestCase):
     def test_preflight_registry_authentication_fails_closed_on_missing_or_mismatched_hashes(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_master_registration.json"), os.path.join(tmp_dir, "campaign2_master_registration.json"))
@@ -426,27 +450,52 @@ class TestC1_14_Round23Invariants(unittest.TestCase):
     def test_canary_reconciliation_from_ledger(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             from campaign2.attempt_lifecycle import AttemptLedger
-            hist_dir = os.path.join(tmp_dir, "history")
-            os.makedirs(hist_dir, exist_ok=True)
-            ledger_p = os.path.join(hist_dir, "campaign2_att_rec_001_attempt_ledger.jsonl")
+            from campaign2.preflight_registry import CANARY_NEUTRAL_PROMPT
+            run_dir = os.path.join(tmp_dir, "att_rec_001")
+            os.makedirs(run_dir, exist_ok=True)
+            ledger_p = os.path.join(run_dir, "campaign2_pilot_ledger.jsonl")
             ledger = AttemptLedger(ledger_p)
 
-            # Record a valid canary completion in ledger
-            ledger._append_record({
+            canary_prompt_hash = hashlib.sha256(CANARY_NEUTRAL_PROMPT.encode("utf-8")).hexdigest()
+
+            # Record a valid 3-record canary sequence in ledger
+            intent = {
                 "record_type": "invocation_intent",
                 "logical_call_id": "canary_pilot_att_rec_001_01",
                 "invocation_ordinal": 1,
+                "prompt_hash": canary_prompt_hash,
                 "timestamp": time.time(),
-            })
-            ledger._append_record({
+            }
+            intent_bytes = (json.dumps(intent, sort_keys=True) + "\n").encode("utf-8")
+            intent_hash = hashlib.sha256(intent_bytes).hexdigest()
+
+            started = {
+                "record_type": "process_started",
+                "logical_call_id": "canary_pilot_att_rec_001_01",
+                "invocation_ordinal": 1,
+                "pid": 12345,
+                "intent_record_hash": intent_hash,
+                "timestamp": time.time(),
+            }
+            started_bytes = (json.dumps(started, sort_keys=True) + "\n").encode("utf-8")
+            started_hash = hashlib.sha256(started_bytes).hexdigest()
+
+            comp = {
                 "record_type": "invocation_completion",
                 "logical_call_id": "canary_pilot_att_rec_001_01",
                 "invocation_ordinal": 1,
+                "intent_record_hash": intent_hash,
+                "started_record_hash": started_hash,
                 "classification": "valid",
-                "tokens": 10,
-                "duration": 0.1,
+                "return_code": 0,
+                "tokens": 15,
+                "duration": 0.2,
                 "timestamp": time.time(),
-            })
+            }
+
+            ledger._append_record(intent)
+            ledger._append_record(started)
+            ledger._append_record(comp)
 
             # Copy master registration files
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_master_registration.json"), os.path.join(tmp_dir, "campaign2_master_registration.json"))
@@ -457,6 +506,33 @@ class TestC1_14_Round23Invariants(unittest.TestCase):
             self.assertTrue(data["canary_passed"])
             # Model should NOT have been called due to reconciliation
             self.assertFalse(model.generate_candidate.called)
+            self.assertEqual(data["canary_ordinals"][0]["tokens"], 15)
+
+    def test_zero_event_retry_load_bearing_invariant(self):
+        # 1 valid event followed by non-zero exit MUST NOT be retried
+        valid_event = json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "hello"}}) + "\n"
+        stdout_bytes = valid_event.encode("utf-8")
+        stderr_bytes = b"HTTP 429 Too Many Requests\n"
+        parsed = parse_and_classify_jsonl_output(stdout_bytes, stderr_bytes, return_code=1)
+        self.assertEqual(parsed["classification"], "invalidated")
+        self.assertGreater(parsed["events_parsed"], 0)
+
+    def test_jsonl_contract_rejects_duplicate_turn_completed_and_concatenation(self):
+        ev1 = json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "msg1"}})
+        ev2 = json.dumps({"type": "turn.completed", "usage": {"output_tokens": 10}})
+        ev3 = json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "msg2"}})
+        ev4 = json.dumps({"type": "turn.completed", "usage": {"output_tokens": 10}})
+
+        # Duplicate turn.completed is invalidated
+        dup_bytes = (ev1 + "\n" + ev2 + "\n" + ev3 + "\n" + ev4 + "\n").encode("utf-8")
+        parsed_dup = parse_and_classify_jsonl_output(dup_bytes, b"")
+        self.assertEqual(parsed_dup["classification"], "invalidated")
+
+        # Multiple messages extract ONLY final agent message
+        msg_bytes = (ev1 + "\n" + ev3 + "\n" + ev4 + "\n").encode("utf-8")
+        parsed_msg = parse_and_classify_jsonl_output(msg_bytes, b"")
+        self.assertEqual(parsed_msg["classification"], "valid")
+        self.assertEqual(parsed_msg["text"], "msg2")
 
     def test_spawn_retry_cumulative_accounting(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -516,6 +592,11 @@ class TestC1_14_Round23Invariants(unittest.TestCase):
 
             with self.assertRaises(AttemptLifecycleError):
                 ledger.verify_three_record_protocol()
+
+    def test_canonical_workspace_remains_clean(self):
+        # Verify no preflight registry or CPU gate record was created in BASE_DIR during tests
+        self.assertFalse(os.path.exists(os.path.join(BASE_DIR, "history", "campaign2_pilot_preflight_registry.json")))
+        self.assertFalse(os.path.exists(os.path.join(BASE_DIR, "campaign2_cpu_gate_record.json")))
 
 
 class TestC1_13_FullStageRefusal(unittest.TestCase):

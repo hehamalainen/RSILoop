@@ -179,8 +179,10 @@
   "model_name": "gpt-5.6-sol",
   "pilot_limits": {
     "confirmatory_tasks": 2,
+    "generation_replicates_k": 2,
     "max_candidates_per_task": 3,
-    "max_mutations_per_trial": 2,
+    "max_mutations_per_trial": 3,
+    "mutation_depth_M": 3,
     "num_trials": 2,
     "optimization_tasks": 2,
     "selection_tasks": 2,

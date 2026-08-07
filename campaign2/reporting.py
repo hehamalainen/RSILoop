@@ -26,9 +26,12 @@ def _fraction_mean(fracs: List[Fraction]) -> Fraction:
     return sum(fracs) / Fraction(len(fracs))
 
 
-def get_candidate_rlimits(suite: str = "suite_p") -> Dict[str, Any]:
+def get_candidate_rlimits(suite: str = "suite_p", registration: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Retrieve candidate active worker resource and budget ceilings for a given suite."""
-    max_calls = 202 if suite.lower() == "suite_c" else 86
+    if registration and isinstance(registration, dict) and "call_arithmetic" in registration:
+        max_calls = registration["call_arithmetic"].get("per_trial_benchmark_logical_calls", 86)
+    else:
+        max_calls = 202 if suite.lower() == "suite_c" else 86
     return {
         "cpu_seconds": 15,
         "nofile": 64,
@@ -141,7 +144,7 @@ def generate_schema3_report(
             "launch_lock_sha256": launch_lock_hash,
         },
         "ledger_file": ledger_path,
-        "active_rlimits": get_candidate_rlimits(suite=outcome.get("suite", "suite_p")),
+        "active_rlimits": get_candidate_rlimits(suite=outcome.get("suite", "suite_p"), registration=registration),
         "prescientific_cpu_gate": cpu_gate_record if cpu_gate_record else {},
         "primary_outcome": {
             "opt_sel_baseline_aggregate": outcome.get("opt_sel_baseline_aggregate", "0"),
