@@ -534,65 +534,65 @@ class SolModelProvider(ModelProvider):
         max_attempts = 3
         reg_file = os.path.join(self.state_root, "campaign2_master_registration.json")
         if os.path.exists(reg_file):
-            try:
-                with open(reg_file, "r", encoding="utf-8") as f:
-                    reg_data = json.load(f)
-                max_attempts = reg_data.get("call_arithmetic", {}).get("retry_cap", 3)
-            except Exception:
-                pass
+            from campaign2.registration import verify_master_registration
+            reg_data = verify_master_registration(self.state_root)
+            max_attempts = reg_data.get("execution_limits", {}).get("max_invocation_attempts", 3)
+
         last_exception = None
 
         for invocation_ordinal in range(1, max_attempts + 1):
-            scratch_dir = create_fresh_invocation_scratch_dir(workspace_root=self.state_root, is_mock=self.mock_subprocess)
-            sb_path = render_seatbelt_profile(scratch_dir, self.artifact_root)
-
-            # Bind sandbox_profile_hash to rendered generator.sb bytes (P1-5)
-            with open(sb_path, "rb") as f:
-                rendered_sb_bytes = f.read()
-            sandbox_profile_hash = hashlib.sha256(rendered_sb_bytes).hexdigest()
-
-            cmd = build_codex_cli_command(self.model_name, scratch_dir, sb_path)
-            env = build_allowlisted_env(scratch_dir)
-
-            argv_hash = hashlib.sha256(json.dumps(cmd).encode("utf-8")).hexdigest()
-            env_hash = hashlib.sha256(json.dumps(env, sort_keys=True).encode("utf-8")).hexdigest()
-            cwd_hash = hashlib.sha256(scratch_dir.encode("utf-8")).hexdigest()
-
-            limits = {
-                "call_wall_limit_seconds": CALL_WALL_LIMIT_SECONDS,
-                "max_stdout_bytes": MAX_STDOUT_BYTES,
-                "max_stderr_bytes": MAX_STDERR_BYTES,
-            }
-
-            # 1. Record invocation_intent BEFORE spawn (fsynced)
-            intent_record = {
-                "record_type": "invocation_intent",
-                "logical_call_id": logical_call_id,
-                "invocation_ordinal": invocation_ordinal,
-                "schedule_coordinate": {"logical_call_id": logical_call_id, "ordinal": invocation_ordinal},
-                "argv_hash": argv_hash,
-                "env_hash": env_hash,
-                "cwd_hash": cwd_hash,
-                "prompt_hash": prompt_hash,
-                "task_file_hash": task_file_hash,
-                "sandbox_profile_hash": sandbox_profile_hash,
-                "input_hash": input_hash,
-                "applicable_limits": limits,
-                "timestamp": time.time(),
-            }
-            intent_bytes = (json.dumps(intent_record, sort_keys=True) + "\n").encode("utf-8")
-            intent_hash = hashlib.sha256(intent_bytes).hexdigest()
-
-            if self.ledger:
-                self.ledger._append_record(intent_record)
-
-            # 2. Attempt spawn
+            scratch_dir = None
             proc = None
-            pid = None
             t0 = time.monotonic()
             t0_wall = time.time()
 
             try:
+                scratch_dir = create_fresh_invocation_scratch_dir(workspace_root=self.state_root, is_mock=self.mock_subprocess)
+                sb_path = render_seatbelt_profile(scratch_dir, self.artifact_root)
+
+                # Bind sandbox_profile_hash to rendered generator.sb bytes (P1-5)
+                with open(sb_path, "rb") as f:
+                    rendered_sb_bytes = f.read()
+                sandbox_profile_hash = hashlib.sha256(rendered_sb_bytes).hexdigest()
+
+                cmd = build_codex_cli_command(self.model_name, scratch_dir, sb_path)
+                env = build_allowlisted_env(scratch_dir)
+
+                argv_hash = hashlib.sha256(json.dumps(cmd).encode("utf-8")).hexdigest()
+                env_hash = hashlib.sha256(json.dumps(env, sort_keys=True).encode("utf-8")).hexdigest()
+                cwd_hash = hashlib.sha256(scratch_dir.encode("utf-8")).hexdigest()
+
+                limits = {
+                    "call_wall_limit_seconds": CALL_WALL_LIMIT_SECONDS,
+                    "max_stdout_bytes": MAX_STDOUT_BYTES,
+                    "max_stderr_bytes": MAX_STDERR_BYTES,
+                }
+
+                # 1. Record invocation_intent BEFORE spawn (fsynced)
+                intent_record = {
+                    "record_type": "invocation_intent",
+                    "logical_call_id": logical_call_id,
+                    "invocation_ordinal": invocation_ordinal,
+                    "schedule_coordinate": {"logical_call_id": logical_call_id, "ordinal": invocation_ordinal},
+                    "argv_hash": argv_hash,
+                    "env_hash": env_hash,
+                    "cwd_hash": cwd_hash,
+                    "prompt_hash": prompt_hash,
+                    "task_file_hash": task_file_hash,
+                    "sandbox_profile_hash": sandbox_profile_hash,
+                    "input_hash": input_hash,
+                    "applicable_limits": limits,
+                    "timestamp": time.time(),
+                }
+                intent_bytes = (json.dumps(intent_record, sort_keys=True) + "\n").encode("utf-8")
+                intent_hash = hashlib.sha256(intent_bytes).hexdigest()
+
+                if self.ledger:
+                    self.ledger._append_record(intent_record)
+
+                # 2. Attempt spawn
+                pid = None
+
                 try:
                     if self.mock_subprocess:
                         pid = 99999 + invocation_ordinal
@@ -725,12 +725,13 @@ class SolModelProvider(ModelProvider):
                         pass
                 t1 = time.monotonic()
                 duration_sec = t1 - t0
-                try:
-                    shutil.rmtree(scratch_dir, ignore_errors=False)
-                except Exception:
-                    pass
-                if os.path.exists(scratch_dir):
-                    raise ExecutableBoundaryError(f"Scratch directory cleanup failed or residue remains: {scratch_dir}")
+                if scratch_dir and os.path.exists(scratch_dir):
+                    try:
+                        shutil.rmtree(scratch_dir, ignore_errors=False)
+                    except Exception:
+                        pass
+                    if os.path.exists(scratch_dir):
+                        raise ExecutableBoundaryError(f"Scratch directory cleanup failed or residue remains: {scratch_dir}")
 
             parsed = parse_and_classify_jsonl_output(stdout_bytes, stderr_bytes, return_code)
 

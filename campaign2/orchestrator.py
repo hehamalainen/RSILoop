@@ -306,6 +306,11 @@ class Campaign2Orchestrator:
         self.trio_seed = registration["trio_ordering_master_seed"]
         self.trio_orderings = [tuple(t) for t in registration["frozen_trio_orderings"]]
 
+        gen_k = registration.get("execution_limits", {}).get("generation_replicates_k") or registration.get("pilot_limits", {}).get("generation_replicates_k", 2)
+        if gen_k != 2:
+            raise OrchestratorError(f"Master registration generation_replicates_k mismatch: expected 2, got {gen_k}")
+        self.generation_replicates_k = gen_k
+
         if suite == "suite_p" and registration:
             p_lims = registration.get("pilot_limits", {})
             c_arith = registration.get("call_arithmetic", {})
@@ -443,7 +448,7 @@ class Campaign2Orchestrator:
         result.started_at = time.time()
 
         baseline_body = "# Initial default strategy body\n"
-        k = 2
+        k = self.generation_replicates_k
 
         # ---- PHASE 1: Baseline evaluation on opt/sel tasks ----
         phase1_call_count = 0

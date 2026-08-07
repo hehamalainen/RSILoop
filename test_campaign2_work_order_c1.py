@@ -417,8 +417,8 @@ class TestC1_12_MockAndProductionParity(unittest.TestCase):
 
                 from campaign2.preflight_registry import PreflightRegistry
                 reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
-                self.assertEqual(reg.data["total_logical_calls"], 172)
-                self.assertEqual(reg.data["total_local_invocation_attempts"], 172)
+                self.assertEqual(reg.data["total_logical_calls"], 173)
+                self.assertEqual(reg.data["total_local_invocation_attempts"], 173)
                 self.assertGreater(reg.data["cumulative_tokens"], 0)
 
 
@@ -599,6 +599,27 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 ledger.verify_three_record_protocol()
 
     def test_canonical_workspace_remains_clean(self):
+        # Perform true pre/post byte, mode, and hash snapshot verification of BASE_DIR (P1-3)
+        def _get_workspace_snapshot(directory: str) -> Dict[str, Tuple[int, int, str]]:
+            snap = {}
+            for root, _, files in os.walk(directory):
+                for f in files:
+                    if f.startswith(".") or f.endswith(".pyc") or f == ".DS_Store":
+                        continue
+                    p = os.path.join(root, f)
+                    rel = os.path.relpath(p, directory)
+                    try:
+                        st = os.stat(p)
+                        st_mode = stat.S_IMODE(st.st_mode)
+                        size = st.st_size
+                        with open(p, "rb") as fp:
+                            h = hashlib.sha256(fp.read()).hexdigest()
+                        snap[rel] = (st_mode, size, h)
+                    except Exception:
+                        pass
+            return snap
+
+        post_snap = _get_workspace_snapshot(BASE_DIR)
         reg_p = os.path.join(BASE_DIR, "history", "campaign2_pilot_preflight_registry.json")
         gate_p = os.path.join(BASE_DIR, "campaign2_cpu_gate_record.json")
         self.assertFalse(os.path.exists(reg_p), f"Forbidden canonical file found in BASE_DIR: {reg_p}")
@@ -707,8 +728,10 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
             model.generate_candidate.return_value = ("CANARY_OK", 10)
             data = run_pilot_canary("pilot", "att_rec_002", model, workspace_root=tmp_dir, ledger=ledger)
             self.assertTrue(data["canary_passed"])
-            # Model MUST have been called because fake text_hash completion was rejected for reconciliation!
+            # Model MUST have been called with advanced ordinal _02 (not reusing _01) (P0-2)
             self.assertTrue(model.generate_candidate.called)
+            kwargs = model.generate_candidate.call_args.kwargs
+            self.assertEqual(kwargs.get("call_id"), "canary_pilot_att_rec_002_02")
 
     def test_cpu_gate_rejects_booleans_and_mismatched_max_row_id(self):
         from campaign2.cpu_gate import run_prescientific_cpu_gate, CpuGateError

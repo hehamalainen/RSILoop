@@ -140,8 +140,18 @@ class PreflightRegistry:
 
         self.data = data
 
+    def _reload(self) -> None:
+        """Reload latest registry state from disk for single-writer consistency (P0-1)."""
+        if os.path.exists(self.registry_path):
+            try:
+                with open(self.registry_path, "r", encoding="utf-8") as f:
+                    self.data = json.load(f)
+            except Exception:
+                pass
+
     def bind_attempt(self, attempt_id: str) -> None:
         """Bind attempt ID to preflight registry."""
+        self._reload()
         attempts = self.data.get("attempt_ids", [])
         if attempt_id not in attempts:
             attempts.append(attempt_id)
@@ -150,6 +160,7 @@ class PreflightRegistry:
 
     def record_canary_attempt(self, attempt_id: str, status: str, tokens: int, active_time: float, usage_known: bool) -> None:
         """Record canary attempt outcome durably."""
+        self._reload()
         attempts_log = self.data.get("canary_attempts", [])
         attempts_log.append({
             "attempt_id": attempt_id,
@@ -164,13 +175,19 @@ class PreflightRegistry:
 
     def record_canary_passed(self, attempt_id: str, canary_log: List[dict], tokens_used: int, active_time: float) -> None:
         """Record canary pass and bind attempt ID."""
+        self._reload()
         self.data["canary_passed"] = True
         self.data["accepted_attempt_id"] = attempt_id
         self.data["canary_ordinals"] = canary_log
-        self.bind_attempt(attempt_id)
+        attempts = self.data.get("attempt_ids", [])
+        if attempt_id not in attempts:
+            attempts.append(attempt_id)
+            self.data["attempt_ids"] = attempts
+        self._save_data(self.data)
 
     def record_usage(self, tokens_used: int, active_time: float, logical_calls: int = 1, local_attempts: int = 1, logical_call_id: str = "") -> None:
         """Accumulate active time, tokens, and call counts across trials and retries while enforcing stage limits."""
+        self._reload()
         seen = set(self.data.get("seen_logical_call_ids", []))
         inc_calls = 0
         if logical_call_id:
@@ -194,7 +211,7 @@ class PreflightRegistry:
         # Durably record overshooting usage BEFORE checking limit thresholds
         self._save_data(self.data)
 
-        # Load dynamic limit thresholds from master registration if present
+        # Authenticate master registration limits (P0-3)
         max_tokens = MAX_PILOT_TOKENS
         max_active = MAX_PILOT_ACTIVE_SECONDS
         max_calls = MAX_LOGICAL_CALLS
@@ -202,22 +219,19 @@ class PreflightRegistry:
 
         reg_file_p = os.path.join(self.workspace_root, "campaign2_master_registration.json")
         if os.path.exists(reg_file_p):
-            try:
-                with open(reg_file_p, "r", encoding="utf-8") as f:
-                    reg_data = json.load(f)
-                exec_lims = reg_data.get("execution_limits", {})
-                call_arith = reg_data.get("call_arithmetic", {})
+            from campaign2.registration import verify_master_registration
+            reg_data = verify_master_registration(self.workspace_root)
+            exec_lims = reg_data.get("execution_limits", {})
+            call_arith = reg_data.get("call_arithmetic", {})
 
-                if "max_output_tokens" in exec_lims:
-                    max_tokens = exec_lims["max_output_tokens"]
-                if "max_active_seconds" in exec_lims:
-                    max_active = float(exec_lims["max_active_seconds"])
-                if "pilot_max_logical_calls" in call_arith:
-                    max_calls = call_arith["pilot_max_logical_calls"]
-                if "max_local_invocation_attempts" in call_arith:
-                    max_attempts = call_arith["max_local_invocation_attempts"]
-            except Exception:
-                pass
+            if "max_output_tokens" in exec_lims:
+                max_tokens = exec_lims["max_output_tokens"]
+            if "max_active_seconds" in exec_lims:
+                max_active = float(exec_lims["max_active_seconds"])
+            if "pilot_max_logical_calls" in call_arith:
+                max_calls = call_arith["pilot_max_logical_calls"]
+            if "max_local_invocation_attempts" in call_arith:
+                max_attempts = call_arith["max_local_invocation_attempts"]
 
         if new_tokens > max_tokens:
             raise StageLimitsExceededError(
@@ -271,16 +285,16 @@ def run_pilot_canary(
     # Check AttemptLedger to reconcile completed canary call if provider completion succeeded before registry update
     candidate_ledger_paths = []
     if ledger and hasattr(ledger, "ledger_path") and ledger.ledger_path:
-        candidate_ledger_paths.append(ledger.ledger_path)
-
-    candidate_ledger_paths.extend([
-        os.path.join(workspace_root, "history", attempt_id, f"campaign2_{stage}_ledger.jsonl"),
-        os.path.join(workspace_root, "history", attempt_id, "ledger.jsonl"),
-        os.path.join(workspace_root, attempt_id, f"campaign2_{stage}_ledger.jsonl"),
-        os.path.join(workspace_root, attempt_id, "ledger.jsonl"),
-        os.path.join(registry.history_dir, f"campaign2_{attempt_id}_attempt_ledger.jsonl"),
-        os.path.join(workspace_root, "ledger.jsonl"),
-    ])
+        candidate_ledger_paths = [ledger.ledger_path]
+    else:
+        candidate_ledger_paths = [
+            os.path.join(workspace_root, "history", attempt_id, f"campaign2_{stage}_ledger.jsonl"),
+            os.path.join(workspace_root, "history", attempt_id, "ledger.jsonl"),
+            os.path.join(workspace_root, attempt_id, f"campaign2_{stage}_ledger.jsonl"),
+            os.path.join(workspace_root, attempt_id, "ledger.jsonl"),
+            os.path.join(registry.history_dir, f"campaign2_{attempt_id}_attempt_ledger.jsonl"),
+            os.path.join(workspace_root, "ledger.jsonl"),
+        ]
 
     expected_canary_prompt_hash = hashlib.sha256(CANARY_NEUTRAL_PROMPT.encode("utf-8")).hexdigest()
     expected_canary_text_hash = hashlib.sha256(CANARY_EXPECTED_RESPONSE.encode("utf-8")).hexdigest()
@@ -291,14 +305,20 @@ def run_pilot_canary(
             ledger_obj.verify_three_record_protocol()
             entries = ledger_obj.get_entries()
 
-            intents = {
-                e["logical_call_id"]: (e, hashlib.sha256((json.dumps(e, sort_keys=True) + "\n").encode("utf-8")).hexdigest())
-                for e in entries
-                if e.get("record_type") == "invocation_intent"
-                and str(e.get("logical_call_id", "")).startswith(f"canary_{stage}_{attempt_id}")
-            }
+            intents = sorted(
+                [
+                    e for e in entries
+                    if e.get("record_type") == "invocation_intent"
+                    and str(e.get("logical_call_id", "")).startswith(f"canary_{stage}_{attempt_id}")
+                ],
+                key=lambda x: str(x.get("logical_call_id", ""))
+            )
 
-            for call_id, (intent_rec, intent_hash) in intents.items():
+            for intent_rec in intents:
+                call_id = intent_rec.get("logical_call_id", "")
+                intent_bytes = (json.dumps(intent_rec, sort_keys=True) + "\n").encode("utf-8")
+                intent_hash = hashlib.sha256(intent_bytes).hexdigest()
+
                 if intent_rec.get("prompt_hash") != expected_canary_prompt_hash:
                     raise CanaryFailureError(f"Ledger canary intent '{call_id}' prompt_hash mismatch during reconciliation")
 
@@ -307,29 +327,44 @@ def run_pilot_canary(
                     if e.get("record_type") == "invocation_completion"
                     and e.get("logical_call_id") == call_id
                     and e.get("intent_record_hash") == intent_hash
-                    and e.get("classification") == "valid"
-                    and e.get("return_code") == 0
-                    and e.get("text_hash") == expected_canary_text_hash
-                    and type(e.get("tokens")) is not bool and isinstance(e.get("tokens"), int) and e.get("tokens") >= 0
-                    and type(e.get("duration")) is not bool and isinstance(e.get("duration"), (int, float)) and e.get("duration") >= 0.0
                 ]
 
                 if matching_completes:
                     comp = matching_completes[-1]
                     tokens = comp.get("tokens", 0)
                     duration = comp.get("duration", 0.0)
-                    canary_record = {
-                        "call_id": call_id,
-                        "status": "passed",
-                        "tokens": tokens,
-                        "duration": duration,
-                        "attempts": intent_rec.get("invocation_ordinal", 1),
-                        "usage_known": True,
-                    }
-                    registry.record_canary_attempt(attempt_id, "passed", tokens, duration, True)
-                    registry.record_canary_passed(attempt_id, [canary_record], tokens, duration)
-                    publish_scientific_start(stage=stage, attempt_id=attempt_id, workspace_root=workspace_root)
-                    return registry.data
+
+                    is_valid_pass = (
+                        comp.get("classification") == "valid"
+                        and comp.get("return_code") == 0
+                        and comp.get("text_hash") == expected_canary_text_hash
+                        and type(tokens) is not bool and isinstance(tokens, int) and tokens >= 0
+                        and type(duration) is not bool and isinstance(duration, (int, float)) and duration >= 0.0
+                    )
+
+                    if is_valid_pass:
+                        canary_record = {
+                            "call_id": call_id,
+                            "status": "passed",
+                            "tokens": tokens,
+                            "duration": duration,
+                            "attempts": intent_rec.get("invocation_ordinal", 1),
+                            "usage_known": True,
+                        }
+                        registry.record_canary_attempt(attempt_id, "passed", tokens, duration, True)
+                        registry.record_canary_passed(attempt_id, [canary_record], tokens, duration)
+                        publish_scientific_start(stage=stage, attempt_id=attempt_id, workspace_root=workspace_root)
+                        return registry.data
+                    else:
+                        # Prior completed canary call failed text authentication or return code!
+                        # Reconcile as failed attempt so canary_attempts log advances and call_id is NOT reused (P0-2)
+                        existing_attempts = registry.data.get("canary_attempts", [])
+                        already_logged = any(a.get("call_id") == call_id for a in existing_attempts)
+                        if not already_logged:
+                            registry.record_canary_attempt(attempt_id, "failed_content", tokens, duration, True)
+
+    # Reload latest registry data after reconciliation phase
+    registry._reload()
 
     # Check max canary attempts cap (3 attempts max)
     attempts_log = registry.data.get("canary_attempts", [])
