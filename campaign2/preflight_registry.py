@@ -22,6 +22,10 @@ MAX_LOGICAL_CALLS = 175
 MAX_LOCAL_INVOCATION_ATTEMPTS = 525
 
 
+CANARY_NEUTRAL_PROMPT = "Return the exact string: CANARY_OK"
+CANARY_EXPECTED_RESPONSE = "CANARY_OK"
+
+
 class PreflightRegistryError(RuntimeError):
     """Base exception for preflight registry failures."""
     pass
@@ -50,18 +54,6 @@ class PreflightRegistry:
         self.data = self._load_or_init()
 
     def _load_or_init(self) -> Dict[str, Any]:
-        if os.path.exists(self.registry_path):
-            if os.path.islink(self.registry_path) or not os.path.isfile(self.registry_path):
-                raise PreflightRegistryError(f"Preflight registry must be a regular non-symlink file: {self.registry_path}")
-            st_mode = stat.S_IMODE(os.stat(self.registry_path).st_mode)
-            if st_mode != 0o444:
-                raise PreflightRegistryError(f"Preflight registry mode must be 0o444, got {oct(st_mode)}")
-            try:
-                with open(self.registry_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as exc:
-                raise PreflightRegistryError(f"Corrupted preflight registry: {exc}") from exc
-
         reg_file_p = os.path.join(self.workspace_root, "campaign2_master_registration.json")
         reg_hash = ""
         if os.path.exists(reg_file_p):
@@ -73,6 +65,29 @@ class PreflightRegistry:
         if os.path.exists(lock_file_p):
             with open(lock_file_p, "rb") as f:
                 lock_hash = hashlib.sha256(f.read()).hexdigest()
+
+        if os.path.exists(self.registry_path):
+            if os.path.islink(self.registry_path) or not os.path.isfile(self.registry_path):
+                raise PreflightRegistryError(f"Preflight registry must be a regular non-symlink file: {self.registry_path}")
+            st_mode = stat.S_IMODE(os.stat(self.registry_path).st_mode)
+            if st_mode != 0o444:
+                raise PreflightRegistryError(f"Preflight registry mode must be 0o444, got {oct(st_mode)}")
+            try:
+                with open(self.registry_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as exc:
+                raise PreflightRegistryError(f"Corrupted preflight registry: {exc}") from exc
+
+            # Authenticate registration_hash and launch_lock_hash against current files
+            if reg_hash and data.get("registration_hash") and data["registration_hash"] != reg_hash:
+                raise PreflightRegistryError(
+                    f"Preflight registry registration_hash mismatch: registry has '{data.get('registration_hash')}', disk has '{reg_hash}'"
+                )
+            if lock_hash and data.get("launch_lock_hash") and data["launch_lock_hash"] != lock_hash:
+                raise PreflightRegistryError(
+                    f"Preflight registry launch_lock_hash mismatch: registry has '{data.get('launch_lock_hash')}', disk has '{lock_hash}'"
+                )
+            return data
 
         initial_data = {
             "record_type": "preflight_registry",
@@ -138,8 +153,7 @@ class PreflightRegistry:
         self._save_data(self.data)
 
     def record_canary_passed(self, attempt_id: str, canary_log: List[dict], tokens_used: int, active_time: float) -> None:
-        """Record canary pass and bind attempt ID while enforcing stage limits."""
-        self.record_usage(tokens_used, active_time, logical_calls=len(canary_log), local_attempts=sum(c.get("attempts", 1) for c in canary_log))
+        """Record canary pass and bind attempt ID."""
         self.data["canary_passed"] = True
         self.data["accepted_attempt_id"] = attempt_id
         self.data["canary_ordinals"] = canary_log
@@ -151,6 +165,14 @@ class PreflightRegistry:
         new_active = self.data["cumulative_active_time"] + active_time
         new_calls = self.data["total_logical_calls"] + logical_calls
         new_attempts = self.data["total_local_invocation_attempts"] + local_attempts
+
+        self.data["cumulative_tokens"] = new_tokens
+        self.data["cumulative_active_time"] = new_active
+        self.data["total_logical_calls"] = new_calls
+        self.data["total_local_invocation_attempts"] = new_attempts
+
+        # Durably record overshooting usage BEFORE checking limit thresholds
+        self._save_data(self.data)
 
         if new_tokens > MAX_PILOT_TOKENS:
             raise StageLimitsExceededError(
@@ -169,12 +191,6 @@ class PreflightRegistry:
                 f"Pilot max local invocation attempts exceeded: {new_attempts} > {MAX_LOCAL_INVOCATION_ATTEMPTS}"
             )
 
-        self.data["cumulative_tokens"] = new_tokens
-        self.data["cumulative_active_time"] = new_active
-        self.data["total_logical_calls"] = new_calls
-        self.data["total_local_invocation_attempts"] = new_attempts
-        self._save_data(self.data)
-
 
 def run_pilot_canary(
     stage: str,
@@ -184,20 +200,25 @@ def run_pilot_canary(
 ) -> Dict[str, Any]:
     """
     Executes preflight canary BEFORE SCIENTIFIC_START.
-    Canary consists of 1 model generation call.
-    If canary passes, binds attempt ID in registry.
+    Canary uses frozen neutral prompt CANARY_NEUTRAL_PROMPT expecting CANARY_OK.
+    If canary passes, binds attempt ID in registry and publishes SCIENTIFIC_START.
     If canary fails, fresh attempt permitted ONLY if usage is fully known or provably 0.
     Maximum 3 canary attempts permitted across pilot stage.
     """
+    from campaign2.attempt_lifecycle import publish_scientific_start
+
     registry = PreflightRegistry(stage=stage, workspace_root=workspace_root)
 
-    # If canary already passed for this accepted attempt, skip canary and proceed directly
+    # If canary already passed for this accepted attempt, reconcile SCIENTIFIC_START marker if missing
     if registry.data.get("canary_passed", False):
         accepted_id = registry.data.get("accepted_attempt_id", "")
         if accepted_id and accepted_id != attempt_id:
             raise CanaryFailureError(
                 f"Preflight registry bound accepted attempt '{accepted_id}', cannot run with '{attempt_id}'"
             )
+        start_marker_p = os.path.join(registry.history_dir, f"campaign2_{stage}_scientific_start.json")
+        if not os.path.exists(start_marker_p):
+            publish_scientific_start(stage=stage, attempt_id=attempt_id, workspace_root=workspace_root)
         return registry.data
 
     # Check max canary attempts cap (3 attempts max)
@@ -207,36 +228,29 @@ def run_pilot_canary(
             f"Preflight canary has exhausted maximum allowed 3 attempts (count={len(attempts_log)}). Pilot BLOCKED."
         )
 
-    # Execute 1 canary generation call using dedicated canary task problem specification
     canary_call_id = f"canary_{stage}_{attempt_id}_{len(attempts_log) + 1:02d}"
-    effective_prompt = (
-        "def solve():\n"
-        "    return 'canary_test'\n"
-    )
 
     t0 = time.monotonic()
     canary_log = []
     try:
         if hasattr(model_provider, "generate_candidate"):
             code, tokens = model_provider.generate_candidate(
-                task_id="c_f1_01_log_stream_parser",
-                effective_prompt=effective_prompt,
+                task_id="canary",
+                effective_prompt=CANARY_NEUTRAL_PROMPT,
                 call_id=canary_call_id,
             )
         else:
-            code, tokens = "def solve(): return 'canary_test'\n", 10
+            code, tokens = "CANARY_OK", 10
 
         t1 = time.monotonic()
         active_sec = t1 - t0
 
-        # Validate canary content
-        if not code or ("solve" not in code and "canary_test" not in code and "# malformed fence" not in code):
+        stripped_code = code.strip()
+        if stripped_code != CANARY_EXPECTED_RESPONSE and "CANARY_OK" not in stripped_code:
             registry.record_canary_attempt(attempt_id, "failed_content", tokens, active_sec, True)
-            raise CanaryFailureError(f"Canary response content invalid for attempt '{attempt_id}': {code}")
-
-        if "# malformed fence" in code:
-            registry.record_canary_attempt(attempt_id, "malformed_fence", tokens, active_sec, True)
-            raise CanaryFailureError(f"Canary response contained malformed fence for attempt '{attempt_id}'")
+            raise CanaryFailureError(
+                f"Canary response content mismatch for attempt '{attempt_id}': expected '{CANARY_EXPECTED_RESPONSE}', got '{stripped_code}'"
+            )
 
         canary_record = {
             "call_id": canary_call_id,
@@ -249,6 +263,9 @@ def run_pilot_canary(
         canary_log.append(canary_record)
         registry.record_canary_attempt(attempt_id, "passed", tokens, active_sec, True)
         registry.record_canary_passed(attempt_id, canary_log, tokens, active_sec)
+
+        # Publish SCIENTIFIC_START immediately after canary passes
+        publish_scientific_start(stage=stage, attempt_id=attempt_id, workspace_root=workspace_root)
         return registry.data
 
     except CanaryFailureError:

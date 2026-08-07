@@ -514,52 +514,66 @@ class AttemptLedger:
         intents = {}
         started = {}
         completes = {}
+        call_ordinals = {}
 
-        for entry in entries:
+        for idx, entry in enumerate(entries):
             r_type = entry.get("record_type")
-            if r_type == "invocation_intent":
-                cid = entry.get("logical_call_id")
-                ord_num = entry.get("invocation_ordinal", 1)
+            cid = entry.get("logical_call_id")
+            ord_num = entry.get("invocation_ordinal")
+
+            if r_type in ("invocation_intent", "process_started", "invocation_completion"):
+                if not cid or not isinstance(ord_num, int) or ord_num <= 0:
+                    raise AttemptLifecycleError(f"Invalid call_id or ordinal in record {r_type}: cid={cid}, ord={ord_num}")
                 key = (cid, ord_num)
+
+            if r_type == "invocation_intent":
                 if key in intents:
                     raise AttemptLifecycleError(f"Duplicate invocation_intent for key {key}")
+
+                expected_ord = len(call_ordinals.get(cid, [])) + 1
+                if ord_num != expected_ord:
+                    raise AttemptLifecycleError(f"Non-contiguous or non-monotonic invocation_ordinal for call_id '{cid}': expected {expected_ord}, got {ord_num}")
+                call_ordinals.setdefault(cid, []).append(ord_num)
+
                 rec_bytes = (json.dumps(entry, sort_keys=True) + "\n").encode("utf-8")
                 rec_hash = hashlib.sha256(rec_bytes).hexdigest()
-                intents[key] = (entry, rec_hash)
+                intents[key] = (entry, rec_hash, idx)
+
             elif r_type == "process_started":
-                cid = entry.get("logical_call_id")
-                ord_num = entry.get("invocation_ordinal", 1)
-                key = (cid, ord_num)
                 if key in started:
                     raise AttemptLifecycleError(f"Duplicate process_started for key {key}")
                 if key not in intents:
-                    raise AttemptLifecycleError(f"process_started recorded without invocation_intent for key {key}")
-                intent_rec, intent_hash = intents[key]
+                    raise AttemptLifecycleError(f"process_started recorded before invocation_intent for key {key}")
+                intent_rec, intent_hash, intent_idx = intents[key]
+                if idx < intent_idx:
+                    raise AttemptLifecycleError(f"process_started index {idx} precedes invocation_intent index {intent_idx} for key {key}")
                 if entry.get("intent_record_hash") != intent_hash:
                     raise AttemptLifecycleError(f"process_started intent_record_hash mismatch for key {key}")
                 rec_bytes = (json.dumps(entry, sort_keys=True) + "\n").encode("utf-8")
                 rec_hash = hashlib.sha256(rec_bytes).hexdigest()
-                started[key] = (entry, rec_hash)
+                started[key] = (entry, rec_hash, idx)
+
             elif r_type == "invocation_completion":
-                cid = entry.get("logical_call_id")
-                ord_num = entry.get("invocation_ordinal", 1)
-                key = (cid, ord_num)
                 if key in completes:
                     raise AttemptLifecycleError(f"Duplicate invocation_completion for key {key}")
                 if key not in intents:
-                    raise AttemptLifecycleError(f"invocation_completion recorded without invocation_intent for key {key}")
-                intent_rec, intent_hash = intents[key]
+                    raise AttemptLifecycleError(f"invocation_completion recorded before invocation_intent for key {key}")
+                intent_rec, intent_hash, intent_idx = intents[key]
+                if idx < intent_idx:
+                    raise AttemptLifecycleError(f"invocation_completion index {idx} precedes invocation_intent index {intent_idx} for key {key}")
                 if entry.get("intent_record_hash") != intent_hash:
                     raise AttemptLifecycleError(f"invocation_completion intent_record_hash mismatch for key {key}")
 
                 if key in started:
-                    st_rec, st_hash = started[key]
+                    st_rec, st_hash, st_idx = started[key]
+                    if idx < st_idx:
+                        raise AttemptLifecycleError(f"invocation_completion index {idx} precedes process_started index {st_idx} for key {key}")
                     if entry.get("started_record_hash") != st_hash:
                         raise AttemptLifecycleError(f"invocation_completion started_record_hash mismatch for key {key}")
                 elif entry.get("parse_state") != "spawn_failure":
                     raise AttemptLifecycleError(f"invocation_completion without process_started must be spawn_failure for key {key}")
 
-                completes[key] = (entry, None)
+                completes[key] = (entry, None, idx)
 
         for key in intents:
             if key not in completes:

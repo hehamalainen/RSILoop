@@ -161,6 +161,26 @@ def generate_master_registration(workspace_root: str = BASE_DIR) -> Tuple[str, s
         CONTROL_REFORMULATION_HASH,
     )
 
+    CANDIDATE_WRAPPER = "{immutable_contract}\n\n---PROBLEM SPECIFICATION---\n\n{problem_text}{delimiter}{mutable_body}"
+    CANDIDATE_WRAPPER_HASH = hashlib.sha256(CANDIDATE_WRAPPER.encode("utf-8")).hexdigest()
+    MUTATION_WRAPPER = "# MUTATION REQUEST\n# Failure Context:\n{failure_context}\n\n# Mutable Strategy Body:\n{mutable_body}\n"
+    MUTATION_WRAPPER_HASH = hashlib.sha256(MUTATION_WRAPPER.encode("utf-8")).hexdigest()
+
+    PILOT_LIMITS = {
+        "num_trials": 10,
+        "max_mutations_per_trial": 3,
+        "trio_slots": 3,
+        "optimization_tasks": 8,
+        "selection_tasks": 8,
+        "confirmatory_tasks": 8,
+        "structural_holdout_tasks": 6,
+    }
+
+    CALL_ARITHMETIC = {
+        "pilot_logical_calls": 86,
+        "pilot_max_local_attempts": 258,
+    }
+
     reg_data = {
         "schema_version": "3",
         "campaign_id": "campaign_2_gpt5_6_sol",
@@ -173,6 +193,8 @@ def generate_master_registration(workspace_root: str = BASE_DIR) -> Tuple[str, s
         "evaluable_candidate_definition": EVALUABLE_CANDIDATE_DEFINITION,
         "frozen_trio_orderings": [list(t) for t in FROZEN_TRIO_ORDERINGS],
         "arm_assignment_vectors": arm_vectors,
+        "pilot_limits": PILOT_LIMITS,
+        "call_arithmetic": CALL_ARITHMETIC,
         "execution_limits": {
             "max_output_tokens": 600000,
             "max_active_seconds": 28800.0,
@@ -195,8 +217,10 @@ def generate_master_registration(workspace_root: str = BASE_DIR) -> Tuple[str, s
             "candidate_template_bytes_hash": IMMUTABLE_CONTRACT_HASH,
             "mutation_template_bytes": CONTROL_REFORMULATION_TEXT,
             "mutation_template_bytes_hash": CONTROL_REFORMULATION_HASH,
-            "candidate_wrapper": "{immutable_contract}\n\n---PROBLEM SPECIFICATION---\n\n{problem_text}{delimiter}{mutable_body}",
-            "mutation_wrapper": "# MUTATION REQUEST\n# Failure Context:\n{failure_context}\n\n# Mutable Strategy Body:\n{mutable_body}\n",
+            "candidate_wrapper": CANDIDATE_WRAPPER,
+            "candidate_wrapper_hash": CANDIDATE_WRAPPER_HASH,
+            "mutation_wrapper": MUTATION_WRAPPER,
+            "mutation_wrapper_hash": MUTATION_WRAPPER_HASH,
         },
         "arm_assignment_derivation": {
             "domain": "rsi_loop/campaign2/arm_assignment",
@@ -323,8 +347,19 @@ def verify_master_registration(workspace_root: str = BASE_DIR) -> Dict[str, Any]
         raise ValueError(f"Reasoning setting mismatch: expected 'cli_0.144.5_default', got {data.get('reasoning_setting')}")
 
     limits = data.get("execution_limits", {})
-    if limits.get("max_output_tokens") != 600000 or limits.get("max_active_seconds") != 28800.0:
+    if limits.get("max_output_tokens") != 600000 or limits.get("max_active_seconds") != 28800.0 or limits.get("max_logical_calls") != 175 or limits.get("max_local_invocation_attempts") != 525:
         raise ValueError(f"Execution limits mismatch in master registration: {limits}")
+
+    prompt_env = data.get("prompt_envelope", {})
+    cand_wrapper = prompt_env.get("candidate_wrapper", "")
+    cand_wrapper_hash = hashlib.sha256(cand_wrapper.encode("utf-8")).hexdigest()
+    if prompt_env.get("candidate_wrapper_hash") != cand_wrapper_hash:
+        raise ValueError("Master registration candidate wrapper hash mismatch")
+
+    mut_wrapper = prompt_env.get("mutation_wrapper", "")
+    mut_wrapper_hash = hashlib.sha256(mut_wrapper.encode("utf-8")).hexdigest()
+    if prompt_env.get("mutation_wrapper_hash") != mut_wrapper_hash:
+        raise ValueError("Master registration mutation wrapper hash mismatch")
 
     if "arm_assignment_derivation" not in data:
         raise ValueError("Master registration missing arm_assignment_derivation")

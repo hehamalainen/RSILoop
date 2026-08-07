@@ -3428,14 +3428,15 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
         )
 
         if args.mock:
-            run_prescientific_cpu_gate(BASE_DIR, is_mock=True)
-            model = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=BASE_DIR, ledger=ledger, mock_subprocess=True)
+            mock_ws_root = getattr(ctx, "workspace_root", ctx.run_dir)
+            run_prescientific_cpu_gate(mock_ws_root, is_mock=True)
+            model = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=mock_ws_root, ledger=ledger, mock_subprocess=True)
             evaluator = ProductionTaskEvaluator()
-            run_pilot_canary(stage, identity["attempt_id"], model, BASE_DIR)
+            run_pilot_canary(stage, identity["attempt_id"], model, mock_ws_root)
             if is_resume:
-                verify_stage_scientific_start(stage, identity["attempt_id"], BASE_DIR)
+                verify_stage_scientific_start(stage, identity["attempt_id"], mock_ws_root)
             else:
-                publish_scientific_start(stage, identity["attempt_id"], BASE_DIR)
+                publish_scientific_start(stage, identity["attempt_id"], mock_ws_root)
         else:
             verify_codex_cli_version("codex")
             run_prescientific_cpu_gate(BASE_DIR, is_mock=False)

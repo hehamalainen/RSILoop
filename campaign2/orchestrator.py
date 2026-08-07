@@ -332,7 +332,7 @@ class Campaign2Orchestrator:
             if self.ledger:
                 self.ledger.record_intent(call_id, "generate", arm, phase, task_id, {"prompt_hash": prompt_hash, "attempt": attempt})
             try:
-                code, tokens = self.model.generate_candidate(task_id, effective_prompt, call_id)
+                code, tokens = self.model.generate_candidate(task_id, mutable_body, call_id)
                 if self.ledger:
                     self.ledger.record_completion(call_id, True, tokens)
                 break

@@ -34,6 +34,8 @@ def get_row_code(row: dict, workspace_root: str = BASE_DIR) -> str:
     task_id = row["task_id"]
     suite = "suite_c" if task_id.startswith("c_") else "suite_p"
     task_dir = os.path.join(workspace_root, "benchmarks", "campaign2", suite, task_id)
+    if not os.path.exists(task_dir):
+        task_dir = os.path.join(BASE_DIR, "benchmarks", "campaign2", suite, task_id)
     sol_path = os.path.join(task_dir, "solution.py")
 
     with open(sol_path, "r", encoding="utf-8") as f:
@@ -87,9 +89,11 @@ def run_prescientific_cpu_gate(workspace_root: str = BASE_DIR, is_mock: bool = F
         except Exception as exc:
             raise CpuGateError(f"Corrupted CPU gate record: {exc}") from exc
 
-        is_mock_record = data.get("is_mock", False)
-        if not is_mock and is_mock_record:
-            raise CpuGateError("Existing CPU gate record is a mock result; production launch requires real worker CPU measurement")
+        if "is_mock" not in data or data.get("is_mock") is not is_mock:
+            raise CpuGateError(
+                f"Existing CPU gate record is_mock state mismatch or missing explicit is_mock key: "
+                f"record is_mock={data.get('is_mock')}, expected is_mock={is_mock}"
+            )
 
         max_cpu = data.get("max_cpu_seconds", 0.0)
         if max_cpu > MAX_ALLOWED_CPU_SECONDS:

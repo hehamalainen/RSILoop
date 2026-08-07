@@ -76,6 +76,17 @@ class MockModelProvider(ModelProvider):
 
     def generate_candidate(self, task_id: str, effective_prompt: str,
                            call_id: str) -> Tuple[str, int]:
+        if task_id in ("canary", "") or "CANARY_OK" in effective_prompt:
+            tokens = 10
+            self.call_log.append({
+                'type': 'generate_candidate',
+                'task_id': task_id,
+                'call_id': call_id,
+                'prompt_hash': 'canary',
+                'tokens': tokens
+            })
+            return "CANARY_OK\n", tokens
+
         prompt_hash = hashlib.sha256(effective_prompt.encode('utf-8')).hexdigest()[:16]
         code = (
             f"```python\n"
@@ -176,6 +187,8 @@ def render_seatbelt_profile(scratch_dir: str, workspace_root: str = BASE_DIR) ->
     """Renders generator.sb.template into a rendered profile inside scratch_dir (C1-2)."""
     template_p = os.path.join(workspace_root, "generator.sb.template")
     if not os.path.exists(template_p):
+        template_p = os.path.join(BASE_DIR, "generator.sb.template")
+    if not os.path.exists(template_p):
         raise ExecutableBoundaryError(f"Missing generator.sb.template: {template_p}")
 
     with open(template_p, "r", encoding="utf-8") as f:
@@ -185,7 +198,7 @@ def render_seatbelt_profile(scratch_dir: str, workspace_root: str = BASE_DIR) ->
     codex_prefix = os.path.dirname(os.path.dirname(codex_bin))
 
     sb_content = tmpl.format(
-        codex_base_dir=os.path.realpath(workspace_root),
+        codex_base_dir=codex_prefix,
         codex_prefix=codex_prefix,
         user_home=os.path.expanduser("~"),
         real_temp_home=os.path.realpath(scratch_dir),
@@ -234,28 +247,32 @@ def build_allowlisted_env(invocation_root: str) -> Dict[str, str]:
     return env
 
 
-def setup_credential_home(scratch_dir: str, auth_source_path: Optional[str] = None) -> str:
+def setup_credential_home(scratch_dir: str, is_mock: bool = False, auth_source_path: Optional[str] = None) -> str:
     """Sets up scratch_dir/.codex/auth.json from verified source credential file (C1-7)."""
     codex_dir = os.path.join(scratch_dir, ".codex")
     tmp_dir = os.path.join(scratch_dir, "tmp")
     os.makedirs(codex_dir, mode=0o700, exist_ok=True)
     os.makedirs(tmp_dir, mode=0o700, exist_ok=True)
 
-    src_p = auth_source_path or os.path.expanduser("~/.codex/auth.json")
+    src_p = auth_source_path or os.environ.get("CODEX_AUTH_PATH") or os.path.expanduser("~/.codex/auth.json")
     dest_auth = os.path.join(codex_dir, "auth.json")
 
-    if src_p:
+    if os.path.exists(src_p):
         try:
-            if os.path.exists(src_p):
-                st = os.stat(src_p)
-                if st.st_uid == os.getuid():
-                    shutil.copy2(src_p, dest_auth)
-                    os.chmod(dest_auth, 0o600)
-                    return dest_auth
-        except Exception:
-            pass
+            st = os.stat(src_p)
+            if st.st_uid != os.getuid():
+                raise ExecutableBoundaryError(f"Auth source file owned by unexpected UID: {st.st_uid}")
+            shutil.copy2(src_p, dest_auth)
+            os.chmod(dest_auth, 0o600)
+            return dest_auth
+        except Exception as exc:
+            if not is_mock:
+                raise ExecutableBoundaryError(f"Failed to copy production auth.json from {src_p}: {exc}") from exc
 
-    # Fallback to dummy auth.json for sandbox/test environments
+    if not is_mock:
+        raise ExecutableBoundaryError(f"Production authentication requires valid auth.json at {src_p}")
+
+    # Fallback to dummy auth.json ONLY for mock/test environments (is_mock=True)
     with open(dest_auth, "w", encoding="utf-8") as f:
         f.write('{"auth_mode": "test_credentials"}\n')
     os.chmod(dest_auth, 0o600)
@@ -263,7 +280,7 @@ def setup_credential_home(scratch_dir: str, auth_source_path: Optional[str] = No
     return dest_auth
 
 
-def create_fresh_invocation_scratch_dir(workspace_root: str = BASE_DIR) -> str:
+def create_fresh_invocation_scratch_dir(workspace_root: str = BASE_DIR, is_mock: bool = False) -> str:
     """
     Scratch dir is fresh PER INVOCATION, empty, current-UID owned, non-symlink, outside repository (C1-2 c).
     """
@@ -285,7 +302,7 @@ def create_fresh_invocation_scratch_dir(workspace_root: str = BASE_DIR) -> str:
     except ValueError:
         pass
 
-    setup_credential_home(scratch_real)
+    setup_credential_home(scratch_real, is_mock=is_mock)
     return scratch_real
 
 
@@ -491,6 +508,8 @@ class SolModelProvider(ModelProvider):
         """
         template_p = os.path.join(self.workspace_root, "generator.sb.template")
         if not os.path.exists(template_p):
+            template_p = os.path.join(BASE_DIR, "generator.sb.template")
+        if not os.path.exists(template_p):
             raise ExecutableBoundaryError(f"Missing generator.sb.template: {template_p}")
 
         with open(template_p, "rb") as f:
@@ -505,7 +524,7 @@ class SolModelProvider(ModelProvider):
         last_exception = None
 
         for invocation_ordinal in range(1, max_attempts + 1):
-            scratch_dir = create_fresh_invocation_scratch_dir(self.workspace_root)
+            scratch_dir = create_fresh_invocation_scratch_dir(workspace_root=self.workspace_root, is_mock=self.mock_subprocess)
             sb_path = render_seatbelt_profile(scratch_dir, self.workspace_root)
             cmd = build_codex_cli_command(self.model_name, scratch_dir, sb_path)
             env = build_allowlisted_env(scratch_dir)
@@ -617,8 +636,11 @@ class SolModelProvider(ModelProvider):
 
             try:
                 if self.mock_subprocess:
+                    is_canary = "CANARY_OK" in stdin_bytes.decode("utf-8", errors="ignore") or task_id in ("canary", "")
                     is_mut = "MUTATION REQUEST" in stdin_bytes.decode("utf-8", errors="ignore")
-                    if is_mut:
+                    if is_canary:
+                        text_val = "CANARY_OK"
+                    elif is_mut:
                         text_val = (
                             "# Strategy mutation\n"
                             "Focus on edge-case error recovery and stream framing.\n"
@@ -665,14 +687,16 @@ class SolModelProvider(ModelProvider):
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                     except Exception:
                         pass
-                    proc.wait()
+                t1 = time.monotonic()
+                duration_sec = t1 - t0
+                try:
+                    shutil.rmtree(scratch_dir, ignore_errors=False)
+                except Exception:
+                    pass
+                if os.path.exists(scratch_dir):
+                    raise ExecutableBoundaryError(f"Scratch directory cleanup failed or residue remains: {scratch_dir}")
 
-                shutil.rmtree(scratch_dir, ignore_errors=True)
-
-            t1 = time.monotonic()
-            duration_sec = max(0.0, t1 - t0)
-
-            parsed = parse_and_classify_jsonl_output(stdout_bytes, stderr_bytes, return_code=return_code)
+            parsed = parse_and_classify_jsonl_output(stdout_bytes, stderr_bytes, return_code)
 
             completion_record = {
                 "record_type": "invocation_completion",
@@ -692,55 +716,76 @@ class SolModelProvider(ModelProvider):
             if self.ledger:
                 self.ledger._append_record(completion_record)
 
-            # Record usage in PreflightRegistry (P0 Finding 4)
+            # Record usage in PreflightRegistry (logical call = 1 on attempt 1, local_attempts = 1 per CLI attempt)
             from campaign2.preflight_registry import PreflightRegistry
             reg = PreflightRegistry(workspace_root=self.workspace_root)
-            reg.record_usage(tokens_used=parsed["tokens"], active_time=duration_sec, logical_calls=1, local_attempts=1)
+            reg.record_usage(
+                tokens_used=parsed["tokens"],
+                active_time=duration_sec,
+                logical_calls=1 if invocation_ordinal == 1 else 0,
+                local_attempts=1,
+            )
 
-            if call_error or parsed["classification"] != "valid":
-                err_msg = call_error or parsed.get("error", "Invalid response classification")
-                exc = ExecutableBoundaryError(f"Invocation {logical_call_id} ordinal {invocation_ordinal} failed post-spawn: {err_msg}")
-                setattr(exc, "usage_known", parsed["usage_known"])
-                setattr(exc, "tokens_used", parsed["tokens"])
-                raise exc
+            if parsed["classification"] == "valid" and return_code == 0:
+                return parsed["text"], parsed["tokens"], parsed
 
-            return parsed["text"], parsed["tokens"], parsed
+            # Failure post-spawn or transport failure
+            err_msg = parsed.get("error", "Invalid response classification")
+            last_exception = ExecutableBoundaryError(
+                f"Invocation {logical_call_id} ordinal {invocation_ordinal} failed: {err_msg}"
+            )
+            setattr(last_exception, "usage_known", parsed["usage_known"])
+            setattr(last_exception, "tokens_used", parsed["tokens"])
 
-        raise ExecutableBoundaryError(f"Invocation {logical_call_id} exhausted max attempts")
+            if parsed["classification"] == "infrastructure_error" and invocation_ordinal < max_attempts:
+                time.sleep(0.1 * (2 ** invocation_ordinal))
+                continue
+
+            raise last_exception
+
+        raise last_exception or ExecutableBoundaryError(f"Invocation {logical_call_id} exhausted max attempts")
 
     def generate_candidate(self, task_id: str, effective_prompt: str,
                            call_id: str) -> Tuple[str, int]:
-        # Authenticate task problem.txt (P0 Finding 1)
-        bench_dir = os.path.join(self.workspace_root, "benchmarks", "campaign2")
-        suite_sub = "suite_c" if task_id.startswith("c_") else "suite_p"
-        problem_path = os.path.join(bench_dir, suite_sub, task_id, "problem.txt")
-
-        if not os.path.exists(problem_path):
-            raise ExecutableBoundaryError(f"Missing problem.txt specification for task {task_id}: {problem_path}")
-
-        with open(problem_path, "rb") as f:
-            problem_bytes = f.read()
-
-        problem_text = problem_bytes.decode("utf-8")
-
-        # Construct full prompt sent to Sol including contract, problem specification, delimiter, and strategy body
         from campaign2.envelope import IMMUTABLE_CONTRACT, DELIMITER
-        full_prompt = (
-            f"{IMMUTABLE_CONTRACT}\n\n"
-            f"---PROBLEM SPECIFICATION---\n\n"
-            f"{problem_text}"
-            f"{DELIMITER}"
-            f"{effective_prompt}"
-        )
-        stdin_bytes = full_prompt.encode("utf-8")
+
+        if task_id in ("canary", ""):
+            stdin_bytes = effective_prompt.encode("utf-8")
+            problem_bytes = b""
+        else:
+            bench_dir = os.path.join(self.workspace_root, "benchmarks", "campaign2")
+            suite_sub = "suite_c" if task_id.startswith("c_") else "suite_p"
+            problem_path = os.path.join(bench_dir, suite_sub, task_id, "problem.txt")
+
+            if not os.path.exists(problem_path):
+                raise ExecutableBoundaryError(f"Missing problem.txt specification for task {task_id}: {problem_path}")
+
+            with open(problem_path, "rb") as f:
+                problem_bytes = f.read()
+
+            problem_text = problem_bytes.decode("utf-8")
+
+            full_prompt = (
+                f"{IMMUTABLE_CONTRACT}\n\n"
+                f"---PROBLEM SPECIFICATION---\n\n"
+                f"{problem_text}"
+                f"{DELIMITER}"
+                f"{effective_prompt}\n"
+            )
+            stdin_bytes = full_prompt.encode("utf-8")
+
         text, tokens, _ = self._execute_cli_call(call_id, stdin_bytes, task_id=task_id, problem_bytes=problem_bytes)
 
-        # Strict code block extraction (P1 Finding 7)
+        if task_id in ("canary", ""):
+            return text, tokens
+
         stripped = text.strip()
-        if not (stripped.startswith("```python") and stripped.endswith("```")):
+        lines = stripped.splitlines()
+
+        # Strict code fence extraction: exact ```python opening line, exact ``` closing line
+        if not (len(lines) >= 2 and lines[0].strip() == "```python" and lines[-1].strip() == "```"):
             return "# malformed fence\n", tokens
 
-        lines = stripped.splitlines()
         code_lines = lines[1:-1]
         code = "\n".join(code_lines).strip() + "\n"
         return code, tokens
@@ -754,11 +799,8 @@ class SolModelProvider(ModelProvider):
         )
         stdin_bytes = prompt.encode("utf-8")
 
-        try:
-            text, tokens, _ = self._execute_cli_call(call_id, stdin_bytes)
-        except ExecutableBoundaryError as exc:
-            toks = getattr(exc, "tokens_used", 0)
-            return mutable_body, toks
+        # Transport error raises ExecutableBoundaryError and fails closed
+        text, tokens, _ = self._execute_cli_call(call_id, stdin_bytes)
 
         from campaign2.envelope import PromptEnvelope
         env = PromptEnvelope()
@@ -766,5 +808,5 @@ class SolModelProvider(ModelProvider):
             clean_body = env.validate_mutation_output(text)
             return clean_body, tokens
         except Exception:
-            # P1 Finding 7: Invalid mutation body retains parent body, counts tokens, does NOT abort attempt
+            # Valid model response containing invalid strategy retains parent strategy body
             return mutable_body, tokens

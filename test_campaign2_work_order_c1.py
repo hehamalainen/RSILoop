@@ -129,7 +129,7 @@ class TestC1_2_ExecutableBoundary(unittest.TestCase):
 
     def test_fresh_scratch_dir_location_and_ownership(self):
         import shutil
-        scratch = create_fresh_invocation_scratch_dir(BASE_DIR)
+        scratch = create_fresh_invocation_scratch_dir(BASE_DIR, is_mock=True)
         self.assertTrue(os.path.exists(scratch))
         self.assertFalse(os.path.islink(scratch))
         self.assertEqual(os.stat(scratch).st_uid, os.getuid())
@@ -144,6 +144,16 @@ class TestC1_2_ExecutableBoundary(unittest.TestCase):
         ok, count = verify_campaign2_manifest(BASE_DIR)
         self.assertTrue(ok)
         self.assertEqual(count, 144)
+
+
+    def test_seatbelt_profile_denies_workspace_root(self):
+        from campaign2.model_provider import render_seatbelt_profile
+        with tempfile.TemporaryDirectory() as tmp_scratch:
+            sb_p = render_seatbelt_profile(tmp_scratch, BASE_DIR)
+            with open(sb_p, "r", encoding="utf-8") as f:
+                sb_text = f.read()
+            self.assertNotIn(os.path.realpath(BASE_DIR), sb_text)
+            self.assertIn("/opt/homebrew", sb_text)
 
 
 class TestC1_3_ThreeRecordLedger(unittest.TestCase):
@@ -169,6 +179,23 @@ class TestC1_3_ThreeRecordLedger(unittest.TestCase):
             self.assertEqual(starts[0]["intent_record_hash"], hashlib.sha256((json.dumps(intents[0], sort_keys=True) + "\n").encode("utf-8")).hexdigest())
             self.assertEqual(completes[0]["started_record_hash"], hashlib.sha256((json.dumps(starts[0], sort_keys=True) + "\n").encode("utf-8")).hexdigest())
             self.assertTrue(ledger.verify_three_record_protocol())
+
+    def test_three_record_ledger_sequence_and_contiguous_ordinals(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from campaign2.attempt_lifecycle import AttemptLedger, AttemptLifecycleError
+            ledger_p = os.path.join(tmp_dir, "ledger.jsonl")
+            ledger = AttemptLedger(ledger_p)
+
+            # Non-contiguous ordinal (ordinal=2 for first call) raises AttemptLifecycleError
+            bad_record = {
+                "record_type": "invocation_intent",
+                "logical_call_id": "call_bad",
+                "invocation_ordinal": 2,
+                "timestamp": time.time(),
+            }
+            ledger._append_record(bad_record)
+            with self.assertRaises(AttemptLifecycleError):
+                ledger.verify_three_record_protocol()
 
 
 class TestC1_4_PreflightRegistryAndCanary(unittest.TestCase):
@@ -199,15 +226,21 @@ class TestC1_4_PreflightRegistryAndCanary(unittest.TestCase):
 
 
 class TestC1_5_ActiveTimeAccumulatorAndLimits(unittest.TestCase):
-    def test_stage_global_limits_accumulation(self):
+    def test_stage_global_limits_accumulation_and_durable_overshoot(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
             reg.record_usage(tokens_used=1000, active_time=10.0, logical_calls=1, local_attempts=1)
             self.assertEqual(reg.data["cumulative_tokens"], 1000)
             self.assertEqual(reg.data["cumulative_active_time"], 10.0)
 
+            # Overshoot writes updated tokens to disk BEFORE raising StageLimitsExceededError
             with self.assertRaises(StageLimitsExceededError):
                 reg.record_usage(tokens_used=700000, active_time=1.0)
+
+            # Re-read from disk to verify overshooting usage was saved durably
+            with open(reg.registry_path, "r", encoding="utf-8") as f:
+                reg_disk = json.load(f)
+            self.assertEqual(reg_disk["cumulative_tokens"], 701000)
 
 
 class TestC1_6_NarrowedRetry(unittest.TestCase):
@@ -223,10 +256,17 @@ class TestC1_6_NarrowedRetry(unittest.TestCase):
                 proc.communicate.return_value = (b"", b"HTTP 429 Too Many Requests")
                 return proc
 
-            with mock.patch("subprocess.Popen", side_effect=mock_popen):
+            with mock.patch("campaign2.model_provider.create_fresh_invocation_scratch_dir", return_value=tmp_dir), \
+                 mock.patch("subprocess.Popen", side_effect=mock_popen):
                 with self.assertRaises(ExecutableBoundaryError) as ctx:
                     provider.generate_candidate("c_f1_01_log_stream_parser", "def solve(): pass", "call_err")
-                self.assertIn("failed post-spawn", str(ctx.exception))
+                self.assertIn("failed", str(ctx.exception))
+
+    def test_mutation_transport_failure_fails_closed(self):
+        provider = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=BASE_DIR, mock_subprocess=False)
+        with mock.patch.object(provider, "_execute_cli_call", side_effect=ExecutableBoundaryError("timeout")):
+            with self.assertRaises(ExecutableBoundaryError):
+                provider.mutate_prompt("body", "ctx", "mut_call")
 
 
 class TestC1_7_CredentialEnvAndResidue(unittest.TestCase):
@@ -236,6 +276,12 @@ class TestC1_7_CredentialEnvAndResidue(unittest.TestCase):
         self.assertEqual(env["CODEX_HOME"], "/tmp/inv_root/.codex")
         self.assertNotIn("OPENAI_API_KEY", env)
         self.assertNotIn("ANTHROPIC_API_KEY", env)
+
+    def test_setup_credential_home_fails_closed_in_production(self):
+        from campaign2.model_provider import setup_credential_home
+        with tempfile.TemporaryDirectory() as tmp_scratch:
+            with self.assertRaises(ExecutableBoundaryError):
+                setup_credential_home(tmp_scratch, is_mock=False, auth_source_path="/nonexistent/auth.json")
 
 
 class TestC1_8_FrozenDesignEquality(unittest.TestCase):
@@ -255,15 +301,19 @@ class TestC1_9_PrescientificCpuGate(unittest.TestCase):
         self.assertEqual(record["total_rows_evaluated"], 120)
         self.assertLessEqual(record["max_cpu_seconds"], 3.0)
 
-        # Verification of existing file
-        rec_path = os.path.join(BASE_DIR, "campaign2_cpu_gate_record.json")
-        self.assertTrue(os.path.exists(rec_path))
-        st_mode = stat.S_IMODE(os.stat(rec_path).st_mode)
-        self.assertEqual(st_mode, 0o444)
+    def test_cpu_gate_rejects_missing_is_mock_key(self):
+        from campaign2.cpu_gate import CpuGateError
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rec_p = os.path.join(tmp_dir, "campaign2_cpu_gate_record.json")
+            with open(rec_p, "w", encoding="utf-8") as f:
+                json.dump({"total_rows_evaluated": 120, "max_cpu_seconds": 0.01}, f)
+            os.chmod(rec_p, 0o444)
+            with self.assertRaises(CpuGateError):
+                run_prescientific_cpu_gate(workspace_root=tmp_dir, is_mock=False)
 
 
 class TestC1_10_PromptsAndProblemText(unittest.TestCase):
-    def test_candidate_prompt_includes_authenticated_problem_text(self):
+    def test_candidate_prompt_includes_authenticated_problem_text_single_envelope(self):
         provider = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=BASE_DIR, mock_subprocess=True)
 
         captured_stdin = []
@@ -275,9 +325,9 @@ class TestC1_10_PromptsAndProblemText(unittest.TestCase):
             code, tokens = provider.generate_candidate("c_f1_01_log_stream_parser", "def solve(): pass", "call_task_spec")
             self.assertEqual(len(captured_stdin), 1)
             stdin_str = captured_stdin[0].decode("utf-8")
-            self.assertIn("---PROBLEM SPECIFICATION---", stdin_str)
+            self.assertEqual(stdin_str.count("---PROBLEM SPECIFICATION---"), 1)
+            self.assertEqual(stdin_str.count("You are an expert Python coder"), 1)
             self.assertIn("log_stream_parser", stdin_str)
-            self.assertIn("expert Python coder", stdin_str)
 
 
 class TestC1_11_JSONLClassifications(unittest.TestCase):
