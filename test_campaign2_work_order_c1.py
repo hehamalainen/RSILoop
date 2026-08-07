@@ -33,6 +33,29 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 
+def _get_workspace_snapshot(directory: str) -> dict:
+    snap = {}
+    for root, _, files in os.walk(directory):
+        for f in files:
+            if f.startswith(".") or f.endswith(".pyc") or f == ".DS_Store":
+                continue
+            p = os.path.join(root, f)
+            rel = os.path.relpath(p, directory)
+            try:
+                st = os.stat(p)
+                st_mode = stat.S_IMODE(st.st_mode)
+                size = st.st_size
+                with open(p, "rb") as fp:
+                    h = hashlib.sha256(fp.read()).hexdigest()
+                snap[rel] = (st_mode, size, h)
+            except Exception:
+                pass
+    return snap
+
+
+CANONICAL_PRE_SNAPSHOT = _get_workspace_snapshot(BASE_DIR)
+
+
 
 
 from campaign2.model_provider import (
@@ -600,26 +623,8 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
 
     def test_canonical_workspace_remains_clean(self):
         # Perform true pre/post byte, mode, and hash snapshot verification of BASE_DIR (P1-3)
-        def _get_workspace_snapshot(directory: str) -> Dict[str, Tuple[int, int, str]]:
-            snap = {}
-            for root, _, files in os.walk(directory):
-                for f in files:
-                    if f.startswith(".") or f.endswith(".pyc") or f == ".DS_Store":
-                        continue
-                    p = os.path.join(root, f)
-                    rel = os.path.relpath(p, directory)
-                    try:
-                        st = os.stat(p)
-                        st_mode = stat.S_IMODE(st.st_mode)
-                        size = st.st_size
-                        with open(p, "rb") as fp:
-                            h = hashlib.sha256(fp.read()).hexdigest()
-                        snap[rel] = (st_mode, size, h)
-                    except Exception:
-                        pass
-            return snap
-
         post_snap = _get_workspace_snapshot(BASE_DIR)
+        self.assertEqual(CANONICAL_PRE_SNAPSHOT, post_snap, "BASE_DIR files altered or unexpected new files created during test suite execution")
         reg_p = os.path.join(BASE_DIR, "history", "campaign2_pilot_preflight_registry.json")
         gate_p = os.path.join(BASE_DIR, "campaign2_cpu_gate_record.json")
         self.assertFalse(os.path.exists(reg_p), f"Forbidden canonical file found in BASE_DIR: {reg_p}")
@@ -765,6 +770,147 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
 
             with self.assertRaises(CpuGateError):
                 run_prescientific_cpu_gate(workspace_root=tmp_dir, is_mock=False)
+
+    def test_reconciled_canary_completion_restores_cumulative_usage(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from campaign2.attempt_lifecycle import AttemptLedger
+            from campaign2.preflight_registry import CANARY_NEUTRAL_PROMPT, CANARY_EXPECTED_RESPONSE, run_pilot_canary, PreflightRegistry
+            run_dir = os.path.join(tmp_dir, "att_rec_003")
+            os.makedirs(run_dir, exist_ok=True)
+            ledger_p = os.path.join(run_dir, "campaign2_pilot_ledger.jsonl")
+            ledger = AttemptLedger(ledger_p)
+
+            canary_prompt_hash = hashlib.sha256(CANARY_NEUTRAL_PROMPT.encode("utf-8")).hexdigest()
+            canary_text_hash = hashlib.sha256(CANARY_EXPECTED_RESPONSE.encode("utf-8")).hexdigest()
+
+            intent = {
+                "record_type": "invocation_intent",
+                "logical_call_id": "canary_pilot_att_rec_003_01",
+                "invocation_ordinal": 1,
+                "prompt_hash": canary_prompt_hash,
+                "timestamp": time.time(),
+            }
+            intent_bytes = (json.dumps(intent, sort_keys=True) + "\n").encode("utf-8")
+            intent_hash = hashlib.sha256(intent_bytes).hexdigest()
+
+            started = {
+                "record_type": "process_started",
+                "logical_call_id": "canary_pilot_att_rec_003_01",
+                "invocation_ordinal": 1,
+                "pid": 12345,
+                "intent_record_hash": intent_hash,
+                "timestamp": time.time(),
+            }
+            started_bytes = (json.dumps(started, sort_keys=True) + "\n").encode("utf-8")
+            started_hash = hashlib.sha256(started_bytes).hexdigest()
+
+            comp_pass = {
+                "record_type": "invocation_completion",
+                "logical_call_id": "canary_pilot_att_rec_003_01",
+                "invocation_ordinal": 1,
+                "intent_record_hash": intent_hash,
+                "started_record_hash": started_hash,
+                "classification": "valid",
+                "return_code": 0,
+                "text_hash": canary_text_hash,
+                "tokens": 7,
+                "duration": 0.3,
+                "timestamp": time.time(),
+            }
+
+            ledger._append_record(intent)
+            ledger._append_record(started)
+            ledger._append_record(comp_pass)
+
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_master_registration.json"), os.path.join(tmp_dir, "campaign2_master_registration.json"))
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
+
+            model = mock.MagicMock()
+            data = run_pilot_canary("pilot", "att_rec_003", model, workspace_root=tmp_dir, ledger=ledger)
+            self.assertTrue(data["canary_passed"])
+
+            reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
+            self.assertEqual(reg.data["total_logical_calls"], 1)
+            self.assertEqual(reg.data["total_local_invocation_attempts"], 1)
+            self.assertEqual(reg.data["cumulative_tokens"], 7)
+
+    def test_unknown_usage_canary_completion_blocks_without_resampling(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from campaign2.attempt_lifecycle import AttemptLedger
+            from campaign2.preflight_registry import CANARY_NEUTRAL_PROMPT, run_pilot_canary, CanaryFailureError
+            run_dir = os.path.join(tmp_dir, "att_rec_004")
+            os.makedirs(run_dir, exist_ok=True)
+            ledger_p = os.path.join(run_dir, "campaign2_pilot_ledger.jsonl")
+            ledger = AttemptLedger(ledger_p)
+
+            canary_prompt_hash = hashlib.sha256(CANARY_NEUTRAL_PROMPT.encode("utf-8")).hexdigest()
+
+            intent = {
+                "record_type": "invocation_intent",
+                "logical_call_id": "canary_pilot_att_rec_004_01",
+                "invocation_ordinal": 1,
+                "prompt_hash": canary_prompt_hash,
+                "timestamp": time.time(),
+            }
+            intent_bytes = (json.dumps(intent, sort_keys=True) + "\n").encode("utf-8")
+            intent_hash = hashlib.sha256(intent_bytes).hexdigest()
+
+            started = {
+                "record_type": "process_started",
+                "logical_call_id": "canary_pilot_att_rec_004_01",
+                "invocation_ordinal": 1,
+                "pid": 12345,
+                "intent_record_hash": intent_hash,
+                "timestamp": time.time(),
+            }
+            started_bytes = (json.dumps(started, sort_keys=True) + "\n").encode("utf-8")
+            started_hash = hashlib.sha256(started_bytes).hexdigest()
+
+            comp_invalid = {
+                "record_type": "invocation_completion",
+                "logical_call_id": "canary_pilot_att_rec_004_01",
+                "invocation_ordinal": 1,
+                "intent_record_hash": intent_hash,
+                "started_record_hash": started_hash,
+                "classification": "invalidated",
+                "return_code": -9,
+                "text_hash": "",
+                "tokens": 10,
+                "duration": 0.5,
+                "timestamp": time.time(),
+            }
+
+            ledger._append_record(intent)
+            ledger._append_record(started)
+            ledger._append_record(comp_invalid)
+
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_master_registration.json"), os.path.join(tmp_dir, "campaign2_master_registration.json"))
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
+
+            model = mock.MagicMock()
+            with self.assertRaises(CanaryFailureError):
+                run_pilot_canary("pilot", "att_rec_004", model, workspace_root=tmp_dir, ledger=ledger)
+            self.assertFalse(model.generate_candidate.called)
+
+    def test_corrupted_registry_reload_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from campaign2.preflight_registry import PreflightRegistry, PreflightRegistryError
+            reg_dir = os.path.join(tmp_dir, "history")
+            os.makedirs(reg_dir, exist_ok=True)
+            reg_path = os.path.join(reg_dir, "campaign2_pilot_preflight_registry.json")
+            with open(reg_path, "w", encoding="utf-8") as f:
+                f.write("corrupted JSON syntax {{{")
+            os.chmod(reg_path, 0o444)
+
+            with self.assertRaises(PreflightRegistryError):
+                PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
+
+    def test_create_fresh_scratch_dir_cleans_up_on_setup_failure(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from campaign2.model_provider import create_fresh_invocation_scratch_dir
+            with mock.patch("campaign2.model_provider.setup_credential_home", side_effect=ValueError("Simulated credential setup failure")):
+                with self.assertRaises(ValueError):
+                    create_fresh_invocation_scratch_dir(workspace_root=tmp_dir, is_mock=True)
 
 
 class TestC1_13_FullStageRefusal(unittest.TestCase):

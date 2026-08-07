@@ -85,7 +85,7 @@ class MockModelProvider(ModelProvider):
                 'prompt_hash': 'canary',
                 'tokens': tokens
             })
-            return "CANARY_OK\n", tokens
+            return "CANARY_OK", tokens
 
         prompt_hash = hashlib.sha256(effective_prompt.encode('utf-8')).hexdigest()[:16]
         code = (
@@ -288,25 +288,30 @@ def create_fresh_invocation_scratch_dir(workspace_root: str = BASE_DIR, is_mock:
     Scratch dir is fresh PER INVOCATION, empty, current-UID owned, non-symlink, outside repository (C1-2 c).
     """
     scratch_dir = tempfile.mkdtemp(prefix="rsi_codex_scratch_")
-    scratch_real = os.path.realpath(scratch_dir)
-
-    if os.path.islink(scratch_dir):
-        raise ExecutableBoundaryError(f"Scratch dir must not be a symlink: {scratch_dir}")
-
-    st = os.stat(scratch_real)
-    if st.st_uid != os.getuid():
-        raise ExecutableBoundaryError(f"Scratch dir must be owned by current UID {os.getuid()}, got {st.st_uid}")
-
-    repo_real = os.path.realpath(workspace_root)
     try:
-        rel = os.path.relpath(scratch_real, repo_real)
-        if not rel.startswith(".."):
-            raise ExecutableBoundaryError(f"Scratch dir must be OUTSIDE Git repository, got: {scratch_real}")
-    except ValueError:
-        pass
+        scratch_real = os.path.realpath(scratch_dir)
 
-    setup_credential_home(scratch_real, is_mock=is_mock)
-    return scratch_real
+        if os.path.islink(scratch_dir):
+            raise ExecutableBoundaryError(f"Scratch dir must not be a symlink: {scratch_dir}")
+
+        st = os.stat(scratch_real)
+        if st.st_uid != os.getuid():
+            raise ExecutableBoundaryError(f"Scratch dir must be owned by current UID {os.getuid()}, got {st.st_uid}")
+
+        repo_real = os.path.realpath(workspace_root)
+        try:
+            rel = os.path.relpath(scratch_real, repo_real)
+            if not rel.startswith(".."):
+                raise ExecutableBoundaryError(f"Scratch dir must be OUTSIDE Git repository, got: {scratch_real}")
+        except ValueError:
+            pass
+
+        setup_credential_home(scratch_real, is_mock=is_mock)
+        return scratch_real
+    except Exception:
+        if os.path.exists(scratch_dir):
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+        raise
 
 
 def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, return_code: int = 0) -> Dict[str, Any]:
@@ -735,7 +740,7 @@ class SolModelProvider(ModelProvider):
 
             parsed = parse_and_classify_jsonl_output(stdout_bytes, stderr_bytes, return_code)
 
-            text_val = parsed.get("text", "")
+            text_val = parsed.get("text", "").rstrip("\r\n")
             text_hash = hashlib.sha256(text_val.encode("utf-8")).hexdigest() if text_val else ""
 
             completion_record = {

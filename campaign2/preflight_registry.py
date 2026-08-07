@@ -141,13 +141,30 @@ class PreflightRegistry:
         self.data = data
 
     def _reload(self) -> None:
-        """Reload latest registry state from disk for single-writer consistency (P0-1)."""
+        """Reload latest registry state from disk with strict authentication (P0-4)."""
         if os.path.exists(self.registry_path):
+            if os.path.islink(self.registry_path):
+                raise PreflightRegistryError(f"Registry file must not be a symlink: {self.registry_path}")
+            if not os.path.isfile(self.registry_path):
+                raise PreflightRegistryError(f"Registry file must be a regular file: {self.registry_path}")
+
             try:
                 with open(self.registry_path, "r", encoding="utf-8") as f:
-                    self.data = json.load(f)
-            except Exception:
-                pass
+                    data = json.load(f)
+            except Exception as e:
+                raise PreflightRegistryError(f"Failed to read/parse preflight registry file {self.registry_path}: {e}")
+
+            for req_field in ("record_type", "stage", "registration_hash", "launch_lock_hash"):
+                if req_field not in data:
+                    raise PreflightRegistryError(f"Corrupted preflight registry missing field '{req_field}': {self.registry_path}")
+
+            if data.get("record_type") != "preflight_registry":
+                raise PreflightRegistryError(f"Invalid preflight registry record_type: '{data.get('record_type')}'")
+
+            if data.get("stage") != self.stage:
+                raise PreflightRegistryError(f"Preflight registry stage mismatch: expected '{self.stage}', got '{data.get('stage')}'")
+
+            self.data = data
 
     def bind_attempt(self, attempt_id: str) -> None:
         """Bind attempt ID to preflight registry."""
@@ -158,12 +175,13 @@ class PreflightRegistry:
             self.data["attempt_ids"] = attempts
             self._save_data(self.data)
 
-    def record_canary_attempt(self, attempt_id: str, status: str, tokens: int, active_time: float, usage_known: bool) -> None:
-        """Record canary attempt outcome durably."""
+    def record_canary_attempt(self, attempt_id: str, status: str, tokens: int, active_time: float, usage_known: bool, call_id: str = "") -> None:
+        """Record canary attempt outcome durably with call_id (P0-3)."""
         self._reload()
         attempts_log = self.data.get("canary_attempts", [])
         attempts_log.append({
             "attempt_id": attempt_id,
+            "call_id": call_id,
             "status": status,
             "tokens": tokens,
             "active_time": active_time,
@@ -185,10 +203,27 @@ class PreflightRegistry:
             self.data["attempt_ids"] = attempts
         self._save_data(self.data)
 
-    def record_usage(self, tokens_used: int, active_time: float, logical_calls: int = 1, local_attempts: int = 1, logical_call_id: str = "") -> None:
-        """Accumulate active time, tokens, and call counts across trials and retries while enforcing stage limits."""
+    def record_usage(
+        self,
+        tokens_used: int,
+        active_time: float,
+        logical_calls: int = 1,
+        local_attempts: int = 1,
+        logical_call_id: str = "",
+        invocation_ordinal: int = 1,
+        completion_hash: str = "",
+    ) -> None:
+        """Accumulate active time, tokens, and call counts across trials and retries while enforcing stage limits (idempotent per completion hash, P0-1)."""
         self._reload()
         seen = set(self.data.get("seen_logical_call_ids", []))
+        seen_keys = set(self.data.get("seen_invocation_keys", []))
+
+        key = f"{logical_call_id}_{invocation_ordinal}_{completion_hash}" if (logical_call_id and completion_hash) else ""
+
+        if key and key in seen_keys:
+            # Already applied this completion's usage idempotently
+            return
+
         inc_calls = 0
         if logical_call_id:
             if logical_call_id not in seen:
@@ -197,7 +232,12 @@ class PreflightRegistry:
         else:
             inc_calls = logical_calls
 
+        if key:
+            seen_keys.add(key)
+
         self.data["seen_logical_call_ids"] = sorted(list(seen))
+        self.data["seen_invocation_keys"] = sorted(list(seen_keys))
+
         new_tokens = self.data.get("cumulative_tokens", 0) + tokens_used
         new_active = self.data.get("cumulative_active_time", 0.0) + active_time
         new_calls = self.data.get("total_logical_calls", 0) + inc_calls
@@ -256,15 +296,10 @@ def run_pilot_canary(
     attempt_id: str,
     model_provider: Any,
     workspace_root: str = BASE_DIR,
-    ledger: Any = None,
+    ledger: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
-    Executes preflight canary BEFORE SCIENTIFIC_START.
-    Canary uses frozen neutral prompt CANARY_NEUTRAL_PROMPT expecting CANARY_OK.
-    If canary passes, binds attempt ID in registry and publishes SCIENTIFIC_START.
-    If canary fails, fresh attempt permitted ONLY if usage is fully known or provably 0.
-    Maximum 3 canary attempts permitted across pilot stage.
-    Reconciles canary completion from ledger to prevent anti-resampling crash window.
+    Executes or reconciles preflight pilot canary call (0o444 sealed, fsynced).
     """
     from campaign2.attempt_lifecycle import publish_scientific_start, AttemptLedger
 
@@ -316,6 +351,7 @@ def run_pilot_canary(
 
             for intent_rec in intents:
                 call_id = intent_rec.get("logical_call_id", "")
+                inv_ordinal = intent_rec.get("invocation_ordinal", 1)
                 intent_bytes = (json.dumps(intent_rec, sort_keys=True) + "\n").encode("utf-8")
                 intent_hash = hashlib.sha256(intent_bytes).hexdigest()
 
@@ -331,6 +367,8 @@ def run_pilot_canary(
 
                 if matching_completes:
                     comp = matching_completes[-1]
+                    comp_bytes = (json.dumps(comp, sort_keys=True) + "\n").encode("utf-8")
+                    comp_hash = hashlib.sha256(comp_bytes).hexdigest()
                     tokens = comp.get("tokens", 0)
                     duration = comp.get("duration", 0.0)
 
@@ -342,26 +380,43 @@ def run_pilot_canary(
                         and type(duration) is not bool and isinstance(duration, (int, float)) and duration >= 0.0
                     )
 
+                    is_clean_content_failure = (
+                        comp.get("classification") == "valid"
+                        and comp.get("return_code") == 0
+                    )
+
                     if is_valid_pass:
+                        registry.record_usage(tokens, duration, 1, 1, call_id, inv_ordinal, comp_hash)
                         canary_record = {
                             "call_id": call_id,
                             "status": "passed",
                             "tokens": tokens,
                             "duration": duration,
-                            "attempts": intent_rec.get("invocation_ordinal", 1),
+                            "attempts": inv_ordinal,
                             "usage_known": True,
                         }
-                        registry.record_canary_attempt(attempt_id, "passed", tokens, duration, True)
+                        registry.record_canary_attempt(attempt_id, "passed", tokens, duration, True, call_id=call_id)
                         registry.record_canary_passed(attempt_id, [canary_record], tokens, duration)
                         publish_scientific_start(stage=stage, attempt_id=attempt_id, workspace_root=workspace_root)
                         return registry.data
-                    else:
-                        # Prior completed canary call failed text authentication or return code!
-                        # Reconcile as failed attempt so canary_attempts log advances and call_id is NOT reused (P0-2)
+                    elif is_clean_content_failure:
+                        # Reconcile usage and record failed content attempt (P0-1, P0-3)
+                        registry.record_usage(tokens, duration, 1, 1, call_id, inv_ordinal, comp_hash)
                         existing_attempts = registry.data.get("canary_attempts", [])
                         already_logged = any(a.get("call_id") == call_id for a in existing_attempts)
                         if not already_logged:
-                            registry.record_canary_attempt(attempt_id, "failed_content", tokens, duration, True)
+                            registry.record_canary_attempt(attempt_id, "failed_content", tokens, duration, True, call_id=call_id)
+                    else:
+                        # Ambiguous / unknown usage / boundary failure (P0-2) -> RECORD USAGE AND FAIL CLOSED IMMEDIATELY!
+                        registry.record_usage(tokens, duration, 1, 1, call_id, inv_ordinal, comp_hash)
+                        existing_attempts = registry.data.get("canary_attempts", [])
+                        already_logged = any(a.get("call_id") == call_id for a in existing_attempts)
+                        if not already_logged:
+                            registry.record_canary_attempt(attempt_id, "invalidated", tokens, duration, False, call_id=call_id)
+                        raise CanaryFailureError(
+                            f"Preflight canary completion '{call_id}' failed with non-retryable ambiguous classification "
+                            f"'{comp.get('classification')}' (return_code={comp.get('return_code')}). Pilot BLOCKED."
+                        )
 
     # Reload latest registry data after reconciliation phase
     registry._reload()
@@ -390,11 +445,11 @@ def run_pilot_canary(
         t1 = time.monotonic()
         active_sec = t1 - t0
 
-        stripped_code = code.strip()
-        if stripped_code != CANARY_EXPECTED_RESPONSE:
-            registry.record_canary_attempt(attempt_id, "failed_content", tokens, active_sec, True)
+        code_val = code.rstrip("\r\n") if isinstance(code, str) else ""
+        if code_val != CANARY_EXPECTED_RESPONSE:  # Exact string match (no leading strip), rstrip newlines (P1-4)
+            registry.record_canary_attempt(attempt_id, "failed_content", tokens, active_sec, True, call_id=canary_call_id)
             raise CanaryFailureError(
-                f"Canary response content mismatch for attempt '{attempt_id}': expected '{CANARY_EXPECTED_RESPONSE}', got '{stripped_code}'"
+                f"Canary response content mismatch for attempt '{attempt_id}': expected '{CANARY_EXPECTED_RESPONSE}', got '{code}'"
             )
 
         canary_record = {
@@ -406,7 +461,7 @@ def run_pilot_canary(
             "usage_known": True,
         }
         canary_log.append(canary_record)
-        registry.record_canary_attempt(attempt_id, "passed", tokens, active_sec, True)
+        registry.record_canary_attempt(attempt_id, "passed", tokens, active_sec, True, call_id=canary_call_id)
         registry.record_canary_passed(attempt_id, canary_log, tokens, active_sec)
 
         # Publish SCIENTIFIC_START immediately after canary passes
@@ -416,17 +471,5 @@ def run_pilot_canary(
     except CanaryFailureError:
         raise
     except Exception as exc:
-        t1 = time.monotonic()
-        active_sec = t1 - t0
-
-        usage_known = getattr(exc, "usage_known", False)
-        tokens = getattr(exc, "tokens_used", 0)
-
-        registry.record_canary_attempt(attempt_id, "error", tokens, active_sec, usage_known)
-
-        if not usage_known:
-            raise CanaryFailureError(
-                f"Canary failed with unknown/ambiguous usage: {exc}. Pilot BLOCKED."
-            ) from exc
-
-        raise CanaryFailureError(f"Canary execution failed for attempt '{attempt_id}': {exc}") from exc
+        registry.record_canary_attempt(attempt_id, "failed_execution", 0, 0.0, False, call_id=canary_call_id)
+        raise CanaryFailureError(f"Preflight canary execution failed for attempt '{attempt_id}': {exc}") from exc
