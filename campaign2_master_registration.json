@@ -100,8 +100,11 @@
   ],
   "base_commit_sha": "96e04c94ef44b974301bbe9e4fedd2ba4281022d",
   "call_arithmetic": {
-    "pilot_logical_calls": 86,
-    "pilot_max_local_attempts": 258
+    "max_canary_calls": 3,
+    "max_local_invocation_attempts": 525,
+    "per_trial_benchmark_logical_calls": 86,
+    "pilot_max_logical_calls": 175,
+    "pilot_total_benchmark_logical_calls": 172
   },
   "campaign_id": "campaign_2_gpt5_6_sol",
   "cli_version": "0.144.5",
@@ -175,12 +178,13 @@
   ],
   "model_name": "gpt-5.6-sol",
   "pilot_limits": {
-    "confirmatory_tasks": 8,
-    "max_mutations_per_trial": 3,
-    "num_trials": 10,
-    "optimization_tasks": 8,
-    "selection_tasks": 8,
-    "structural_holdout_tasks": 6,
+    "confirmatory_tasks": 2,
+    "max_candidates_per_task": 3,
+    "max_mutations_per_trial": 2,
+    "num_trials": 2,
+    "optimization_tasks": 2,
+    "selection_tasks": 2,
+    "structural_holdout_tasks": 2,
     "trio_slots": 3
   },
   "prompt_envelope": {

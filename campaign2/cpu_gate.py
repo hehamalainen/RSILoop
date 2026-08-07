@@ -89,16 +89,38 @@ def run_prescientific_cpu_gate(workspace_root: str = BASE_DIR, is_mock: bool = F
         except Exception as exc:
             raise CpuGateError(f"Corrupted CPU gate record: {exc}") from exc
 
+        if data.get("record_type") != "prescientific_cpu_gate":
+            raise CpuGateError(f"Invalid record_type in CPU gate record: {data.get('record_type')}")
+
         if "is_mock" not in data or data.get("is_mock") is not is_mock:
             raise CpuGateError(
                 f"Existing CPU gate record is_mock state mismatch or missing explicit is_mock key: "
                 f"record is_mock={data.get('is_mock')}, expected is_mock={is_mock}"
             )
 
-        max_cpu = data.get("max_cpu_seconds", 0.0)
-        if max_cpu > MAX_ALLOWED_CPU_SECONDS:
+        if data.get("total_rows_evaluated") != 120:
+            raise CpuGateError(f"Existing CPU gate record must cover 120 rows, got {data.get('total_rows_evaluated')}")
+
+        if data.get("allowed_limit_seconds") != MAX_ALLOWED_CPU_SECONDS:
+            raise CpuGateError(f"Existing CPU gate record allowed_limit_seconds mismatch: {data.get('allowed_limit_seconds')}")
+
+        measurements = data.get("row_measurements", [])
+        if not isinstance(measurements, list) or len(measurements) != 120:
+            raise CpuGateError(f"Existing CPU gate record must contain 120 row measurements, got {len(measurements)}")
+
+        for idx, m in enumerate(measurements):
+            if not isinstance(m, dict) or not m.get("row_id") or not m.get("task_id") or "worker_cpu_seconds" not in m:
+                raise CpuGateError(f"Invalid measurement entry at index {idx} in CPU gate record: {m}")
+
+        calc_max_cpu = max(float(m["worker_cpu_seconds"]) for m in measurements)
+        if abs(calc_max_cpu - float(data.get("max_cpu_seconds", -1.0))) > 1e-6:
+            raise CpuGateError(
+                f"CPU gate record max_cpu_seconds mismatch: recorded {data.get('max_cpu_seconds')}, calculated {calc_max_cpu:.6f}"
+            )
+
+        if calc_max_cpu > MAX_ALLOWED_CPU_SECONDS:
             raise CpuGateLimitExceededError(
-                f"Existing CPU gate record bound a failing max worker CPU time: {max_cpu:.4f} s > {MAX_ALLOWED_CPU_SECONDS} s"
+                f"Existing CPU gate record bound a failing max worker CPU time: {calc_max_cpu:.4f} s > {MAX_ALLOWED_CPU_SECONDS} s"
             )
         return data
 

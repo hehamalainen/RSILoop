@@ -3429,8 +3429,8 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
 
         if args.mock:
             mock_ws_root = getattr(ctx, "workspace_root", ctx.run_dir)
-            run_prescientific_cpu_gate(mock_ws_root, is_mock=True)
-            model = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=mock_ws_root, ledger=ledger, mock_subprocess=True)
+            cpu_record = run_prescientific_cpu_gate(mock_ws_root, is_mock=True)
+            model = SolModelProvider(model_name="gpt-5.6-sol", artifact_root=BASE_DIR, state_root=mock_ws_root, ledger=ledger, mock_subprocess=True)
             evaluator = ProductionTaskEvaluator()
             run_pilot_canary(stage, identity["attempt_id"], model, mock_ws_root)
             if is_resume:
@@ -3439,8 +3439,8 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
                 publish_scientific_start(stage, identity["attempt_id"], mock_ws_root)
         else:
             verify_codex_cli_version("codex")
-            run_prescientific_cpu_gate(BASE_DIR, is_mock=False)
-            model = SolModelProvider(model_name="gpt-5.6-sol", workspace_root=BASE_DIR, ledger=ledger, mock_subprocess=False)
+            cpu_record = run_prescientific_cpu_gate(BASE_DIR, is_mock=False)
+            model = SolModelProvider(model_name="gpt-5.6-sol", artifact_root=BASE_DIR, state_root=BASE_DIR, ledger=ledger, mock_subprocess=False)
             evaluator = ProductionTaskEvaluator()
             run_pilot_canary(stage, identity["attempt_id"], model, BASE_DIR)
             if is_resume:
@@ -3457,7 +3457,7 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
             suite=suite,
             ledger=ledger,
             checkpoint_mgr=ckpt_mgr,
-            workspace_root=BASE_DIR,
+            workspace_root=mock_ws_root if args.mock else BASE_DIR,
         )
 
         results = orch.run_all_trials()
@@ -3487,8 +3487,9 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
             ledger_path=ledger_path,
             ladder_outcome=ladder.to_dict(),
             launch_lock_hash=lock_hash,
-            workspace_root=BASE_DIR,
+            workspace_root=mock_ws_root if args.mock else BASE_DIR,
             is_mock=args.mock,
+            cpu_gate_record=cpu_record,
         )
         report_path = os.path.join(ctx.run_dir, f"campaign2_{stage}_report.json")
         publish_schema3_report(report, report_path)

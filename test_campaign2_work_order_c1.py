@@ -57,9 +57,11 @@ from campaign2.cpu_gate import (
     run_prescientific_cpu_gate,
     CpuGateLimitExceededError,
 )
+import shutil
 from campaign2.preflight_registry import (
     PreflightRegistry,
     run_pilot_canary,
+    PreflightRegistryError,
     CanaryFailureError,
     StageLimitsExceededError,
 )
@@ -370,46 +372,150 @@ class TestC1_12_MockAndProductionParity(unittest.TestCase):
             attempt_id = "run_mock_parity_test_0001"
             run_dir = os.path.join(tmp_dir, attempt_id)
             os.makedirs(run_dir, exist_ok=True)
-            ctx = SimpleNamespace(run_dir=run_dir, run_id=attempt_id)
+            ctx = SimpleNamespace(run_dir=run_dir, run_id=attempt_id, workspace_root=tmp_dir)
 
-            # Mock launch lock, parity matrix, and reporting to allow test run
+            # Copy master registration and generator.sb.template to tmp_dir
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_master_registration.json"), os.path.join(tmp_dir, "campaign2_master_registration.json"))
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
+            shutil.copy2(os.path.join(BASE_DIR, "generator.sb.template"), os.path.join(tmp_dir, "generator.sb.template"))
+
+            # Patch launch lock and parity matrix verification, and mock ProductionTaskEvaluator to avoid sandbox-in-sandbox nesting
             with mock.patch("campaign2.launch_lock.verify_launch_lock", return_value=True), \
                  mock.patch("campaign2.manifest.verify_campaign2_parity_matrix", return_value=True), \
-                 mock.patch("campaign2.reporting.generate_schema3_report", return_value={}), \
-                 mock.patch("campaign2.reporting.publish_schema3_report", return_value=""):
-                with mock.patch("campaign2.orchestrator.Campaign2Orchestrator") as mock_orch_cls:
-                    from fractions import Fraction
-                    mock_orch_inst = mock.MagicMock()
-                    mock_orch_inst.run_all_trials.return_value = []
-                    mock_orch_inst.compute_outcome.return_value = {
-                        "suite": "suite_p",
-                        "num_trials": 10,
-                        "opt_sel_baseline_aggregate": Fraction(1, 2),
-                        "conf_baseline_aggregate": Fraction(1, 2),
-                        "opt_sel_opt_aggregate": Fraction(3, 5),
-                        "opt_sel_ctrl_aggregate": Fraction(1, 2),
-                        "baseline_aggregate": Fraction(1, 2),
-                        "optimizer_winner_aggregate": Fraction(7, 10),
-                        "control_winner_aggregate": Fraction(1, 2),
-                        "delta_opt_minus_ctrl": Fraction(1, 5),
-                        "delta_positive": True,
-                        "all_16_opt_sel_perfect": False,
-                        "per_trial": [{"trial_index": 0}],
-                        "exploratory": {},
-                        "family_scores": {"F1": {}, "F2": {}, "F3": {}, "F4": {}},
-                    }
-                    mock_orch_cls.return_value = mock_orch_inst
+                 mock.patch("campaign2.model_provider.ProductionTaskEvaluator", MockTaskEvaluator):
 
-                    _run_campaign2(args, ctx)
+                _run_campaign2(args, ctx)
 
-                    self.assertTrue(mock_orch_cls.called)
-                    kwargs = mock_orch_cls.call_args.kwargs
-                    provider = kwargs.get("model_provider")
-                    evaluator = kwargs.get("task_evaluator")
+                report_path = os.path.join(run_dir, "campaign2_pilot_report.json")
+                self.assertTrue(os.path.exists(report_path))
+                with open(report_path, "r", encoding="utf-8") as f:
+                    report_data = json.load(f)
+                self.assertEqual(report_data["schema_version"], "3")
+                self.assertTrue(report_data["is_mock"])
 
-                    self.assertIsInstance(provider, SolModelProvider)
-                    self.assertTrue(provider.mock_subprocess)
-                    self.assertIsInstance(evaluator, ProductionTaskEvaluator)
+
+class TestC1_14_Round23Invariants(unittest.TestCase):
+    def test_preflight_registry_authentication_fails_closed_on_missing_or_mismatched_hashes(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_master_registration.json"), os.path.join(tmp_dir, "campaign2_master_registration.json"))
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
+
+            reg_path = os.path.join(tmp_dir, "history", "campaign2_pilot_preflight_registry.json")
+            os.makedirs(os.path.dirname(reg_path), exist_ok=True)
+            bad_data = {
+                "record_type": "preflight_registry",
+                "stage": "pilot",
+                "registration_hash": "mismatched_registration_hash_000000000000000000000000",
+                "launch_lock_hash": "mismatched_lock_hash_000000000000000000000000",
+                "canary_passed": False,
+            }
+            with open(reg_path, "w", encoding="utf-8") as f:
+                json.dump(bad_data, f)
+            os.chmod(reg_path, 0o444)
+
+            with self.assertRaises(PreflightRegistryError):
+                PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
+
+    def test_canary_validation_exact_string(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model = mock.MagicMock()
+            model.generate_candidate.return_value = ("prefix CANARY_OK suffix", 10)
+            with self.assertRaises(CanaryFailureError):
+                run_pilot_canary("pilot", "att_exact_fail", model, workspace_root=tmp_dir)
+
+    def test_canary_reconciliation_from_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from campaign2.attempt_lifecycle import AttemptLedger
+            hist_dir = os.path.join(tmp_dir, "history")
+            os.makedirs(hist_dir, exist_ok=True)
+            ledger_p = os.path.join(hist_dir, "campaign2_att_rec_001_attempt_ledger.jsonl")
+            ledger = AttemptLedger(ledger_p)
+
+            # Record a valid canary completion in ledger
+            ledger._append_record({
+                "record_type": "invocation_intent",
+                "logical_call_id": "canary_pilot_att_rec_001_01",
+                "invocation_ordinal": 1,
+                "timestamp": time.time(),
+            })
+            ledger._append_record({
+                "record_type": "invocation_completion",
+                "logical_call_id": "canary_pilot_att_rec_001_01",
+                "invocation_ordinal": 1,
+                "classification": "valid",
+                "tokens": 10,
+                "duration": 0.1,
+                "timestamp": time.time(),
+            })
+
+            # Copy master registration files
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_master_registration.json"), os.path.join(tmp_dir, "campaign2_master_registration.json"))
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
+
+            model = mock.MagicMock()
+            data = run_pilot_canary("pilot", "att_rec_001", model, workspace_root=tmp_dir)
+            self.assertTrue(data["canary_passed"])
+            # Model should NOT have been called due to reconciliation
+            self.assertFalse(model.generate_candidate.called)
+
+    def test_spawn_retry_cumulative_accounting(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
+            # Attempt 1: spawn failure
+            reg.record_usage(tokens_used=0, active_time=0.0, logical_calls=1, local_attempts=1, logical_call_id="call_spawn_test")
+            # Attempt 2: success
+            reg.record_usage(tokens_used=100, active_time=0.5, logical_calls=1, local_attempts=1, logical_call_id="call_spawn_test")
+
+            self.assertEqual(reg.data["total_logical_calls"], 1)
+            self.assertEqual(reg.data["total_local_invocation_attempts"], 2)
+
+    def test_hardened_cpu_gate_verification(self):
+        from campaign2.cpu_gate import run_prescientific_cpu_gate, CpuGateError
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rec_p = os.path.join(tmp_dir, "campaign2_cpu_gate_record.json")
+            fake_record = {"record_type": "prescientific_cpu_gate", "is_mock": False}
+            with open(rec_p, "w", encoding="utf-8") as f:
+                json.dump(fake_record, f)
+            os.chmod(rec_p, 0o444)
+
+            with self.assertRaises(CpuGateError):
+                run_prescientific_cpu_gate(workspace_root=tmp_dir, is_mock=False)
+
+    def test_ledger_sequence_rejects_started_after_completion(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from campaign2.attempt_lifecycle import AttemptLedger, AttemptLifecycleError
+            ledger_p = os.path.join(tmp_dir, "ledger.jsonl")
+            ledger = AttemptLedger(ledger_p)
+
+            key = ("call_seq_test", 1)
+            intent = {"record_type": "invocation_intent", "logical_call_id": "call_seq_test", "invocation_ordinal": 1, "timestamp": time.time()}
+            intent_bytes = (json.dumps(intent, sort_keys=True) + "\n").encode("utf-8")
+            intent_hash = hashlib.sha256(intent_bytes).hexdigest()
+
+            comp = {
+                "record_type": "invocation_completion",
+                "logical_call_id": "call_seq_test",
+                "invocation_ordinal": 1,
+                "intent_record_hash": intent_hash,
+                "started_record_hash": "",
+                "parse_state": "spawn_failure",
+                "timestamp": time.time(),
+            }
+
+            started = {
+                "record_type": "process_started",
+                "logical_call_id": "call_seq_test",
+                "invocation_ordinal": 1,
+                "intent_record_hash": intent_hash,
+                "timestamp": time.time(),
+            }
+
+            ledger._append_record(intent)
+            ledger._append_record(comp)
+            ledger._append_record(started)
+
+            with self.assertRaises(AttemptLifecycleError):
+                ledger.verify_three_record_protocol()
 
 
 class TestC1_13_FullStageRefusal(unittest.TestCase):

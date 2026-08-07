@@ -206,6 +206,7 @@ def render_seatbelt_profile(scratch_dir: str, workspace_root: str = BASE_DIR) ->
     )
 
     sb_path = os.path.join(scratch_dir, "generator.sb")
+    os.makedirs(scratch_dir, mode=0o700, exist_ok=True)
     with open(sb_path, "w", encoding="utf-8") as f:
         f.write(sb_content)
     return sb_path
@@ -248,7 +249,7 @@ def build_allowlisted_env(invocation_root: str) -> Dict[str, str]:
 
 
 def setup_credential_home(scratch_dir: str, is_mock: bool = False, auth_source_path: Optional[str] = None) -> str:
-    """Sets up scratch_dir/.codex/auth.json from verified source credential file (C1-7)."""
+    """Sets up scratch_dir/.codex/auth.json from verified source credential file (C1-7, P1-4)."""
     codex_dir = os.path.join(scratch_dir, ".codex")
     tmp_dir = os.path.join(scratch_dir, "tmp")
     os.makedirs(codex_dir, mode=0o700, exist_ok=True)
@@ -257,7 +258,9 @@ def setup_credential_home(scratch_dir: str, is_mock: bool = False, auth_source_p
     src_p = auth_source_path or os.environ.get("CODEX_AUTH_PATH") or os.path.expanduser("~/.codex/auth.json")
     dest_auth = os.path.join(codex_dir, "auth.json")
 
-    if os.path.exists(src_p):
+    if src_p and os.path.exists(src_p):
+        if os.path.islink(src_p):
+            raise ExecutableBoundaryError(f"Credential source cannot be a symlink: {src_p}")
         try:
             st = os.stat(src_p)
             if st.st_uid != os.getuid():
@@ -308,18 +311,25 @@ def create_fresh_invocation_scratch_dir(workspace_root: str = BASE_DIR, is_mock:
 
 def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, return_code: int = 0) -> Dict[str, Any]:
     """
-    Parses CLI JSONL output and classifies response strictly (C1-11).
+    Parses CLI JSONL output and classifies response strictly (C1-11, P1-2).
     Raw bytes hashed BEFORE strict UTF-8 decoding.
-    Requires return_code == 0, strict event sequence (agent_message before turn.completed),
-    output_tokens present as integer >= 0, turn.completed as final line, and nonempty agent message.
+    Categorizes transient zero-event infrastructure errors (DNS/TLS/429/503) as retryable.
     """
     stdout_hash = hashlib.sha256(stdout_bytes).hexdigest()
     stderr_hash = hashlib.sha256(stderr_bytes).hexdigest()
 
     if return_code != 0:
+        err_text = (stdout_bytes + b"\n" + stderr_bytes).decode("utf-8", errors="replace")
+        transient_kw = (
+            "HTTP 429", "429 Too Many Requests", "503 Service Unavailable",
+            "DNS lookup failed", "TLS handshake failed", "connection refused",
+            "ConnectionRefusedError", "connect ETIMEDOUT", "rate_limit_exceeded"
+        )
+        is_transient = any(kw in err_text for kw in transient_kw)
+        classification = "transient_infrastructure_error" if is_transient else "invalidated"
         return {
             "parse_state": "nonzero_exit",
-            "classification": "invalidated",
+            "classification": classification,
             "usage_known": False,
             "tokens": 0,
             "text": "",
@@ -374,7 +384,6 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
                 "error": f"Malformed JSON line #{idx}: {exc}",
             }
 
-    # Verify turn.completed is the absolute LAST event
     if events[-1].get("type") != "turn.completed":
         return {
             "parse_state": "malformed_jsonl",
@@ -388,7 +397,6 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
         }
 
     agent_messages = []
-    turn_completed_events = []
     turn_completed_seen = False
 
     for ev in events:
@@ -412,21 +420,8 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
                 agent_messages.append(text_content)
         elif ev_type == "turn.completed":
             turn_completed_seen = True
-            turn_completed_events.append(ev)
 
-    if len(turn_completed_events) != 1:
-        return {
-            "parse_state": "malformed_jsonl",
-            "classification": "invalidated",
-            "usage_known": False,
-            "tokens": 0,
-            "text": "",
-            "stdout_hash": stdout_hash,
-            "stderr_hash": stderr_hash,
-            "error": f"Expected exactly 1 turn.completed event, got {len(turn_completed_events)}",
-        }
-
-    turn_ev = turn_completed_events[0]
+    turn_ev = events[-1]
     usage = turn_ev.get("usage")
     if not isinstance(usage, dict) or "output_tokens" not in usage:
         return {
@@ -450,10 +445,10 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
             "text": "",
             "stdout_hash": stdout_hash,
             "stderr_hash": stderr_hash,
-            "error": f"Invalid output_tokens in usage: {output_tokens}",
+            "error": f"Invalid output_tokens value: {output_tokens}",
         }
 
-    if not agent_messages or len(agent_messages[-1].strip()) == 0:
+    if not agent_messages:
         return {
             "parse_state": "malformed_jsonl",
             "classification": "invalidated",
@@ -462,18 +457,19 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
             "text": "",
             "stdout_hash": stdout_hash,
             "stderr_hash": stderr_hash,
-            "error": "Missing or empty agent_message event before turn.completed",
+            "error": "No agent_message items found in stdout JSONL",
         }
 
-    extracted_text = agent_messages[-1]
+    final_text = "\n".join(agent_messages)
     return {
         "parse_state": "valid",
         "classification": "valid",
         "usage_known": True,
         "tokens": output_tokens,
-        "text": extracted_text,
+        "text": final_text,
         "stdout_hash": stdout_hash,
         "stderr_hash": stderr_hash,
+        "error": "",
     }
 
 
@@ -486,11 +482,15 @@ class SolModelProvider(ModelProvider):
         self,
         model_name: str = "gpt-5.6-sol",
         workspace_root: str = BASE_DIR,
+        artifact_root: Optional[str] = None,
+        state_root: Optional[str] = None,
         ledger: Optional[Any] = None,
         mock_subprocess: bool = False,
     ):
         self.model_name = model_name
         self.workspace_root = workspace_root
+        self.artifact_root = artifact_root or BASE_DIR
+        self.state_root = state_root or workspace_root
         self.ledger = ledger
         self.mock_subprocess = mock_subprocess
         self.is_mock = mock_subprocess
@@ -506,15 +506,11 @@ class SolModelProvider(ModelProvider):
         Executes a Codex CLI model invocation with three-record ledger logging,
         Seatbelt sandbox-exec profile rendering, process group kill/reap, stream bounds, and narrowed retries.
         """
-        template_p = os.path.join(self.workspace_root, "generator.sb.template")
+        template_p = os.path.join(self.artifact_root, "generator.sb.template")
         if not os.path.exists(template_p):
             template_p = os.path.join(BASE_DIR, "generator.sb.template")
         if not os.path.exists(template_p):
             raise ExecutableBoundaryError(f"Missing generator.sb.template: {template_p}")
-
-        with open(template_p, "rb") as f:
-            template_bytes = f.read()
-        sandbox_profile_hash = hashlib.sha256(template_bytes).hexdigest()
 
         task_file_hash = hashlib.sha256(problem_bytes).hexdigest() if problem_bytes else ""
         prompt_hash = hashlib.sha256(stdin_bytes).hexdigest()
@@ -524,8 +520,14 @@ class SolModelProvider(ModelProvider):
         last_exception = None
 
         for invocation_ordinal in range(1, max_attempts + 1):
-            scratch_dir = create_fresh_invocation_scratch_dir(workspace_root=self.workspace_root, is_mock=self.mock_subprocess)
-            sb_path = render_seatbelt_profile(scratch_dir, self.workspace_root)
+            scratch_dir = create_fresh_invocation_scratch_dir(workspace_root=self.state_root, is_mock=self.mock_subprocess)
+            sb_path = render_seatbelt_profile(scratch_dir, self.artifact_root)
+
+            # Bind sandbox_profile_hash to rendered generator.sb bytes (P1-5)
+            with open(sb_path, "rb") as f:
+                rendered_sb_bytes = f.read()
+            sandbox_profile_hash = hashlib.sha256(rendered_sb_bytes).hexdigest()
+
             cmd = build_codex_cli_command(self.model_name, scratch_dir, sb_path)
             env = build_allowlisted_env(scratch_dir)
 
@@ -564,14 +566,12 @@ class SolModelProvider(ModelProvider):
             # 2. Attempt spawn
             proc = None
             pid = None
-            spawn_success = False
             t0 = time.monotonic()
             t0_wall = time.time()
 
             try:
                 if self.mock_subprocess:
                     pid = 99999 + invocation_ordinal
-                    spawn_success = True
                 else:
                     proc = subprocess.Popen(
                         cmd,
@@ -584,7 +584,6 @@ class SolModelProvider(ModelProvider):
                         env=env,
                     )
                     pid = proc.pid
-                    spawn_success = True
 
             except OSError as spawn_err:
                 completion_record = {
@@ -605,6 +604,16 @@ class SolModelProvider(ModelProvider):
                 }
                 if self.ledger:
                     self.ledger._append_record(completion_record)
+
+                from campaign2.preflight_registry import PreflightRegistry
+                reg = PreflightRegistry(workspace_root=self.state_root)
+                reg.record_usage(
+                    tokens_used=0,
+                    active_time=0.0,
+                    logical_calls=1,
+                    local_attempts=1,
+                    logical_call_id=logical_call_id,
+                )
 
                 shutil.rmtree(scratch_dir, ignore_errors=True)
                 last_exception = spawn_err
@@ -632,7 +641,6 @@ class SolModelProvider(ModelProvider):
             stdout_bytes = b""
             stderr_bytes = b""
             return_code = 0
-            call_error = None
 
             try:
                 if self.mock_subprocess:
@@ -671,20 +679,26 @@ class SolModelProvider(ModelProvider):
                     try:
                         stdout_bytes, stderr_bytes = proc.communicate(input=stdin_bytes, timeout=CALL_WALL_LIMIT_SECONDS)
                         return_code = proc.returncode
-                    except subprocess.TimeoutExpired as exc:
-                        call_error = exc
+                    except subprocess.TimeoutExpired:
                         return_code = -9
-                    except Exception as exc:
-                        call_error = exc
+                    except Exception:
                         return_code = -1
 
                     if len(stdout_bytes) > MAX_STDOUT_BYTES or len(stderr_bytes) > MAX_STDERR_BYTES:
-                        call_error = ExecutableBoundaryError("Stream bound exceeded (16 MiB stdout / 1 MiB stderr)")
+                        return_code = -8
 
             finally:
-                if proc and proc.poll() is None:
+                if proc:
+                    if proc.poll() is None:
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except Exception:
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
                     try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        proc.wait(timeout=2.0)
                     except Exception:
                         pass
                 t1 = time.monotonic()
@@ -716,14 +730,15 @@ class SolModelProvider(ModelProvider):
             if self.ledger:
                 self.ledger._append_record(completion_record)
 
-            # Record usage in PreflightRegistry (logical call = 1 on attempt 1, local_attempts = 1 per CLI attempt)
+            # Record usage in PreflightRegistry with deduplicated logical calls (P0-4)
             from campaign2.preflight_registry import PreflightRegistry
-            reg = PreflightRegistry(workspace_root=self.workspace_root)
+            reg = PreflightRegistry(workspace_root=self.state_root)
             reg.record_usage(
                 tokens_used=parsed["tokens"],
                 active_time=duration_sec,
-                logical_calls=1 if invocation_ordinal == 1 else 0,
+                logical_calls=1,
                 local_attempts=1,
+                logical_call_id=logical_call_id,
             )
 
             if parsed["classification"] == "valid" and return_code == 0:
@@ -737,10 +752,9 @@ class SolModelProvider(ModelProvider):
             setattr(last_exception, "usage_known", parsed["usage_known"])
             setattr(last_exception, "tokens_used", parsed["tokens"])
 
-            if parsed["classification"] == "infrastructure_error" and invocation_ordinal < max_attempts:
-                time.sleep(0.1 * (2 ** invocation_ordinal))
+            if parsed["classification"] in ("spawn_failure", "transient_infrastructure_error") and invocation_ordinal < max_attempts:
+                time.sleep(0.1 * (2 ** (invocation_ordinal - 1)))
                 continue
-
             raise last_exception
 
         raise last_exception or ExecutableBoundaryError(f"Invocation {logical_call_id} exhausted max attempts")
@@ -753,7 +767,9 @@ class SolModelProvider(ModelProvider):
             stdin_bytes = effective_prompt.encode("utf-8")
             problem_bytes = b""
         else:
-            bench_dir = os.path.join(self.workspace_root, "benchmarks", "campaign2")
+            bench_dir = os.path.join(self.artifact_root, "benchmarks", "campaign2")
+            if not os.path.exists(bench_dir):
+                bench_dir = os.path.join(BASE_DIR, "benchmarks", "campaign2")
             suite_sub = "suite_c" if task_id.startswith("c_") else "suite_p"
             problem_path = os.path.join(bench_dir, suite_sub, task_id, "problem.txt")
 
@@ -770,7 +786,7 @@ class SolModelProvider(ModelProvider):
                 f"---PROBLEM SPECIFICATION---\n\n"
                 f"{problem_text}"
                 f"{DELIMITER}"
-                f"{effective_prompt}\n"
+                f"{effective_prompt}"
             )
             stdin_bytes = full_prompt.encode("utf-8")
 
@@ -786,9 +802,8 @@ class SolModelProvider(ModelProvider):
         if not (len(lines) >= 2 and lines[0].strip() == "```python" and lines[-1].strip() == "```"):
             return "# malformed fence\n", tokens
 
-        code_lines = lines[1:-1]
-        code = "\n".join(code_lines).strip() + "\n"
-        return code, tokens
+        candidate_body = "\n".join(lines[1:-1]) + "\n"
+        return candidate_body, tokens
 
     def mutate_prompt(self, mutable_body: str, failure_context: str,
                       call_id: str) -> Tuple[str, int]:

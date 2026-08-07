@@ -51,6 +51,7 @@ def generate_schema3_report(
     launch_lock_hash: str = "",
     workspace_root: str = BASE_DIR,
     is_mock: bool = False,
+    cpu_gate_record: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Generate a complete Schema 3 experiment report populated with exact rational arithmetic.
@@ -141,6 +142,7 @@ def generate_schema3_report(
         },
         "ledger_file": ledger_path,
         "active_rlimits": get_candidate_rlimits(suite=outcome.get("suite", "suite_p")),
+        "prescientific_cpu_gate": cpu_gate_record if cpu_gate_record else {},
         "primary_outcome": {
             "opt_sel_baseline_aggregate": outcome.get("opt_sel_baseline_aggregate", "0"),
             "conf_baseline_aggregate": outcome.get("conf_baseline_aggregate", "0"),

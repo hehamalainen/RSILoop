@@ -78,15 +78,24 @@ class PreflightRegistry:
             except Exception as exc:
                 raise PreflightRegistryError(f"Corrupted preflight registry: {exc}") from exc
 
-            # Authenticate registration_hash and launch_lock_hash against current files
-            if reg_hash and data.get("registration_hash") and data["registration_hash"] != reg_hash:
+            stored_reg_hash = data.get("registration_hash", "")
+            stored_lock_hash = data.get("launch_lock_hash", "")
+
+            # If disk hash is present, registry MUST match disk hash
+            if reg_hash and stored_reg_hash != reg_hash:
                 raise PreflightRegistryError(
-                    f"Preflight registry registration_hash mismatch: registry has '{data.get('registration_hash')}', disk has '{reg_hash}'"
+                    f"Preflight registry registration_hash mismatch: registry has '{stored_reg_hash}', disk has '{reg_hash}'"
                 )
-            if lock_hash and data.get("launch_lock_hash") and data["launch_lock_hash"] != lock_hash:
+            if lock_hash and stored_lock_hash != lock_hash:
                 raise PreflightRegistryError(
-                    f"Preflight registry launch_lock_hash mismatch: registry has '{data.get('launch_lock_hash')}', disk has '{lock_hash}'"
+                    f"Preflight registry launch_lock_hash mismatch: registry has '{stored_lock_hash}', disk has '{lock_hash}'"
                 )
+
+            # If registry stored a non-empty hash, disk file MUST still exist and match
+            if stored_reg_hash and not reg_hash:
+                raise PreflightRegistryError("Preflight registry bound registration_hash, but master registration file is missing on disk")
+            if stored_lock_hash and not lock_hash:
+                raise PreflightRegistryError("Preflight registry bound launch_lock_hash, but launch lock file is missing on disk")
             return data
 
         initial_data = {
@@ -102,6 +111,7 @@ class PreflightRegistry:
             "cumulative_active_time": 0.0,
             "total_logical_calls": 0,
             "total_local_invocation_attempts": 0,
+            "seen_logical_call_ids": [],
             "backend_request_count": "unknown",
         }
         self._save_data(initial_data)
@@ -159,12 +169,22 @@ class PreflightRegistry:
         self.data["canary_ordinals"] = canary_log
         self.bind_attempt(attempt_id)
 
-    def record_usage(self, tokens_used: int, active_time: float, logical_calls: int = 1, local_attempts: int = 1) -> None:
-        """Accumulate active time and tokens across trials and retries while enforcing stage limits."""
-        new_tokens = self.data["cumulative_tokens"] + tokens_used
-        new_active = self.data["cumulative_active_time"] + active_time
-        new_calls = self.data["total_logical_calls"] + logical_calls
-        new_attempts = self.data["total_local_invocation_attempts"] + local_attempts
+    def record_usage(self, tokens_used: int, active_time: float, logical_calls: int = 1, local_attempts: int = 1, logical_call_id: str = "") -> None:
+        """Accumulate active time, tokens, and call counts across trials and retries while enforcing stage limits."""
+        seen = set(self.data.get("seen_logical_call_ids", []))
+        inc_calls = 0
+        if logical_call_id:
+            if logical_call_id not in seen:
+                seen.add(logical_call_id)
+                inc_calls = 1
+        else:
+            inc_calls = logical_calls
+
+        self.data["seen_logical_call_ids"] = sorted(list(seen))
+        new_tokens = self.data.get("cumulative_tokens", 0) + tokens_used
+        new_active = self.data.get("cumulative_active_time", 0.0) + active_time
+        new_calls = self.data.get("total_logical_calls", 0) + inc_calls
+        new_attempts = self.data.get("total_local_invocation_attempts", 0) + local_attempts
 
         self.data["cumulative_tokens"] = new_tokens
         self.data["cumulative_active_time"] = new_active
@@ -180,15 +200,15 @@ class PreflightRegistry:
             )
         if new_active > MAX_PILOT_ACTIVE_SECONDS:
             raise StageLimitsExceededError(
-                f"Pilot active time limit exceeded: {new_active:.2f} s > {MAX_PILOT_ACTIVE_SECONDS:.2f} s"
+                f"Pilot active time limit exceeded: {new_active:.2f} s > {MAX_PILOT_ACTIVE_SECONDS} s"
             )
         if new_calls > MAX_LOGICAL_CALLS:
             raise StageLimitsExceededError(
-                f"Pilot max logical calls exceeded: {new_calls} > {MAX_LOGICAL_CALLS}"
+                f"Pilot total logical calls limit exceeded: {new_calls} > {MAX_LOGICAL_CALLS}"
             )
         if new_attempts > MAX_LOCAL_INVOCATION_ATTEMPTS:
             raise StageLimitsExceededError(
-                f"Pilot max local invocation attempts exceeded: {new_attempts} > {MAX_LOCAL_INVOCATION_ATTEMPTS}"
+                f"Pilot total local invocation attempts limit exceeded: {new_attempts} > {MAX_LOCAL_INVOCATION_ATTEMPTS}"
             )
 
 
@@ -204,8 +224,9 @@ def run_pilot_canary(
     If canary passes, binds attempt ID in registry and publishes SCIENTIFIC_START.
     If canary fails, fresh attempt permitted ONLY if usage is fully known or provably 0.
     Maximum 3 canary attempts permitted across pilot stage.
+    Reconciles canary completion from ledger to prevent anti-resampling crash window.
     """
-    from campaign2.attempt_lifecycle import publish_scientific_start
+    from campaign2.attempt_lifecycle import publish_scientific_start, AttemptLedger
 
     registry = PreflightRegistry(stage=stage, workspace_root=workspace_root)
 
@@ -220,6 +241,38 @@ def run_pilot_canary(
         if not os.path.exists(start_marker_p):
             publish_scientific_start(stage=stage, attempt_id=attempt_id, workspace_root=workspace_root)
         return registry.data
+
+    # Check AttemptLedger to reconcile completed canary call if provider completion succeeded before registry update
+    ledger_p = os.path.join(registry.history_dir, f"campaign2_{attempt_id}_attempt_ledger.jsonl")
+    if not os.path.exists(ledger_p):
+        ledger_p = os.path.join(workspace_root, "ledger.jsonl")
+
+    if os.path.exists(ledger_p):
+        try:
+            ledger = AttemptLedger(ledger_p)
+            entries = ledger.get_entries()
+            canary_completes = [
+                e for e in entries
+                if e.get("record_type") == "invocation_completion"
+                and str(e.get("logical_call_id", "")).startswith(f"canary_{stage}")
+                and e.get("classification") == "valid"
+            ]
+            if canary_completes:
+                latest_canary = canary_completes[-1]
+                canary_record = {
+                    "call_id": latest_canary.get("logical_call_id", ""),
+                    "status": "passed",
+                    "tokens": latest_canary.get("tokens", 10),
+                    "duration": latest_canary.get("duration", 0.1),
+                    "attempts": 1,
+                    "usage_known": True,
+                }
+                registry.record_canary_attempt(attempt_id, "passed", canary_record["tokens"], canary_record["duration"], True)
+                registry.record_canary_passed(attempt_id, [canary_record], canary_record["tokens"], canary_record["duration"])
+                publish_scientific_start(stage=stage, attempt_id=attempt_id, workspace_root=workspace_root)
+                return registry.data
+        except Exception:
+            pass
 
     # Check max canary attempts cap (3 attempts max)
     attempts_log = registry.data.get("canary_attempts", [])
@@ -246,7 +299,7 @@ def run_pilot_canary(
         active_sec = t1 - t0
 
         stripped_code = code.strip()
-        if stripped_code != CANARY_EXPECTED_RESPONSE and "CANARY_OK" not in stripped_code:
+        if stripped_code != CANARY_EXPECTED_RESPONSE:
             registry.record_canary_attempt(attempt_id, "failed_content", tokens, active_sec, True)
             raise CanaryFailureError(
                 f"Canary response content mismatch for attempt '{attempt_id}': expected '{CANARY_EXPECTED_RESPONSE}', got '{stripped_code}'"

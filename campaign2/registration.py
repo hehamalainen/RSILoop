@@ -167,18 +167,22 @@ def generate_master_registration(workspace_root: str = BASE_DIR) -> Tuple[str, s
     MUTATION_WRAPPER_HASH = hashlib.sha256(MUTATION_WRAPPER.encode("utf-8")).hexdigest()
 
     PILOT_LIMITS = {
-        "num_trials": 10,
-        "max_mutations_per_trial": 3,
+        "num_trials": 2,
+        "max_candidates_per_task": 3,
+        "max_mutations_per_trial": 2,
         "trio_slots": 3,
-        "optimization_tasks": 8,
-        "selection_tasks": 8,
-        "confirmatory_tasks": 8,
-        "structural_holdout_tasks": 6,
+        "optimization_tasks": 2,
+        "selection_tasks": 2,
+        "confirmatory_tasks": 2,
+        "structural_holdout_tasks": 2,
     }
 
     CALL_ARITHMETIC = {
-        "pilot_logical_calls": 86,
-        "pilot_max_local_attempts": 258,
+        "per_trial_benchmark_logical_calls": 86,
+        "pilot_total_benchmark_logical_calls": 172,
+        "max_canary_calls": 3,
+        "pilot_max_logical_calls": 175,
+        "max_local_invocation_attempts": 525,
     }
 
     reg_data = {
@@ -349,6 +353,31 @@ def verify_master_registration(workspace_root: str = BASE_DIR) -> Dict[str, Any]
     limits = data.get("execution_limits", {})
     if limits.get("max_output_tokens") != 600000 or limits.get("max_active_seconds") != 28800.0 or limits.get("max_logical_calls") != 175 or limits.get("max_local_invocation_attempts") != 525:
         raise ValueError(f"Execution limits mismatch in master registration: {limits}")
+
+    p_lims = data.get("pilot_limits", {})
+    expected_p_lims = {
+        "num_trials": 2,
+        "max_candidates_per_task": 3,
+        "max_mutations_per_trial": 2,
+        "trio_slots": 3,
+        "optimization_tasks": 2,
+        "selection_tasks": 2,
+        "confirmatory_tasks": 2,
+        "structural_holdout_tasks": 2,
+    }
+    if p_lims != expected_p_lims:
+        raise ValueError(f"Pilot limits mismatch in master registration: expected {expected_p_lims}, got {p_lims}")
+
+    c_arith = data.get("call_arithmetic", {})
+    expected_c_arith = {
+        "per_trial_benchmark_logical_calls": 86,
+        "pilot_total_benchmark_logical_calls": 172,
+        "max_canary_calls": 3,
+        "pilot_max_logical_calls": 175,
+        "max_local_invocation_attempts": 525,
+    }
+    if c_arith != expected_c_arith:
+        raise ValueError(f"Call arithmetic mismatch in master registration: expected {expected_c_arith}, got {c_arith}")
 
     prompt_env = data.get("prompt_envelope", {})
     cand_wrapper = prompt_env.get("candidate_wrapper", "")

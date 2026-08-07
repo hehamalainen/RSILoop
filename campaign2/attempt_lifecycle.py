@@ -542,6 +542,8 @@ class AttemptLedger:
             elif r_type == "process_started":
                 if key in started:
                     raise AttemptLifecycleError(f"Duplicate process_started for key {key}")
+                if key in completes:
+                    raise AttemptLifecycleError(f"process_started recorded after invocation_completion for key {key}")
                 if key not in intents:
                     raise AttemptLifecycleError(f"process_started recorded before invocation_intent for key {key}")
                 intent_rec, intent_hash, intent_idx = intents[key]
@@ -588,5 +590,13 @@ class AttemptLedger:
                     f"Attempt is already terminal (classified as '{entry.get('classification')}' - "
                     f"'{entry.get('reason')}') and cannot be resumed"
                 )
+
+        # Credential residue scan across scratch directories (P1-4)
+        import glob
+        for scratch in glob.glob("/tmp/rsi_codex_scratch_*"):
+            auth_p = os.path.join(scratch, ".codex", "auth.json")
+            if os.path.exists(auth_p):
+                raise AttemptLifecycleError(f"Credential residue found during resume admission scan: {auth_p}")
+
         self.verify_all_intents_completed()
         return self.verify_three_record_protocol()
