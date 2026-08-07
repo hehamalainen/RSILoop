@@ -9,6 +9,7 @@ import os
 import json
 import stat
 import time
+import math
 import hashlib
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -39,13 +40,26 @@ def is_permitted_local_retry(comp: Dict[str, Any], has_process_started: bool) ->
        - comp.get("classification") == "spawn_failure"
        - comp.get("parse_state") == "spawn_failure"
        - comp.get("usage_known") is True (explicit boolean True)
-       - comp.get("tokens") == 0
-       - comp.get("return_code") != 0
+       - comp.get("tokens") == 0 (int 0)
+       - comp.get("return_code") == -1 (int -1)
+       - comp.get("started_record_hash") == ""
+       - comp.get("text_hash") == ""
+       - comp.get("raw_stdout_digest") == hashlib.sha256(b"").hexdigest()
+       - comp.get("raw_stderr_digest") is a 64-character hex string
+       - comp.get("duration") is int or float, not bool, duration >= 0.0 and math.isfinite(duration)
+
     2. transient_infrastructure_error:
        - has_process_started is True
        - comp.get("classification") == "transient_infrastructure_error"
-       - comp.get("parse_state") == "transient_infrastructure_error"
+       - comp.get("parse_state") in ("nonzero_exit", "transient_infrastructure_error")
        - comp.get("usage_known") is False (explicit boolean False)
+       - comp.get("tokens") == 0 (int 0)
+       - comp.get("return_code") is int, return_code != 0
+       - comp.get("started_record_hash") is a non-empty str
+       - comp.get("text_hash") == ""
+       - comp.get("raw_stdout_digest") == hashlib.sha256(b"").hexdigest()
+       - comp.get("raw_stderr_digest") is a 64-character hex string
+       - comp.get("duration") is int or float, not bool, duration >= 0.0 and math.isfinite(duration)
     """
     if not isinstance(comp, dict):
         return False
@@ -53,8 +67,32 @@ def is_permitted_local_retry(comp: Dict[str, Any], has_process_started: bool) ->
     classification = comp.get("classification")
     parse_state = comp.get("parse_state")
     usage_known = comp.get("usage_known")
+    tokens = comp.get("tokens")
+    return_code = comp.get("return_code")
+    duration = comp.get("duration")
+    text_hash = comp.get("text_hash")
+    started_record_hash = comp.get("started_record_hash")
+    raw_stdout_digest = comp.get("raw_stdout_digest")
+    raw_stderr_digest = comp.get("raw_stderr_digest")
 
     if classification not in PERMITTED_LOCAL_RETRIES:
+        return False
+
+    # Universal constraints on tokens, duration, and text/stdout evidence
+    if type(tokens) is not int or tokens != 0:
+        return False
+
+    if type(duration) is bool or not isinstance(duration, (int, float)) or duration < 0.0 or not math.isfinite(duration):
+        return False
+
+    if type(text_hash) is not str or text_hash != "":
+        return False
+
+    empty_sha256 = hashlib.sha256(b"").hexdigest()
+    if type(raw_stdout_digest) is not str or raw_stdout_digest != empty_sha256:
+        return False
+
+    if type(raw_stderr_digest) is not str or len(raw_stderr_digest) != 64:
         return False
 
     if classification == "spawn_failure":
@@ -63,16 +101,21 @@ def is_permitted_local_retry(comp: Dict[str, Any], has_process_started: bool) ->
             and parse_state == "spawn_failure"
             and usage_known is True
             and type(usage_known) is bool
-            and comp.get("tokens") == 0
-            and type(comp.get("tokens")) is int
-            and comp.get("return_code") != 0
+            and type(return_code) is int
+            and return_code == -1
+            and type(started_record_hash) is str
+            and started_record_hash == ""
         )
     elif classification == "transient_infrastructure_error":
         return (
             has_process_started is True
-            and parse_state == "transient_infrastructure_error"
+            and parse_state in ("nonzero_exit", "transient_infrastructure_error")
             and usage_known is False
             and type(usage_known) is bool
+            and type(return_code) is int
+            and return_code != 0
+            and type(started_record_hash) is str
+            and len(started_record_hash) > 0
         )
 
     return False

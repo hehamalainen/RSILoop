@@ -176,15 +176,15 @@ class PreflightRegistry:
         if data.get("stage") != self.stage:
             raise PreflightRegistryError(f"Preflight registry stage mismatch: expected '{self.stage}', got '{data.get('stage')}'")
 
-        # Verify registration and launch lock hashes match workspace files (P0-4, bidirectional)
+        # Verify registration and launch lock hashes match workspace files (P0-4, bidirectional, lexists for symlink safety)
         reg_file = os.path.join(self.workspace_root, "campaign2_master_registration.json")
-        reg_exists = os.path.exists(reg_file)
+        reg_entry_exists = os.path.lexists(reg_file)
         stored_reg_hash = data.get("registration_hash", "")
 
-        if reg_exists or stored_reg_hash:
-            if not reg_exists or os.path.islink(reg_file) or not os.path.isfile(reg_file):
+        if reg_entry_exists or stored_reg_hash:
+            if not reg_entry_exists or os.path.islink(reg_file) or not os.path.isfile(reg_file):
                 raise PreflightRegistryError(
-                    f"Bound master registration file missing or invalid: {reg_file}"
+                    f"Bound master registration file missing or invalid (symlinks forbidden): {reg_file}"
                 )
             if not stored_reg_hash:
                 raise PreflightRegistryError(
@@ -198,13 +198,13 @@ class PreflightRegistry:
                 )
 
         lock_file = os.path.join(self.workspace_root, "campaign2_launch_lock.json")
-        lock_exists = os.path.exists(lock_file)
+        lock_entry_exists = os.path.lexists(lock_file)
         stored_lock_hash = data.get("launch_lock_hash", "")
 
-        if lock_exists or stored_lock_hash:
-            if not lock_exists or os.path.islink(lock_file) or not os.path.isfile(lock_file):
+        if lock_entry_exists or stored_lock_hash:
+            if not lock_entry_exists or os.path.islink(lock_file) or not os.path.isfile(lock_file):
                 raise PreflightRegistryError(
-                    f"Bound launch lock file missing or invalid: {lock_file}"
+                    f"Bound launch lock file missing or invalid (symlinks forbidden): {lock_file}"
                 )
             if not stored_lock_hash:
                 raise PreflightRegistryError(
@@ -295,6 +295,19 @@ class PreflightRegistry:
         completion_hash: str = "",
     ) -> None:
         """Accumulate active time, tokens, and call counts across trials and retries while enforcing stage limits (idempotent per completion hash, P0-1)."""
+        import math
+        if type(tokens_used) is bool or not isinstance(tokens_used, int) or tokens_used < 0:
+            raise PreflightRegistryError(f"Invalid tokens_used in record_usage: {tokens_used}")
+
+        if type(active_time) is bool or not isinstance(active_time, (int, float)) or active_time < 0.0 or not math.isfinite(active_time):
+            raise PreflightRegistryError(f"Invalid active_time in record_usage: {active_time}")
+
+        if type(logical_calls) is bool or not isinstance(logical_calls, int) or logical_calls < 0:
+            raise PreflightRegistryError(f"Invalid logical_calls in record_usage: {logical_calls}")
+
+        if type(local_attempts) is bool or not isinstance(local_attempts, int) or local_attempts < 0:
+            raise PreflightRegistryError(f"Invalid local_attempts in record_usage: {local_attempts}")
+
         self._reload()
         seen = set(self.data.get("seen_logical_call_ids", []))
         seen_keys = set(self.data.get("seen_invocation_keys", []))

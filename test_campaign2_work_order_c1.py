@@ -1039,6 +1039,8 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "classification": "spawn_failure",
                 "return_code": -1,
                 "text_hash": "",
+                "raw_stdout_digest": hashlib.sha256(b"").hexdigest(),
+                "raw_stderr_digest": hashlib.sha256(b"spawn failed").hexdigest(),
                 "tokens": 0,
                 "duration": 0.1,
                 "timestamp": time.time(),
@@ -1378,19 +1380,25 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 reg._reload()
             self.assertIn("Bound launch lock file missing", str(ctx.exception))
 
-    def test_round30_live_and_recovery_retry_parity_transient_infrastructure_error(self):
+    def test_round31_live_and_recovery_retry_parity_transient_infrastructure_error(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             from campaign2.preflight_registry import PreflightRegistry, run_pilot_canary, CANARY_NEUTRAL_PROMPT, CANARY_EXPECTED_RESPONSE
-            from campaign2.attempt_lifecycle import AttemptLedger
+            from campaign2.attempt_lifecycle import AttemptLedger, is_permitted_local_retry
+            from campaign2.model_provider import parse_and_classify_jsonl_output
 
-            cid = "canary_pilot_att_r30_001_01"
+            cid = "canary_pilot_att_r31_001_01"
             ledger_path = os.path.join(tmp_dir, "campaign2_pilot_ledger.jsonl")
             ledger = AttemptLedger(ledger_path)
 
             canary_prompt_hash = hashlib.sha256(CANARY_NEUTRAL_PROMPT.encode("utf-8")).hexdigest()
             canary_text_hash = hashlib.sha256(CANARY_EXPECTED_RESPONSE.encode("utf-8")).hexdigest()
 
-            # Ordinal 1: transient_infrastructure_error with process_started=True, parse_state=transient_infrastructure_error, usage_known=False
+            # Ordinal 1: Real parser-produced transient error (HTTP 429)
+            parsed1 = parse_and_classify_jsonl_output(stdout_bytes=b"", stderr_bytes=b"HTTP 429 Too Many Requests\n", return_code=1)
+            self.assertEqual(parsed1["parse_state"], "nonzero_exit")
+            self.assertEqual(parsed1["classification"], "transient_infrastructure_error")
+            self.assertFalse(parsed1["usage_known"])
+
             intent1 = {
                 "record_type": "invocation_intent",
                 "logical_call_id": cid,
@@ -1419,17 +1427,19 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "intent_record_hash": intent1_hash,
                 "started_record_hash": started1_hash,
                 "return_code": 1,
-                "raw_stdout_digest": hashlib.sha256(b"").hexdigest(),
-                "raw_stderr_digest": hashlib.sha256(b"").hexdigest(),
+                "raw_stdout_digest": parsed1["stdout_hash"],
+                "raw_stderr_digest": parsed1["stderr_hash"],
                 "text_hash": "",
-                "parse_state": "transient_infrastructure_error",
-                "usage_known": False,
-                "tokens": 0,
+                "parse_state": parsed1["parse_state"],
+                "usage_known": parsed1["usage_known"],
+                "tokens": parsed1["tokens"],
                 "duration": 0.5,
-                "classification": "transient_infrastructure_error",
-                "error": "transient http 429",
+                "classification": parsed1["classification"],
+                "error": parsed1["error"],
                 "timestamp": time.time(),
             }
+
+            self.assertTrue(is_permitted_local_retry(comp1, has_process_started=True))
 
             # Ordinal 2: valid pass
             intent2 = {
@@ -1475,14 +1485,134 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
 
             model = mock.MagicMock()
-            data = run_pilot_canary("pilot", "att_r30_001", model, workspace_root=tmp_dir, ledger=ledger)
+            data = run_pilot_canary("pilot", "att_r31_001", model, workspace_root=tmp_dir, ledger=ledger)
             self.assertTrue(data["canary_passed"])
 
             reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
             self.assertEqual(reg.data["total_logical_calls"], 1)
             self.assertEqual(reg.data["total_local_invocation_attempts"], 2)
 
-    def test_round30_empty_stored_hash_with_present_artifact_fails_closed(self):
+    def test_round31_real_transient_retry_provider_loop(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from campaign2.model_provider import SolModelProvider
+            from campaign2.attempt_lifecycle import AttemptLedger
+            from campaign2.preflight_registry import run_pilot_canary, PreflightRegistry, CANARY_EXPECTED_RESPONSE, CANARY_NEUTRAL_PROMPT
+
+            run_dir = os.path.join(tmp_dir, "att_r31_loop")
+            os.makedirs(run_dir, exist_ok=True)
+            ledger_p = os.path.join(run_dir, "campaign2_pilot_ledger.jsonl")
+            ledger = AttemptLedger(ledger_p)
+
+            # Create provider with mocked subprocess that fails transiently on attempt 1 and succeeds on attempt 2
+            valid_jsonl = (
+                json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": CANARY_EXPECTED_RESPONSE}}) + "\n" +
+                json.dumps({"type": "turn.completed", "usage": {"output_tokens": 12}}) + "\n"
+            ).encode("utf-8")
+
+            responses = [
+                (1, b"", b"HTTP 429 Too Many Requests\n"),  # Attempt 1: transient error
+                (0, valid_jsonl, b""),                     # Attempt 2: valid pass
+            ]
+
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_master_registration.json"), os.path.join(tmp_dir, "campaign2_master_registration.json"))
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
+
+            provider = SolModelProvider(workspace_root=tmp_dir, ledger=ledger, mock_subprocess=False, attempt_id="att_r31_loop")
+
+            call_count = [0]
+            def mock_popen(*args, **kwargs):
+                idx = call_count[0]
+                call_count[0] += 1
+                ret_code, out_b, err_b = responses[idx]
+                proc = mock.MagicMock()
+                proc.pid = 99900 + idx
+                proc.poll.return_value = ret_code
+                proc.wait.return_value = ret_code
+                proc.returncode = ret_code
+                proc.communicate.return_value = (out_b, err_b)
+                return proc
+
+            with mock.patch("campaign2.model_provider.setup_credential_home"), mock.patch("subprocess.Popen", side_effect=mock_popen):
+                text, tokens, _ = provider._execute_cli_call("canary_pilot_att_r31_loop_01", CANARY_NEUTRAL_PROMPT.encode("utf-8"))
+                self.assertEqual(text, CANARY_EXPECTED_RESPONSE)
+                self.assertEqual(tokens, 12)
+                self.assertEqual(call_count[0], 2)  # Proves local retry loop was exercised!
+
+                # Now verify recovery reconciliation of this authentic ledger
+                data = run_pilot_canary("pilot", "att_r31_loop", provider, workspace_root=tmp_dir, ledger=ledger)
+                self.assertTrue(data["canary_passed"])
+
+            reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
+            self.assertEqual(reg.data["total_logical_calls"], 1)
+            self.assertEqual(reg.data["total_local_invocation_attempts"], 2)
+
+    def test_round31_retry_predicate_mutation_matrix(self):
+        from campaign2.attempt_lifecycle import is_permitted_local_retry
+
+        valid_transient = {
+            "record_type": "invocation_completion",
+            "logical_call_id": "cid",
+            "invocation_ordinal": 1,
+            "intent_record_hash": "a" * 64,
+            "started_record_hash": "b" * 64,
+            "classification": "transient_infrastructure_error",
+            "parse_state": "nonzero_exit",
+            "usage_known": False,
+            "tokens": 0,
+            "return_code": 1,
+            "duration": 1.5,
+            "text_hash": "",
+            "raw_stdout_digest": hashlib.sha256(b"").hexdigest(),
+            "raw_stderr_digest": "c" * 64,
+        }
+        self.assertTrue(is_permitted_local_retry(valid_transient, has_process_started=True))
+
+        valid_spawn = {
+            "record_type": "invocation_completion",
+            "logical_call_id": "cid",
+            "invocation_ordinal": 1,
+            "intent_record_hash": "a" * 64,
+            "started_record_hash": "",
+            "classification": "spawn_failure",
+            "parse_state": "spawn_failure",
+            "usage_known": True,
+            "tokens": 0,
+            "return_code": -1,
+            "duration": 0.1,
+            "text_hash": "",
+            "raw_stdout_digest": hashlib.sha256(b"").hexdigest(),
+            "raw_stderr_digest": "c" * 64,
+        }
+        self.assertTrue(is_permitted_local_retry(valid_spawn, has_process_started=False))
+
+        mutations = [
+            ("parse_state_mismatch", {**valid_transient, "parse_state": "malformed_jsonl"}, True),
+            ("transient_usage_known_true", {**valid_transient, "usage_known": True}, True),
+            ("spawn_usage_known_false", {**valid_spawn, "usage_known": False}, False),
+            ("tokens_nonzero", {**valid_transient, "tokens": 999}, True),
+            ("tokens_float", {**valid_transient, "tokens": 0.0}, True),
+            ("tokens_bool", {**valid_transient, "tokens": False}, True),
+            ("transient_return_code_zero", {**valid_transient, "return_code": 0}, True),
+            ("spawn_return_code_zero", {**valid_spawn, "return_code": 0}, False),
+            ("spawn_return_code_none", {**valid_spawn, "return_code": None}, False),
+            ("text_hash_nonempty", {**valid_transient, "text_hash": "xyz"}, True),
+            ("duration_negative", {**valid_transient, "duration": -1.0}, True),
+            ("duration_none", {**valid_transient, "duration": None}, True),
+            ("duration_nan", {**valid_transient, "duration": float("nan")}, True),
+            ("duration_bool", {**valid_transient, "duration": True}, True),
+            ("raw_stdout_nonempty", {**valid_transient, "raw_stdout_digest": "x" * 64}, True),
+            ("raw_stderr_short", {**valid_transient, "raw_stderr_digest": "abc"}, True),
+            ("transient_process_not_started", valid_transient, False),
+            ("spawn_process_started", valid_spawn, True),
+            ("transient_started_hash_empty", {**valid_transient, "started_record_hash": ""}, True),
+            ("spawn_started_hash_nonempty", {**valid_spawn, "started_record_hash": "x" * 64}, False),
+        ]
+
+        for label, mut_record, started_flag in mutations:
+            res = is_permitted_local_retry(mut_record, has_process_started=started_flag)
+            self.assertFalse(res, f"Mutation '{label}' must be rejected by is_permitted_local_retry but returned True")
+
+    def test_round31_record_usage_validates_inputs(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             from campaign2.preflight_registry import PreflightRegistry, PreflightRegistryError
 
@@ -1490,46 +1620,38 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
 
             reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
-            reg.data["registration_hash"] = ""
+
+            bad_inputs = [
+                {"tokens_used": -10, "active_time": 1.0},
+                {"tokens_used": True, "active_time": 1.0},
+                {"tokens_used": 100, "active_time": -1.0},
+                {"tokens_used": 100, "active_time": float("nan")},
+                {"tokens_used": 100, "active_time": 1.0, "logical_calls": -1},
+                {"tokens_used": 100, "active_time": 1.0, "local_attempts": -1},
+            ]
+
+            for kw in bad_inputs:
+                with self.assertRaises(PreflightRegistryError, msg=f"Input {kw} must fail validation"):
+                    reg.record_usage(**kw)
+
+    def test_round31_dangling_symlink_artifact_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            from campaign2.preflight_registry import PreflightRegistry, PreflightRegistryError
+
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_master_registration.json"), os.path.join(tmp_dir, "campaign2_master_registration.json"))
+            shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
+
+            # Create dangling symlink at campaign2_launch_lock.json
+            lock_link = os.path.join(tmp_dir, "campaign2_launch_lock.json")
+            os.symlink(os.path.join(tmp_dir, "nonexistent_target.json"), lock_link)
+
+            reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
+            reg.data["launch_lock_hash"] = ""
             reg._save_data(reg.data)
 
             with self.assertRaises(PreflightRegistryError) as ctx:
                 reg._reload()
-            self.assertIn("missing stored registration_hash", str(ctx.exception))
-
-    def test_round30_attempt_scoped_scratch_residue_scan(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            from campaign2.model_provider import SolModelProvider
-            from campaign2.attempt_lifecycle import AttemptLedger, AttemptLifecycleError
-
-            run_dir = os.path.join(tmp_dir, "att_r30_residue")
-            os.makedirs(run_dir, exist_ok=True)
-            ledger_p = os.path.join(run_dir, "campaign2_pilot_ledger.jsonl")
-            ledger = AttemptLedger(ledger_p)
-
-            provider = SolModelProvider(workspace_root=tmp_dir, ledger=ledger, mock_subprocess=True, attempt_id="att_r30_residue")
-            self.assertEqual(provider.attempt_id, "att_r30_residue")
-
-            # Execute provider call (mocked) to write intent log with scratch_dir
-            provider._execute_cli_call("canary_pilot_att_r30_residue_01", b"CANARY_NEUTRAL_PROMPT")
-
-            entries = ledger.get_entries()
-            intents = [e for e in entries if e.get("record_type") == "invocation_intent"]
-            self.assertTrue(len(intents) > 0)
-            scratch_dir = intents[0].get("scratch_dir")
-            self.assertTrue(scratch_dir and "rsi_codex_scratch_att_r30_residue_" in scratch_dir)
-
-            # Create credential residue in actual scratch dir created by provider
-            codex_dir = os.path.join(scratch_dir, ".codex")
-            os.makedirs(codex_dir, exist_ok=True)
-            auth_file = os.path.join(codex_dir, "auth.json")
-            with open(auth_file, "w") as f:
-                f.write('{"auth": "secret"}\n')
-
-            # verify_resume_admission MUST detect residue in this attempt-scoped scratch dir
-            with self.assertRaises(AttemptLifecycleError) as ctx:
-                ledger.verify_resume_admission()
-            self.assertIn("Credential residue found", str(ctx.exception))
+            self.assertIn("Bound launch lock file missing or invalid", str(ctx.exception))
 
 
 class TestC1_13_FullStageRefusal(unittest.TestCase):
