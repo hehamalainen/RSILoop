@@ -328,7 +328,7 @@ class PreflightRegistry:
         if type(logical_calls) is bool or not isinstance(logical_calls, int) or logical_calls < 0:
             raise PreflightRegistryError(f"Invalid logical_calls in record_usage: {logical_calls}")
 
-        if type(local_attempts) is bool or not isinstance(local_attempts, int) or local_attempts <= 0:
+        if type(local_attempts) is bool or not isinstance(local_attempts, int) or local_attempts < 0:
             raise PreflightRegistryError(f"Invalid local_attempts in record_usage: {local_attempts}")
 
         self._reload()

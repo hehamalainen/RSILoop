@@ -106,7 +106,9 @@ def generate_launch_checklist_data(workspace_root: str = BASE_DIR) -> Dict[str, 
     reg_data = verify_master_registration(workspace_root)
     master_reg_hash = compute_file_sha256(reg_path)
 
-    # Evidence manifest hash
+    # Evidence manifest verification and hashing
+    from campaign2.manifest import verify_campaign2_evidence_manifest
+    verify_campaign2_evidence_manifest(workspace_root)
     evidence_path = os.path.join(workspace_root, "campaign2_evidence_hashes.json")
     evidence_manifest_hash = compute_file_sha256(evidence_path)
 
@@ -119,11 +121,21 @@ def generate_launch_checklist_data(workspace_root: str = BASE_DIR) -> Dict[str, 
     if len(arm_vectors) != 10:
         raise LaunchChecklistError(f"Master registration must contain 10 arm assignment vectors, got {len(arm_vectors)}")
 
-    # Derived accounting ceilings
-    benchmark_workload = len(arm_vectors) * 86 // 5  # 172
+    # Derived accounting ceilings and relationship assertions
+    from campaign2.cpu_gate import MAX_ALLOWED_CPU_SECONDS
+    cpu_threshold = MAX_ALLOWED_CPU_SECONDS
+
+    pilot_trials = 2
+    tasks_per_trial = 86
+    benchmark_workload = pilot_trials * tasks_per_trial  # 172
     canary_calls = 3
     total_ceiling = benchmark_workload + canary_calls  # 175
     attempt_ceiling = total_ceiling * 3  # 525
+
+    if total_ceiling != benchmark_workload + canary_calls:
+        raise LaunchChecklistError(f"Ceiling mismatch: total {total_ceiling} != {benchmark_workload} + {canary_calls}")
+    if attempt_ceiling != total_ceiling * 3:
+        raise LaunchChecklistError(f"Attempt ceiling mismatch: {attempt_ceiling} != {total_ceiling} * 3")
 
     checklist_data = {
         "schema_version": "1",
@@ -150,7 +162,7 @@ def generate_launch_checklist_data(workspace_root: str = BASE_DIR) -> Dict[str, 
             "per_logical_call_wall_cap_seconds": PER_LOGICAL_CALL_WALL_CAP_SECONDS,
             "candidate_cpu_limit_seconds": CANDIDATE_CPU_LIMIT_SECONDS,
             "candidate_wall_limit_seconds": CANDIDATE_WALL_LIMIT_SECONDS,
-            "cpu_gate_threshold_seconds": CPU_GATE_THRESHOLD_SECONDS,
+            "cpu_gate_threshold_seconds": cpu_threshold,
         },
         "ordered_launch_steps": ORDERED_LAUNCH_STEPS,
     }

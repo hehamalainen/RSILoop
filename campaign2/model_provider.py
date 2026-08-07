@@ -540,7 +540,7 @@ class SolModelProvider(ModelProvider):
         if not os.path.exists(template_p):
             raise ExecutableBoundaryError(f"Missing generator.sb.template: {template_p}")
 
-        task_file_hash = hashlib.sha256(problem_bytes).hexdigest() if problem_bytes else ""
+        task_file_hash = hashlib.sha256(problem_bytes).hexdigest()
         prompt_hash = hashlib.sha256(stdin_bytes).hexdigest()
         input_hash = prompt_hash
 
