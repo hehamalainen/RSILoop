@@ -176,23 +176,33 @@ class PreflightRegistry:
         if data.get("stage") != self.stage:
             raise PreflightRegistryError(f"Preflight registry stage mismatch: expected '{self.stage}', got '{data.get('stage')}'")
 
-        # Verify registration and launch lock hashes match workspace files if present
-        reg_file = os.path.join(self.workspace_root, "campaign2_master_registration.json")
-        if os.path.exists(reg_file):
+        # Verify registration and launch lock hashes match workspace files (P0-4)
+        stored_reg_hash = data.get("registration_hash", "")
+        if stored_reg_hash:
+            reg_file = os.path.join(self.workspace_root, "campaign2_master_registration.json")
+            if not os.path.exists(reg_file) or os.path.islink(reg_file) or not os.path.isfile(reg_file):
+                raise PreflightRegistryError(
+                    f"Bound master registration file missing or invalid: {reg_file}"
+                )
             with open(reg_file, "rb") as f:
                 curr_reg_hash = hashlib.sha256(f.read()).hexdigest()
-            if data.get("registration_hash") != curr_reg_hash:
+            if stored_reg_hash != curr_reg_hash:
                 raise PreflightRegistryError(
-                    f"Preflight registry registration_hash mismatch: stored '{data.get('registration_hash')}' vs current '{curr_reg_hash}'"
+                    f"Preflight registry registration_hash mismatch: stored '{stored_reg_hash}' vs current '{curr_reg_hash}'"
                 )
 
-        lock_file = os.path.join(self.workspace_root, "campaign2_launch_lock.json")
-        if os.path.exists(lock_file):
+        stored_lock_hash = data.get("launch_lock_hash", "")
+        if stored_lock_hash:
+            lock_file = os.path.join(self.workspace_root, "campaign2_launch_lock.json")
+            if not os.path.exists(lock_file) or os.path.islink(lock_file) or not os.path.isfile(lock_file):
+                raise PreflightRegistryError(
+                    f"Bound launch lock file missing or invalid: {lock_file}"
+                )
             with open(lock_file, "rb") as f:
                 curr_lock_hash = hashlib.sha256(f.read()).hexdigest()
-            if data.get("launch_lock_hash") != curr_lock_hash:
+            if stored_lock_hash != curr_lock_hash:
                 raise PreflightRegistryError(
-                    f"Preflight registry launch_lock_hash mismatch: stored '{data.get('launch_lock_hash')}' vs current '{curr_lock_hash}'"
+                    f"Preflight registry launch_lock_hash mismatch: stored '{stored_lock_hash}' vs current '{curr_lock_hash}'"
                 )
 
         self.data = data
@@ -446,6 +456,22 @@ def run_pilot_canary(
                         registry.record_usage(tokens, duration, 1, 1, cid, inv_ordinal, comp_hash)
 
                 if call_completes:
+                    # Authenticate preceding completions against permitted retry taxonomy before considering terminal result (P0-1)
+                    PERMITTED_LOCAL_RETRIES = {"spawn_failure", "transient_infrastructure_error"}
+                    for prec_intent, prec_comp in call_completes[:-1]:
+                        classification = prec_comp.get("classification")
+                        usage_known = prec_comp.get("usage_known", True if classification in PERMITTED_LOCAL_RETRIES else False)
+                        if classification not in PERMITTED_LOCAL_RETRIES or usage_known is not True:
+                            reason = (
+                                f"Preflight canary call '{cid}' contains unauthorized intermediate retry attempt "
+                                f"(ordinal {prec_intent.get('invocation_ordinal')}, classification='{classification}', usage_known={usage_known})"
+                            )
+                            registry.record_canary_attempt(
+                                attempt_id, "invalidated", prec_comp.get("tokens", 0), prec_comp.get("duration", 0.0), False, call_id=cid
+                            )
+                            registry.set_stage_blocked(attempt_id, reason)
+                            raise CanaryFailureError(f"{reason}. Pilot BLOCKED.")
+
                     # 2. Evaluate outcome based on TERMINAL (final) completion of this logical call sequence (P0-2)
                     last_intent, last_comp = call_completes[-1]
                     last_ordinal = last_intent.get("invocation_ordinal", 1)

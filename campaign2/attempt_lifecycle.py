@@ -593,6 +593,7 @@ class AttemptLedger:
 
         # Credential residue scan across attempt directory, recorded scratch dirs, and user scratch dirs (P1-1, P1-2)
         attempt_dir = os.path.dirname(os.path.abspath(self.ledger_path))
+        attempt_id = os.path.basename(attempt_dir)
         import glob
         import tempfile
 
@@ -613,7 +614,8 @@ class AttemptLedger:
                 scan_paths.append(os.path.join(sdir, "**", ".codex", "auth.json"))
 
         current_uid = os.getuid() if hasattr(os, "getuid") else None
-        for cand_dir in glob.glob(os.path.join(tempfile.gettempdir(), "*rsi_codex_scratch_*")):
+        glob_pattern = f"*rsi_codex_scratch_{attempt_id}*" if attempt_id else "*rsi_codex_scratch_*"
+        for cand_dir in glob.glob(os.path.join(tempfile.gettempdir(), glob_pattern)):
             if os.path.isdir(cand_dir):
                 try:
                     st = os.stat(cand_dir)

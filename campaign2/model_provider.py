@@ -283,11 +283,12 @@ def setup_credential_home(scratch_dir: str, is_mock: bool = False, auth_source_p
     return dest_auth
 
 
-def create_fresh_invocation_scratch_dir(workspace_root: str = BASE_DIR, is_mock: bool = False) -> str:
+def create_fresh_invocation_scratch_dir(workspace_root: str = BASE_DIR, is_mock: bool = False, attempt_id: str = "") -> str:
     """
     Scratch dir is fresh PER INVOCATION, empty, current-UID owned, non-symlink, outside repository (C1-2 c).
     """
-    scratch_dir = tempfile.mkdtemp(prefix="rsi_codex_scratch_")
+    prefix = f"rsi_codex_scratch_{attempt_id}_" if attempt_id else "rsi_codex_scratch_"
+    scratch_dir = tempfile.mkdtemp(prefix=prefix)
     try:
         scratch_real = os.path.realpath(scratch_dir)
 
@@ -624,6 +625,7 @@ class SolModelProvider(ModelProvider):
                         "return_code": -1,
                         "raw_stdout_digest": hashlib.sha256(b"").hexdigest(),
                         "raw_stderr_digest": hashlib.sha256(b"").hexdigest(),
+                        "text_hash": "",
                         "parse_state": "spawn_failure",
                         "usage_known": True,
                         "tokens": 0,
@@ -631,6 +633,9 @@ class SolModelProvider(ModelProvider):
                         "classification": "spawn_failure",
                         "error": str(spawn_err),
                     }
+                    comp_bytes = (json.dumps(completion_record, sort_keys=True) + "\n").encode("utf-8")
+                    comp_hash = hashlib.sha256(comp_bytes).hexdigest()
+
                     if self.ledger:
                         self.ledger._append_record(completion_record)
 
@@ -642,6 +647,8 @@ class SolModelProvider(ModelProvider):
                         logical_calls=1,
                         local_attempts=1,
                         logical_call_id=logical_call_id,
+                        invocation_ordinal=invocation_ordinal,
+                        completion_hash=comp_hash,
                     )
 
                     shutil.rmtree(scratch_dir, ignore_errors=True)
@@ -740,7 +747,7 @@ class SolModelProvider(ModelProvider):
 
             parsed = parse_and_classify_jsonl_output(stdout_bytes, stderr_bytes, return_code)
 
-            text_val = parsed.get("text", "").rstrip("\r\n")
+            text_val = parsed.get("text", "")
             text_hash = hashlib.sha256(text_val.encode("utf-8")).hexdigest() if text_val else ""
 
             completion_record = {
