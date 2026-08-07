@@ -1,0 +1,8 @@
+{
+  "approved_commit_sha": "cbe62a2f39d2726a950afa8663831582808666b2",
+  "canonical_realpath": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop",
+  "configuration_hash": "328e85faf8a4dc74368f25c3631dbdf0e5af7bcdb70ebec97c71ba94b6613b4e",
+  "lock_rationale": "Operator launch lock authorization for commit cbe62a2f39d2726a950afa8663831582808666b2",
+  "registration_hash": "f8fbf8b916a59874d4b39767f7ce55b08cc84f3fac4dc5c7c37f36702b128b0a",
+  "schema_version": "3"
+}

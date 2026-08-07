@@ -1,0 +1,60 @@
+{
+  "accounting": {
+    "benchmark_workload": 172,
+    "canary_logical_calls": 3,
+    "candidate_cpu_limit_seconds": 15,
+    "candidate_wall_limit_seconds": 15,
+    "cpu_gate_threshold_seconds": 3.0,
+    "cumulative_active_model_invocation_time_ceiling_hours": 8.0,
+    "invocation_attempt_ceiling": 525,
+    "output_token_ceiling": 600000,
+    "per_logical_call_wall_cap_seconds": 120,
+    "total_logical_call_ceiling": 175
+  },
+  "approved_commit_sha": "cbe62a2f39d2726a950afa8663831582808666b2",
+  "canonical_repository_realpath": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop",
+  "clean_tracked_tree": true,
+  "evidence_manifest_hash": "88b3c5d267466476976fd0a970d0f95fa31a7a8b008070ba54695297ea4ba1a9",
+  "frozen_design_values": {
+    "arm_assignment_vectors": [
+      -1,
+      -1,
+      -1,
+      1,
+      -1,
+      -1,
+      -1,
+      1,
+      1,
+      -1
+    ],
+    "design_seed_commit": "96e04c94ef44b974301bbe9e4fedd2ba4281022d",
+    "trio_ordering_master_seed": 685898983
+  },
+  "master_registration_hash": "f8fbf8b916a59874d4b39767f7ce55b08cc84f3fac4dc5c7c37f36702b128b0a",
+  "ordered_launch_steps": [
+    "1. manifest_verification",
+    "2. evidence_manifest_verification",
+    "3. parity_matrix_verification",
+    "4. tier_assignment_verification",
+    "5. master_registration_verification",
+    "6. launch_lock_verification",
+    "7. attempt_identity_creation_or_verification",
+    "8. attempt_ledger_and_resume_admission_verification",
+    "9. checkpoint_manager_initialization",
+    "10. codex_cli_version_check",
+    "11. preflight_registry_authentication",
+    "12. prescientific_cpu_gate",
+    "13. pilot_canary_execution_or_reconciliation",
+    "14. scientific_start_claim",
+    "15. trial_1_execution_and_checkpoint",
+    "16. trial_2_execution_and_checkpoint",
+    "17. pilot_outcome_ladder_evaluation",
+    "18. schema3_report_generation_and_sealing",
+    "19. terminal_classification_recording"
+  ],
+  "schema_version": "1",
+  "tier_assignment_hash": "328e85faf8a4dc74368f25c3631dbdf0e5af7bcdb70ebec97c71ba94b6613b4e",
+  "tier_configuration_hash_alias": "328e85faf8a4dc74368f25c3631dbdf0e5af7bcdb70ebec97c71ba94b6613b4e",
+  "verified_preflight_file_count": 145
+}

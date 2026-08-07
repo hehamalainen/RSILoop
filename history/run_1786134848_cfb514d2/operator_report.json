@@ -1,0 +1,45 @@
+{
+  "schema_version": "2",
+  "run_id": "run_1786134848_cfb514d2",
+  "status": "running",
+  "invalidation_reason": "none",
+  "lock_contents": {
+    "approved_commit_sha": "unknown",
+    "remote_url": "unknown",
+    "model": "unknown",
+    "allow_no_holdout": "unknown"
+  },
+  "environment": {
+    "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t26.4\nBuildVersion:\t\t25E246",
+    "python_version": "3.14.3 (main, Feb  3 2026, 15:32:20) [Clang 17.0.0 (clang-1700.6.3.2)]",
+    "codex_cli_version": "unknown"
+  },
+  "phase_summaries": {
+    "phase_0_lock_and_git": "not_run",
+    "smoke_and_canary": "not_run",
+    "huffman_preflight": "not_run",
+    "trial_loop": "not_run",
+    "validation_loop": "not_run",
+    "holdout_evaluation": "not_run"
+  },
+  "phase_records": [],
+  "tokens": {
+    "canary_consumed": "unknown",
+    "cumulative_consumed": 0,
+    "ceiling": 50000
+  },
+  "trials": [],
+  "candidates": [],
+  "holdout": {
+    "executed": "not_run",
+    "success": false,
+    "tokens": 0
+  },
+  "model_requested": "unknown",
+  "model_resolved": "unknown",
+  "manifest_sha256": "unknown",
+  "lock_remote_url": "unknown",
+  "configured_origin_url": "unknown",
+  "local_head_sha": "unknown",
+  "remote_main_sha": "unknown"
+}

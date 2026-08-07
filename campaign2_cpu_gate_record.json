@@ -1,0 +1,611 @@
+{
+  "allowed_limit_seconds": 3.0,
+  "is_mock": false,
+  "max_cpu_seconds": 0.03110199999999974,
+  "max_row_id": "c_f2_05_package_version_resolver_defect_rung_1",
+  "record_type": "prescientific_cpu_gate",
+  "row_measurements": [
+    {
+      "row_id": "c_f1_01_log_stream_parser_defect_rung_1",
+      "task_id": "c_f1_01_log_stream_parser",
+      "worker_cpu_seconds": 0.02752700000000008
+    },
+    {
+      "row_id": "c_f1_01_log_stream_parser_defect_rung_2",
+      "task_id": "c_f1_01_log_stream_parser",
+      "worker_cpu_seconds": 0.027315999999999896
+    },
+    {
+      "row_id": "c_f1_01_log_stream_parser_defect_rung_3",
+      "task_id": "c_f1_01_log_stream_parser",
+      "worker_cpu_seconds": 0.026971999999999774
+    },
+    {
+      "row_id": "c_f1_02_json_tokenizer_recovery_defect_rung_1",
+      "task_id": "c_f1_02_json_tokenizer_recovery",
+      "worker_cpu_seconds": 0.02767900000000001
+    },
+    {
+      "row_id": "c_f1_02_json_tokenizer_recovery_defect_rung_2",
+      "task_id": "c_f1_02_json_tokenizer_recovery",
+      "worker_cpu_seconds": 0.027508999999999784
+    },
+    {
+      "row_id": "c_f1_02_json_tokenizer_recovery_defect_rung_3",
+      "task_id": "c_f1_02_json_tokenizer_recovery",
+      "worker_cpu_seconds": 0.0272490000000003
+    },
+    {
+      "row_id": "c_f1_03_csv_record_recovery_defect_rung_1",
+      "task_id": "c_f1_03_csv_record_recovery",
+      "worker_cpu_seconds": 0.027116000000000362
+    },
+    {
+      "row_id": "c_f1_03_csv_record_recovery_defect_rung_2",
+      "task_id": "c_f1_03_csv_record_recovery",
+      "worker_cpu_seconds": 0.027167999999999637
+    },
+    {
+      "row_id": "c_f1_03_csv_record_recovery_defect_rung_3",
+      "task_id": "c_f1_03_csv_record_recovery",
+      "worker_cpu_seconds": 0.027002000000000415
+    },
+    {
+      "row_id": "c_f1_04_http_chunked_decoder_defect_rung_1",
+      "task_id": "c_f1_04_http_chunked_decoder",
+      "worker_cpu_seconds": 0.026856999999999687
+    },
+    {
+      "row_id": "c_f1_04_http_chunked_decoder_defect_rung_2",
+      "task_id": "c_f1_04_http_chunked_decoder",
+      "worker_cpu_seconds": 0.027058999999999944
+    },
+    {
+      "row_id": "c_f1_04_http_chunked_decoder_defect_rung_3",
+      "task_id": "c_f1_04_http_chunked_decoder",
+      "worker_cpu_seconds": 0.026705999999999896
+    },
+    {
+      "row_id": "c_f1_05_protobuf_varint_decoder_defect_rung_1",
+      "task_id": "c_f1_05_protobuf_varint_decoder",
+      "worker_cpu_seconds": 0.026502999999999943
+    },
+    {
+      "row_id": "c_f1_05_protobuf_varint_decoder_defect_rung_2",
+      "task_id": "c_f1_05_protobuf_varint_decoder",
+      "worker_cpu_seconds": 0.026956999999999898
+    },
+    {
+      "row_id": "c_f1_05_protobuf_varint_decoder_defect_rung_3",
+      "task_id": "c_f1_05_protobuf_varint_decoder",
+      "worker_cpu_seconds": 0.031056000000000417
+    },
+    {
+      "row_id": "c_f2_01_dag_task_scheduler_defect_rung_1",
+      "task_id": "c_f2_01_dag_task_scheduler",
+      "worker_cpu_seconds": 0.027170999999999612
+    },
+    {
+      "row_id": "c_f2_01_dag_task_scheduler_defect_rung_2",
+      "task_id": "c_f2_01_dag_task_scheduler",
+      "worker_cpu_seconds": 0.026884000000000352
+    },
+    {
+      "row_id": "c_f2_01_dag_task_scheduler_defect_rung_3",
+      "task_id": "c_f2_01_dag_task_scheduler",
+      "worker_cpu_seconds": 0.026772999999999936
+    },
+    {
+      "row_id": "c_f2_02_resource_limit_planner_defect_rung_1",
+      "task_id": "c_f2_02_resource_limit_planner",
+      "worker_cpu_seconds": 0.02942
+    },
+    {
+      "row_id": "c_f2_02_resource_limit_planner_defect_rung_2",
+      "task_id": "c_f2_02_resource_limit_planner",
+      "worker_cpu_seconds": 0.02693600000000007
+    },
+    {
+      "row_id": "c_f2_02_resource_limit_planner_defect_rung_3",
+      "task_id": "c_f2_02_resource_limit_planner",
+      "worker_cpu_seconds": 0.027137999999999884
+    },
+    {
+      "row_id": "c_f2_03_build_dependency_graph_defect_rung_1",
+      "task_id": "c_f2_03_build_dependency_graph",
+      "worker_cpu_seconds": 0.026955000000000062
+    },
+    {
+      "row_id": "c_f2_03_build_dependency_graph_defect_rung_2",
+      "task_id": "c_f2_03_build_dependency_graph",
+      "worker_cpu_seconds": 0.027160000000000295
+    },
+    {
+      "row_id": "c_f2_03_build_dependency_graph_defect_rung_3",
+      "task_id": "c_f2_03_build_dependency_graph",
+      "worker_cpu_seconds": 0.02676500000000015
+    },
+    {
+      "row_id": "c_f2_04_pipeline_stage_scheduler_defect_rung_1",
+      "task_id": "c_f2_04_pipeline_stage_scheduler",
+      "worker_cpu_seconds": 0.02766399999999969
+    },
+    {
+      "row_id": "c_f2_04_pipeline_stage_scheduler_defect_rung_2",
+      "task_id": "c_f2_04_pipeline_stage_scheduler",
+      "worker_cpu_seconds": 0.02663800000000016
+    },
+    {
+      "row_id": "c_f2_04_pipeline_stage_scheduler_defect_rung_3",
+      "task_id": "c_f2_04_pipeline_stage_scheduler",
+      "worker_cpu_seconds": 0.02679000000000009
+    },
+    {
+      "row_id": "c_f2_05_package_version_resolver_defect_rung_1",
+      "task_id": "c_f2_05_package_version_resolver",
+      "worker_cpu_seconds": 0.03110199999999974
+    },
+    {
+      "row_id": "c_f2_05_package_version_resolver_defect_rung_2",
+      "task_id": "c_f2_05_package_version_resolver",
+      "worker_cpu_seconds": 0.029011999999999816
+    },
+    {
+      "row_id": "c_f2_05_package_version_resolver_defect_rung_3",
+      "task_id": "c_f2_05_package_version_resolver",
+      "worker_cpu_seconds": 0.027957999999999927
+    },
+    {
+      "row_id": "c_f3_01_lru_ttl_cache_defect_rung_1",
+      "task_id": "c_f3_01_lru_ttl_cache",
+      "worker_cpu_seconds": 0.027029999999999887
+    },
+    {
+      "row_id": "c_f3_01_lru_ttl_cache_defect_rung_2",
+      "task_id": "c_f3_01_lru_ttl_cache",
+      "worker_cpu_seconds": 0.02676600000000029
+    },
+    {
+      "row_id": "c_f3_01_lru_ttl_cache_defect_rung_3",
+      "task_id": "c_f3_01_lru_ttl_cache",
+      "worker_cpu_seconds": 0.026241999999999877
+    },
+    {
+      "row_id": "c_f3_02_lfu_serialized_cache_defect_rung_1",
+      "task_id": "c_f3_02_lfu_serialized_cache",
+      "worker_cpu_seconds": 0.02770000000000028
+    },
+    {
+      "row_id": "c_f3_02_lfu_serialized_cache_defect_rung_2",
+      "task_id": "c_f3_02_lfu_serialized_cache",
+      "worker_cpu_seconds": 0.02720699999999976
+    },
+    {
+      "row_id": "c_f3_02_lfu_serialized_cache_defect_rung_3",
+      "task_id": "c_f3_02_lfu_serialized_cache",
+      "worker_cpu_seconds": 0.026505000000000223
+    },
+    {
+      "row_id": "c_f3_03_write_through_cache_defect_rung_1",
+      "task_id": "c_f3_03_write_through_cache",
+      "worker_cpu_seconds": 0.027254999999999363
+    },
+    {
+      "row_id": "c_f3_03_write_through_cache_defect_rung_2",
+      "task_id": "c_f3_03_write_through_cache",
+      "worker_cpu_seconds": 0.02691400000000055
+    },
+    {
+      "row_id": "c_f3_03_write_through_cache_defect_rung_3",
+      "task_id": "c_f3_03_write_through_cache",
+      "worker_cpu_seconds": 0.026653999999999733
+    },
+    {
+      "row_id": "c_f3_04_segmented_2tier_cache_defect_rung_1",
+      "task_id": "c_f3_04_segmented_2tier_cache",
+      "worker_cpu_seconds": 0.02724200000000021
+    },
+    {
+      "row_id": "c_f3_04_segmented_2tier_cache_defect_rung_2",
+      "task_id": "c_f3_04_segmented_2tier_cache",
+      "worker_cpu_seconds": 0.02751799999999971
+    },
+    {
+      "row_id": "c_f3_04_segmented_2tier_cache_defect_rung_3",
+      "task_id": "c_f3_04_segmented_2tier_cache",
+      "worker_cpu_seconds": 0.026955000000000062
+    },
+    {
+      "row_id": "c_f3_05_two_queue_cache_defect_rung_1",
+      "task_id": "c_f3_05_two_queue_cache",
+      "worker_cpu_seconds": 0.02755900000000011
+    },
+    {
+      "row_id": "c_f3_05_two_queue_cache_defect_rung_2",
+      "task_id": "c_f3_05_two_queue_cache",
+      "worker_cpu_seconds": 0.02802300000000013
+    },
+    {
+      "row_id": "c_f3_05_two_queue_cache_defect_rung_3",
+      "task_id": "c_f3_05_two_queue_cache",
+      "worker_cpu_seconds": 0.027410999999999852
+    },
+    {
+      "row_id": "c_f3_06_tiered_storage_store_defect_rung_1",
+      "task_id": "c_f3_06_tiered_storage_store",
+      "worker_cpu_seconds": 0.028260000000000396
+    },
+    {
+      "row_id": "c_f3_06_tiered_storage_store_defect_rung_2",
+      "task_id": "c_f3_06_tiered_storage_store",
+      "worker_cpu_seconds": 0.027939999999999188
+    },
+    {
+      "row_id": "c_f3_06_tiered_storage_store_defect_rung_3",
+      "task_id": "c_f3_06_tiered_storage_store",
+      "worker_cpu_seconds": 0.027435000000000542
+    },
+    {
+      "row_id": "c_f4_01_raft_leader_election_defect_rung_1",
+      "task_id": "c_f4_01_raft_leader_election",
+      "worker_cpu_seconds": 0.027455999999999925
+    },
+    {
+      "row_id": "c_f4_01_raft_leader_election_defect_rung_2",
+      "task_id": "c_f4_01_raft_leader_election",
+      "worker_cpu_seconds": 0.027595999999999954
+    },
+    {
+      "row_id": "c_f4_01_raft_leader_election_defect_rung_3",
+      "task_id": "c_f4_01_raft_leader_election",
+      "worker_cpu_seconds": 0.027125999999999983
+    },
+    {
+      "row_id": "c_f4_02_tcp_state_machine_defect_rung_1",
+      "task_id": "c_f4_02_tcp_state_machine",
+      "worker_cpu_seconds": 0.027161000000000435
+    },
+    {
+      "row_id": "c_f4_02_tcp_state_machine_defect_rung_2",
+      "task_id": "c_f4_02_tcp_state_machine",
+      "worker_cpu_seconds": 0.027506999999999948
+    },
+    {
+      "row_id": "c_f4_02_tcp_state_machine_defect_rung_3",
+      "task_id": "c_f4_02_tcp_state_machine",
+      "worker_cpu_seconds": 0.02707999999999977
+    },
+    {
+      "row_id": "c_f4_03_oauth2_flow_simulator_defect_rung_1",
+      "task_id": "c_f4_03_oauth2_flow_simulator",
+      "worker_cpu_seconds": 0.02988500000000016
+    },
+    {
+      "row_id": "c_f4_03_oauth2_flow_simulator_defect_rung_2",
+      "task_id": "c_f4_03_oauth2_flow_simulator",
+      "worker_cpu_seconds": 0.02909000000000006
+    },
+    {
+      "row_id": "c_f4_03_oauth2_flow_simulator_defect_rung_3",
+      "task_id": "c_f4_03_oauth2_flow_simulator",
+      "worker_cpu_seconds": 0.029021999999999437
+    },
+    {
+      "row_id": "c_f4_04_websocket_frame_fsm_defect_rung_1",
+      "task_id": "c_f4_04_websocket_frame_fsm",
+      "worker_cpu_seconds": 0.026998999999999995
+    },
+    {
+      "row_id": "c_f4_04_websocket_frame_fsm_defect_rung_2",
+      "task_id": "c_f4_04_websocket_frame_fsm",
+      "worker_cpu_seconds": 0.027290999999999954
+    },
+    {
+      "row_id": "c_f4_04_websocket_frame_fsm_defect_rung_3",
+      "task_id": "c_f4_04_websocket_frame_fsm",
+      "worker_cpu_seconds": 0.027108000000000132
+    },
+    {
+      "row_id": "c_f4_05_saga_orchestrator_fsm_defect_rung_1",
+      "task_id": "c_f4_05_saga_orchestrator_fsm",
+      "worker_cpu_seconds": 0.027874999999999872
+    },
+    {
+      "row_id": "c_f4_05_saga_orchestrator_fsm_defect_rung_2",
+      "task_id": "c_f4_05_saga_orchestrator_fsm",
+      "worker_cpu_seconds": 0.02708500000000047
+    },
+    {
+      "row_id": "c_f4_05_saga_orchestrator_fsm_defect_rung_3",
+      "task_id": "c_f4_05_saga_orchestrator_fsm",
+      "worker_cpu_seconds": 0.026882999999999768
+    },
+    {
+      "row_id": "c_f4_06_dtls_handshake_fsm_defect_rung_1",
+      "task_id": "c_f4_06_dtls_handshake_fsm",
+      "worker_cpu_seconds": 0.02768499999999996
+    },
+    {
+      "row_id": "c_f4_06_dtls_handshake_fsm_defect_rung_2",
+      "task_id": "c_f4_06_dtls_handshake_fsm",
+      "worker_cpu_seconds": 0.02864900000000059
+    },
+    {
+      "row_id": "c_f4_06_dtls_handshake_fsm_defect_rung_3",
+      "task_id": "c_f4_06_dtls_handshake_fsm",
+      "worker_cpu_seconds": 0.02718499999999935
+    },
+    {
+      "row_id": "p_f1_01_ndjson_stream_parser_defect_rung_1",
+      "task_id": "p_f1_01_ndjson_stream_parser",
+      "worker_cpu_seconds": 0.02660700000000027
+    },
+    {
+      "row_id": "p_f1_01_ndjson_stream_parser_defect_rung_2",
+      "task_id": "p_f1_01_ndjson_stream_parser",
+      "worker_cpu_seconds": 0.02693900000000049
+    },
+    {
+      "row_id": "p_f1_01_ndjson_stream_parser_defect_rung_3",
+      "task_id": "p_f1_01_ndjson_stream_parser",
+      "worker_cpu_seconds": 0.026626999999999512
+    },
+    {
+      "row_id": "p_f1_02_syslog_framing_decoder_defect_rung_1",
+      "task_id": "p_f1_02_syslog_framing_decoder",
+      "worker_cpu_seconds": 0.026684999999999626
+    },
+    {
+      "row_id": "p_f1_02_syslog_framing_decoder_defect_rung_2",
+      "task_id": "p_f1_02_syslog_framing_decoder",
+      "worker_cpu_seconds": 0.02741700000000069
+    },
+    {
+      "row_id": "p_f1_02_syslog_framing_decoder_defect_rung_3",
+      "task_id": "p_f1_02_syslog_framing_decoder",
+      "worker_cpu_seconds": 0.027146000000000114
+    },
+    {
+      "row_id": "p_f2_01_workflow_execution_engine_defect_rung_1",
+      "task_id": "p_f2_01_workflow_execution_engine",
+      "worker_cpu_seconds": 0.028241999999998768
+    },
+    {
+      "row_id": "p_f2_01_workflow_execution_engine_defect_rung_2",
+      "task_id": "p_f2_01_workflow_execution_engine",
+      "worker_cpu_seconds": 0.026880000000000237
+    },
+    {
+      "row_id": "p_f2_01_workflow_execution_engine_defect_rung_3",
+      "task_id": "p_f2_01_workflow_execution_engine",
+      "worker_cpu_seconds": 0.027145000000000863
+    },
+    {
+      "row_id": "p_f2_02_k8s_pod_scheduler_defect_rung_1",
+      "task_id": "p_f2_02_k8s_pod_scheduler",
+      "worker_cpu_seconds": 0.027240999999999183
+    },
+    {
+      "row_id": "p_f2_02_k8s_pod_scheduler_defect_rung_2",
+      "task_id": "p_f2_02_k8s_pod_scheduler",
+      "worker_cpu_seconds": 0.027366000000000668
+    },
+    {
+      "row_id": "p_f2_02_k8s_pod_scheduler_defect_rung_3",
+      "task_id": "p_f2_02_k8s_pod_scheduler",
+      "worker_cpu_seconds": 0.026995999999999576
+    },
+    {
+      "row_id": "p_f3_01_arc_adaptive_cache_defect_rung_1",
+      "task_id": "p_f3_01_arc_adaptive_cache",
+      "worker_cpu_seconds": 0.02741300000000013
+    },
+    {
+      "row_id": "p_f3_01_arc_adaptive_cache_defect_rung_2",
+      "task_id": "p_f3_01_arc_adaptive_cache",
+      "worker_cpu_seconds": 0.027320999999999707
+    },
+    {
+      "row_id": "p_f3_01_arc_adaptive_cache_defect_rung_3",
+      "task_id": "p_f3_01_arc_adaptive_cache",
+      "worker_cpu_seconds": 0.026702000000000226
+    },
+    {
+      "row_id": "p_f3_02_ring_buffer_cache_defect_rung_1",
+      "task_id": "p_f3_02_ring_buffer_cache",
+      "worker_cpu_seconds": 0.027794999999999348
+    },
+    {
+      "row_id": "p_f3_02_ring_buffer_cache_defect_rung_2",
+      "task_id": "p_f3_02_ring_buffer_cache",
+      "worker_cpu_seconds": 0.027451000000001002
+    },
+    {
+      "row_id": "p_f3_02_ring_buffer_cache_defect_rung_3",
+      "task_id": "p_f3_02_ring_buffer_cache",
+      "worker_cpu_seconds": 0.027124999999999844
+    },
+    {
+      "row_id": "p_f4_01_bgp_peer_fsm_defect_rung_1",
+      "task_id": "p_f4_01_bgp_peer_fsm",
+      "worker_cpu_seconds": 0.0276809999999994
+    },
+    {
+      "row_id": "p_f4_01_bgp_peer_fsm_defect_rung_2",
+      "task_id": "p_f4_01_bgp_peer_fsm",
+      "worker_cpu_seconds": 0.02721000000000018
+    },
+    {
+      "row_id": "p_f4_01_bgp_peer_fsm_defect_rung_3",
+      "task_id": "p_f4_01_bgp_peer_fsm",
+      "worker_cpu_seconds": 0.026858000000000715
+    },
+    {
+      "row_id": "p_f4_02_sip_call_flow_fsm_defect_rung_1",
+      "task_id": "p_f4_02_sip_call_flow_fsm",
+      "worker_cpu_seconds": 0.027309999999999945
+    },
+    {
+      "row_id": "p_f4_02_sip_call_flow_fsm_defect_rung_2",
+      "task_id": "p_f4_02_sip_call_flow_fsm",
+      "worker_cpu_seconds": 0.027781999999999307
+    },
+    {
+      "row_id": "p_f4_02_sip_call_flow_fsm_defect_rung_3",
+      "task_id": "p_f4_02_sip_call_flow_fsm",
+      "worker_cpu_seconds": 0.02739400000000014
+    },
+    {
+      "row_id": "c_f1_01_log_stream_parser_reference_solution",
+      "task_id": "c_f1_01_log_stream_parser",
+      "worker_cpu_seconds": 0.027345000000000397
+    },
+    {
+      "row_id": "c_f1_02_json_tokenizer_recovery_reference_solution",
+      "task_id": "c_f1_02_json_tokenizer_recovery",
+      "worker_cpu_seconds": 0.027612999999999666
+    },
+    {
+      "row_id": "c_f1_03_csv_record_recovery_reference_solution",
+      "task_id": "c_f1_03_csv_record_recovery",
+      "worker_cpu_seconds": 0.026827999999999186
+    },
+    {
+      "row_id": "c_f1_04_http_chunked_decoder_reference_solution",
+      "task_id": "c_f1_04_http_chunked_decoder",
+      "worker_cpu_seconds": 0.027122000000000313
+    },
+    {
+      "row_id": "c_f1_05_protobuf_varint_decoder_reference_solution",
+      "task_id": "c_f1_05_protobuf_varint_decoder",
+      "worker_cpu_seconds": 0.02712800000000115
+    },
+    {
+      "row_id": "c_f2_01_dag_task_scheduler_reference_solution",
+      "task_id": "c_f2_01_dag_task_scheduler",
+      "worker_cpu_seconds": 0.02795299999999923
+    },
+    {
+      "row_id": "c_f2_02_resource_limit_planner_reference_solution",
+      "task_id": "c_f2_02_resource_limit_planner",
+      "worker_cpu_seconds": 0.027352000000000487
+    },
+    {
+      "row_id": "c_f2_03_build_dependency_graph_reference_solution",
+      "task_id": "c_f2_03_build_dependency_graph",
+      "worker_cpu_seconds": 0.027117999999999753
+    },
+    {
+      "row_id": "c_f2_04_pipeline_stage_scheduler_reference_solution",
+      "task_id": "c_f2_04_pipeline_stage_scheduler",
+      "worker_cpu_seconds": 0.027422999999999753
+    },
+    {
+      "row_id": "c_f2_05_package_version_resolver_reference_solution",
+      "task_id": "c_f2_05_package_version_resolver",
+      "worker_cpu_seconds": 0.02737400000000001
+    },
+    {
+      "row_id": "c_f3_01_lru_ttl_cache_reference_solution",
+      "task_id": "c_f3_01_lru_ttl_cache",
+      "worker_cpu_seconds": 0.027267000000000152
+    },
+    {
+      "row_id": "c_f3_02_lfu_serialized_cache_reference_solution",
+      "task_id": "c_f3_02_lfu_serialized_cache",
+      "worker_cpu_seconds": 0.02738300000000038
+    },
+    {
+      "row_id": "c_f3_03_write_through_cache_reference_solution",
+      "task_id": "c_f3_03_write_through_cache",
+      "worker_cpu_seconds": 0.02736199999999922
+    },
+    {
+      "row_id": "c_f3_04_segmented_2tier_cache_reference_solution",
+      "task_id": "c_f3_04_segmented_2tier_cache",
+      "worker_cpu_seconds": 0.028398000000000145
+    },
+    {
+      "row_id": "c_f3_05_two_queue_cache_reference_solution",
+      "task_id": "c_f3_05_two_queue_cache",
+      "worker_cpu_seconds": 0.027109000000000272
+    },
+    {
+      "row_id": "c_f3_06_tiered_storage_store_reference_solution",
+      "task_id": "c_f3_06_tiered_storage_store",
+      "worker_cpu_seconds": 0.027782000000000195
+    },
+    {
+      "row_id": "c_f4_01_raft_leader_election_reference_solution",
+      "task_id": "c_f4_01_raft_leader_election",
+      "worker_cpu_seconds": 0.027926999999999147
+    },
+    {
+      "row_id": "c_f4_02_tcp_state_machine_reference_solution",
+      "task_id": "c_f4_02_tcp_state_machine",
+      "worker_cpu_seconds": 0.027197000000001026
+    },
+    {
+      "row_id": "c_f4_03_oauth2_flow_simulator_reference_solution",
+      "task_id": "c_f4_03_oauth2_flow_simulator",
+      "worker_cpu_seconds": 0.029205000000000148
+    },
+    {
+      "row_id": "c_f4_04_websocket_frame_fsm_reference_solution",
+      "task_id": "c_f4_04_websocket_frame_fsm",
+      "worker_cpu_seconds": 0.027169999999999028
+    },
+    {
+      "row_id": "c_f4_05_saga_orchestrator_fsm_reference_solution",
+      "task_id": "c_f4_05_saga_orchestrator_fsm",
+      "worker_cpu_seconds": 0.02768000000000015
+    },
+    {
+      "row_id": "c_f4_06_dtls_handshake_fsm_reference_solution",
+      "task_id": "c_f4_06_dtls_handshake_fsm",
+      "worker_cpu_seconds": 0.026881000000000377
+    },
+    {
+      "row_id": "p_f1_01_ndjson_stream_parser_reference_solution",
+      "task_id": "p_f1_01_ndjson_stream_parser",
+      "worker_cpu_seconds": 0.0266390000000003
+    },
+    {
+      "row_id": "p_f1_02_syslog_framing_decoder_reference_solution",
+      "task_id": "p_f1_02_syslog_framing_decoder",
+      "worker_cpu_seconds": 0.0267129999999991
+    },
+    {
+      "row_id": "p_f2_01_workflow_execution_engine_reference_solution",
+      "task_id": "p_f2_01_workflow_execution_engine",
+      "worker_cpu_seconds": 0.027486000000000566
+    },
+    {
+      "row_id": "p_f2_02_k8s_pod_scheduler_reference_solution",
+      "task_id": "p_f2_02_k8s_pod_scheduler",
+      "worker_cpu_seconds": 0.028068000000000204
+    },
+    {
+      "row_id": "p_f3_01_arc_adaptive_cache_reference_solution",
+      "task_id": "p_f3_01_arc_adaptive_cache",
+      "worker_cpu_seconds": 0.02766599999999997
+    },
+    {
+      "row_id": "p_f3_02_ring_buffer_cache_reference_solution",
+      "task_id": "p_f3_02_ring_buffer_cache",
+      "worker_cpu_seconds": 0.027139000000000024
+    },
+    {
+      "row_id": "p_f4_01_bgp_peer_fsm_reference_solution",
+      "task_id": "p_f4_01_bgp_peer_fsm",
+      "worker_cpu_seconds": 0.027759999999999785
+    },
+    {
+      "row_id": "p_f4_02_sip_call_flow_fsm_reference_solution",
+      "task_id": "p_f4_02_sip_call_flow_fsm",
+      "worker_cpu_seconds": 0.02689499999999967
+    }
+  ],
+  "timestamp": 1786134856.881482,
+  "total_rows_evaluated": 120
+}

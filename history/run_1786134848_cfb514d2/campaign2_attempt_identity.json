@@ -1,0 +1,11 @@
+{
+  "attempt_id": "run_1786134848_cfb514d2",
+  "canonical_run_dir": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1786134848_cfb514d2",
+  "checkpoint_file": "campaign2_pilot_checkpoint.json",
+  "is_mock": false,
+  "ledger_file": "campaign2_pilot_ledger.jsonl",
+  "registration_sha256": "f8fbf8b916a59874d4b39767f7ce55b08cc84f3fac4dc5c7c37f36702b128b0a",
+  "schema_version": "1",
+  "stage": "pilot",
+  "suite": "suite_p"
+}
