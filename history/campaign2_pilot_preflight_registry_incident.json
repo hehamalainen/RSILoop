@@ -1,0 +1,11 @@
+{
+  "schema_version": "3",
+  "incident_type": "post_campaign_preflight_registry_deletion",
+  "file_deleted_at_utc": null,
+  "incident_description": "The file history/campaign2_pilot_preflight_registry.json was accidentally removed post-campaign during Work Order A2 execution. The exact deletion timestamp is unknown. The preflight registry file itself is unavailable. The listed surviving artifacts remain hash-verified. This incident record does not claim that they replace the unavailable preflight registry.",
+  "narrowly_verified_facts": {
+    "campaign2_pilot_report_sha256": "7d95b7b46902052711939a005cf427b697e58711dc040254665a56bcb9903ad3",
+    "campaign2_pilot_scientific_start_sha256": "4bbe30e33739b733604075a0069f047cb54138c7f9a86c3e1491be3b5d333401",
+    "preflight_registry_file_status": "unavailable"
+  }
+}

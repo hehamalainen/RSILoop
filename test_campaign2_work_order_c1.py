@@ -640,10 +640,19 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
         # Perform true pre/post byte, mode, and hash snapshot verification of BASE_DIR (P1-3)
         post_snap = _get_workspace_snapshot(BASE_DIR)
         self.assertEqual(CANONICAL_PRE_SNAPSHOT, post_snap, "BASE_DIR files altered or unexpected new files created during test suite execution")
-        reg_p = os.path.join(BASE_DIR, "history", "campaign2_pilot_preflight_registry.json")
-        gate_p = os.path.join(BASE_DIR, "campaign2_cpu_gate_record.json")
-        self.assertFalse(os.path.exists(reg_p), f"Forbidden canonical file found in BASE_DIR: {reg_p}")
-        self.assertFalse(os.path.exists(gate_p), f"Forbidden canonical file found in BASE_DIR: {gate_p}")
+        # Authenticate legitimate execution and archival markers (mode 0o444)
+        for rel_p in (
+            "campaign2_cpu_gate_record.json",
+            os.path.join("history", "campaign2_pilot_scientific_start.json"),
+            os.path.join("history", "campaign2_pilot_preflight_registry_incident.json"),
+            "campaign_archive_manifest.json",
+            "campaign_archive_anchor.hash",
+            "campaign_claim_record.json",
+        ):
+            abs_p = os.path.join(BASE_DIR, rel_p)
+            if os.path.exists(abs_p):
+                st_mode = stat.S_IMODE(os.stat(abs_p).st_mode)
+                self.assertEqual(st_mode, 0o444, f"Mode for {rel_p} must be 0o444, got {oct(st_mode)}")
 
     def test_master_registration_mismatch_with_source_fails_closed(self):
         from campaign2.orchestrator import Campaign2Orchestrator, OrchestratorError

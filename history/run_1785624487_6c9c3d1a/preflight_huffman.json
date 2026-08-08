@@ -1,0 +1,9 @@
+{
+  "huffman_preflight_score": 1.0,
+  "huffman_preflight_success": true,
+  "huffman_log": "test_emoji_roundtrip (test_module.TestHuffmanCoder.test_emoji_roundtrip) ... ok\ntest_empty_string (test_module.TestHuffmanCoder.test_empty_string) ... ok\ntest_repetitive_ascii_roundtrip (test_module.TestHuffmanCoder.test_repetitive_ascii_roundtrip) ... ok\ntest_single_char (test_module.TestHuffmanCoder.test_single_char) ... ok\ntest_two_char (test_module.TestHuffmanCoder.test_two_char) ... ok\n\n----------------------------------------------------------------------\nRan 5 tests in 0.001s\n\nOK\n",
+  "timestamp": "2026-08-01T22:48:49.495370+00:00",
+  "solution_path": "huffman_preflight/solution.py",
+  "solution_hash": "513c24fcd63b86effd56b48a8e73dd6cd45c2e5059ae72f50eba88face190ed9",
+  "tokens_consumed": 1022
+}

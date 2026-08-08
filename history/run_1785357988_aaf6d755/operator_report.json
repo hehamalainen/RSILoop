@@ -1,0 +1,109 @@
+{
+  "schema_version": "2",
+  "run_id": "run_1785357988_aaf6d755",
+  "status": "no_headroom",
+  "invalidation_reason": "none",
+  "lock_contents": {
+    "approved_commit_sha": "27812fbce4c46e2f5738c06ceb7669e25786e788",
+    "remote_url": "https://github.com/hehamalainen/RSILoop.git",
+    "model": "gpt-5.6-sol",
+    "allow_no_holdout": false
+  },
+  "environment": {
+    "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t26.4\nBuildVersion:\t\t25E246",
+    "python_version": "3.14.3 (main, Feb  3 2026, 15:32:20) [Clang 17.0.0 (clang-1700.6.3.2)]",
+    "codex_cli_version": "codex-cli 0.144.5"
+  },
+  "phase_summaries": {
+    "phase_0_lock_and_git": "completed",
+    "smoke_and_canary": "completed",
+    "huffman_preflight": "completed",
+    "trial_loop": "not_run",
+    "validation_loop": "not_run",
+    "holdout_evaluation": "not_run"
+  },
+  "phase_records": [
+    {
+      "sequence": 1,
+      "phase": "phase_0_lock_and_git",
+      "previous_state": "not_run",
+      "new_state": "running",
+      "timestamp": "2026-07-29T20:46:28.252289+00:00",
+      "metadata": {}
+    },
+    {
+      "sequence": 2,
+      "phase": "phase_0_lock_and_git",
+      "previous_state": "running",
+      "new_state": "completed",
+      "timestamp": "2026-07-29T20:46:29.097484+00:00",
+      "metadata": {}
+    },
+    {
+      "sequence": 3,
+      "phase": "smoke_and_canary",
+      "previous_state": "not_run",
+      "new_state": "running",
+      "timestamp": "2026-07-29T20:46:29.097883+00:00",
+      "metadata": {}
+    },
+    {
+      "sequence": 4,
+      "phase": "smoke_and_canary",
+      "previous_state": "running",
+      "new_state": "completed",
+      "timestamp": "2026-07-29T20:46:34.909530+00:00",
+      "metadata": {
+        "tokens": 5
+      }
+    },
+    {
+      "sequence": 5,
+      "phase": "huffman_preflight",
+      "previous_state": "not_run",
+      "new_state": "running",
+      "timestamp": "2026-07-29T20:46:34.910411+00:00",
+      "metadata": {}
+    },
+    {
+      "sequence": 6,
+      "phase": "huffman_preflight",
+      "previous_state": "running",
+      "new_state": "completed",
+      "timestamp": "2026-07-29T20:47:04.349068+00:00",
+      "metadata": {
+        "score": 1.0,
+        "success": true,
+        "tokens": 1021
+      }
+    }
+  ],
+  "tokens": {
+    "canary_consumed": 5,
+    "cumulative_consumed": 1026,
+    "ceiling": 50000
+  },
+  "preflight_huffman": {
+    "score": 1.0,
+    "success": true,
+    "log": "unknown",
+    "tests_run": 5,
+    "tokens": 1021,
+    "solution_hash": "daf3e17813853485af48ae87ca5cf8a5e8c76a645d1545ad0e9f2b29854cc8d8"
+  },
+  "trials": [],
+  "candidates": [],
+  "holdout": {
+    "executed": "unknown",
+    "success": "unknown",
+    "tokens": "unknown"
+  },
+  "model_requested": "gpt-5.6-sol",
+  "model_resolved": "unavailable",
+  "manifest_sha256": "9b98867be35797592b71138e90c3094838b1c3d439888c2bdacec046c64fe1c1",
+  "lock_remote_url": "https://github.com/hehamalainen/RSILoop.git",
+  "configured_origin_url": "https://github.com/hehamalainen/RSILoop.git",
+  "local_head_sha": "27812fbce4c46e2f5738c06ceb7669e25786e788",
+  "remote_main_sha": "27812fbce4c46e2f5738c06ceb7669e25786e788",
+  "pointer_commit_status": "committed"
+}

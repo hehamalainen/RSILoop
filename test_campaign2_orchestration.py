@@ -496,12 +496,13 @@ class TestCLIResumeNamespace(unittest.TestCase):
             ctx.run_dir = run_dir
             args = SimpleNamespace(stage="pilot", mock=True, resume=True)
             patches = (
-                mock.patch("campaign2.manifest.verify_campaign2_manifest"),
+                mock.patch("campaign2.manifest.verify_campaign2_manifest", return_value=(True, 145)),
                 mock.patch("campaign2.manifest.verify_campaign2_evidence_manifest"),
                 mock.patch("campaign2.manifest.verify_campaign2_parity_matrix"),
                 mock.patch("campaign2.tier_assignment.verify_family_blocked_assignment"),
                 mock.patch("campaign2.tier_assignment.generate_family_blocked_assignment", return_value=assignment),
                 mock.patch("campaign2.registration.verify_master_registration", return_value=registration),
+                mock.patch("campaign2.launch_lock.verify_launch_lock", return_value={}),
                 mock.patch("campaign2.model_provider.MockModelProvider"),
             )
             entered = [patcher.start() for patcher in patches]
@@ -547,7 +548,8 @@ class TestAttemptAccounting(unittest.TestCase):
             ledger.record_completion("call_unmatched_1", True, tokens=0)
 
             import rsi_loop
-            with mock.patch("campaign2.durability.CheckpointManager", side_effect=DurabilityError("Injected checkpoint recovery failure")):
+            with mock.patch("campaign2.launch_lock.verify_launch_lock", return_value={}), \
+                 mock.patch("campaign2.durability.CheckpointManager", side_effect=DurabilityError("Injected checkpoint recovery failure")):
                 with self.assertRaises(DurabilityError):
                     rsi_loop._run_campaign2(args, ctx)
 
@@ -616,8 +618,9 @@ class TestAttemptAccounting(unittest.TestCase):
             initial_count = len(initial_entries)
 
             import rsi_loop
-            with self.assertRaises(AttemptLifecycleError):
-                rsi_loop._run_campaign2(args, ctx)
+            with mock.patch("campaign2.launch_lock.verify_launch_lock", return_value={}):
+                with self.assertRaises(AttemptLifecycleError):
+                    rsi_loop._run_campaign2(args, ctx)
 
             after_entries = ledger.get_entries()
             self.assertEqual(len(after_entries), initial_count)
@@ -646,8 +649,9 @@ class TestAttemptAccounting(unittest.TestCase):
 
             import rsi_loop
             # First launch attempt on corrupt ledger -> raises AttemptLifecycleError and publishes sealed invalidation
-            with self.assertRaises(AttemptLifecycleError):
-                rsi_loop._run_campaign2(args, ctx)
+            with mock.patch("campaign2.launch_lock.verify_launch_lock", return_value={}):
+                with self.assertRaises(AttemptLifecycleError):
+                    rsi_loop._run_campaign2(args, ctx)
 
             with open(ledger_path, "rb") as f:
                 after_launch1_bytes = f.read()
@@ -659,8 +663,9 @@ class TestAttemptAccounting(unittest.TestCase):
             self.assertEqual(st_mode, 0o444)
 
             # Second launch attempt -> rejects immediately without touching ledger
-            with self.assertRaises(AttemptLifecycleError):
-                rsi_loop._run_campaign2(args, ctx)
+            with mock.patch("campaign2.launch_lock.verify_launch_lock", return_value={}):
+                with self.assertRaises(AttemptLifecycleError):
+                    rsi_loop._run_campaign2(args, ctx)
 
             with open(ledger_path, "rb") as f:
                 after_launch2_bytes = f.read()
