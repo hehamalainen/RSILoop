@@ -1,5 +1,5 @@
 """
-Campaign 3 Work Order P0 Test Suite (W6 Corrective C2)
+Campaign 3 Work Order P0 Test Suite (W6 Corrective C3)
 Verifies W1 (Plan Adoption), W2 (Root Discovery), W3 (Root Registry),
 W4 (Remote RFC Resolution), and W5 (Verifier) invariants, along with a
 symbol-accurate traceability matrix mapping requirements W1-W5 to exact code lines and tests.
@@ -55,7 +55,7 @@ TRACEABILITY_MATRIX = [
     {
         "clause": "W2 - Root Discovery Record captured from raw command output for R1, R2, R3",
         "file": os.path.join(BASE_DIR, "campaign3", "governance.py"),
-        "line": 156,
+        "line": 187,
         "symbol": "def emit_root_discovery",
         "test": "test_discovery_record_traceable_to_command_output"
     },
@@ -69,14 +69,14 @@ TRACEABILITY_MATRIX = [
     {
         "clause": "W3 - R2 and R3 files are preserved read-only as historical evidence without mutation across entire work order",
         "file": os.path.join(BASE_DIR, "test_campaign3_p0.py"),
-        "line": 250,
+        "line": 301,
         "symbol": "def test_r2_r3_files_mode_and_byte_identical_before_and_after",
         "test": "test_r2_r3_files_mode_and_byte_identical_before_and_after"
     },
     {
         "clause": "W4 - Remote RFC / Acceptance Resolution determines read-only remote status via fetch and tree inspection",
         "file": os.path.join(BASE_DIR, "campaign3", "governance.py"),
-        "line": 280,
+        "line": 311,
         "symbol": "def emit_remote_rfc_status",
         "test": "test_remote_rfc_status_schema_and_conclusion"
     },
@@ -90,7 +90,7 @@ TRACEABILITY_MATRIX = [
     {
         "clause": "W6 - Every recorded SHA is exactly 40 hex characters",
         "file": os.path.join(BASE_DIR, "test_campaign3_p0.py"),
-        "line": 272,
+        "line": 329,
         "symbol": "def test_every_recorded_sha_is_exactly_40_hex_characters",
         "test": "test_every_recorded_sha_is_exactly_40_hex_characters"
     }
@@ -148,6 +148,28 @@ class TestCampaign3P0(unittest.TestCase):
         self.assertEqual(data["adoption_timestamp_utc"], "2026-08-09T16:45:06Z")
         self.assertIn("operator_identity", data)
         self.assertIn("execution_root_realpath", data)
+
+    def test_adoption_immutability_fails_closed_on_mismatch(self):
+        """Verifies that emit_plan_v1_3_adoption fails closed if adoption already exists with mismatched parameters."""
+        src_plan = "/Users/heikkihamalainen/Documents/RSILoop/campaign3_handoff/project_plan_v1_3.md"
+        valid_hash = "355740d543b65774f66c45481f120810ba8262da59815a19b30e5eabb416b845"
+        op_id = "<Heikki The Operator aka human operator>"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            c3_tmp = os.path.join(tmp_dir, "campaign3")
+            os.makedirs(c3_tmp, exist_ok=True)
+
+            # 1. Create valid initial adoption
+            rec1 = emit_plan_v1_3_adoption(src_plan, valid_hash, op_id, workspace_root=tmp_dir)
+            ts1 = rec1["adoption_timestamp_utc"]
+
+            # 2. Re-running with identical parameters returns exact existing record without mutating timestamp
+            rec2 = emit_plan_v1_3_adoption(src_plan, valid_hash, op_id, workspace_root=tmp_dir)
+            self.assertEqual(rec2["adoption_timestamp_utc"], ts1)
+
+            # 3. Attempting to adopt with different operator identity fails closed with GovernanceError
+            with self.assertRaises(GovernanceError):
+                emit_plan_v1_3_adoption(src_plan, valid_hash, "imposter_operator", workspace_root=tmp_dir)
 
     def test_git_anchor_tamper_rejection(self):
         """Substantively tests rejection for EACH tampered artifact in a dedicated git repo."""
@@ -216,8 +238,8 @@ class TestCampaign3P0(unittest.TestCase):
         self.assertIn("R3", roots)
 
         r1_entry = roots["R1"]
-        self.assertEqual(r1_entry["run_tests_discovered_count"], 317)
-        self.assertIn("Executed test cases: 317", r1_entry["run_tests_raw_output"])
+        self.assertEqual(r1_entry["run_tests_discovered_count"], 319)
+        self.assertIn("Executed test cases: 319", r1_entry["run_tests_raw_output"])
 
     def test_remote_rfc_status_schema_and_conclusion(self):
         remote_path = os.path.join(BASE_DIR, "campaign3", "remote_rfc_status.json")
@@ -229,6 +251,7 @@ class TestCampaign3P0(unittest.TestCase):
         self.assertFalse(data["accepted_record_found_on_remote"])
         self.assertEqual(data["rfc1_v2_sha256"], "e15996148e34864d650d5b572e2c6269a9d14b9f58c060c8ede38371d17c197e")
 
+        # Network failure / invalid remote URL returns indeterminate_remote_content_not_inspected
         with tempfile.TemporaryDirectory() as tmp_dir:
             c3_tmp = os.path.join(tmp_dir, "campaign3")
             os.makedirs(c3_tmp, exist_ok=True)
@@ -241,6 +264,32 @@ class TestCampaign3P0(unittest.TestCase):
             self.assertFalse(res["accepted_record_found_on_remote"])
             self.assertIn("error_message", res)
 
+    def test_remote_rfc_status_accepted_rfc_content_detection(self):
+        """Positive test: verifies that a mock remote repository containing an accepted RFC file is detected."""
+        with tempfile.TemporaryDirectory() as tmp_remote_repo, tempfile.TemporaryDirectory() as tmp_workspace:
+            subprocess.run(["git", "init", "-b", "main"], cwd=tmp_remote_repo, stdout=subprocess.DEVNULL, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_remote_repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_remote_repo, check=True)
+
+            c3_remote = os.path.join(tmp_remote_repo, "campaign3")
+            os.makedirs(c3_remote, exist_ok=True)
+            rfc_remote_path = os.path.join(c3_remote, "rfc_1_v3.md")
+            with open(rfc_remote_path, "w", encoding="utf-8") as f:
+                f.write("# RFC-1 v3\n**Status**: ACCEPTED\n\nAccepted preregistration content.")
+
+            subprocess.run(["git", "add", "campaign3/"], cwd=tmp_remote_repo, check=True)
+            subprocess.run(["git", "commit", "-m", "Add accepted RFC-1 v3"], cwd=tmp_remote_repo, check=True)
+
+            c3_local = os.path.join(tmp_workspace, "campaign3")
+            os.makedirs(c3_local, exist_ok=True)
+            with open(os.path.join(BASE_DIR, "campaign3", "rfc_1_v2.md"), "rb") as sf, \
+                 open(os.path.join(c3_local, "rfc_1_v2.md"), "wb") as df:
+                df.write(sf.read())
+
+            res = emit_remote_rfc_status(workspace_root=tmp_workspace, remote_url=tmp_remote_repo)
+            self.assertEqual(res["conclusion"], "accepted_record_found")
+            self.assertTrue(res["accepted_record_found_on_remote"])
+
     def test_verifier_requires_trusted_commit_sha(self):
         with self.assertRaises(ValueError):
             verify_campaign3_p0(BASE_DIR, trusted_commit_sha="")
@@ -248,7 +297,7 @@ class TestCampaign3P0(unittest.TestCase):
             verify_campaign3_p0(BASE_DIR, trusted_commit_sha="invalid_short_sha")
 
     def test_r2_r3_files_mode_and_byte_identical_before_and_after(self):
-        """Authenticates live R2 and R3 against persisted initial pre-work-order snapshot."""
+        """Authenticates live R2 and R3 against persisted initial pre-work-order snapshot with set-exact key equality."""
         snap_path = os.path.join(BASE_DIR, "campaign3", "historical_roots_initial_snapshot.json")
         self.assertTrue(os.path.exists(snap_path), "Missing historical_roots_initial_snapshot.json")
 
@@ -261,13 +310,16 @@ class TestCampaign3P0(unittest.TestCase):
         r2_now = _snapshot_root(self.r2_path)
         r3_now = _snapshot_root(self.r3_path)
 
+        self.assertEqual(set(r2_now.keys()), set(r2_init.keys()), "R2 file set mismatch (deletions or additions)!")
+        self.assertEqual(set(r3_now.keys()), set(r3_init.keys()), "R3 file set mismatch (deletions or additions)!")
+
         for rel, item in r2_now.items():
-            init_item = r2_init.get(rel, {})
+            init_item = r2_init[rel]
             self.assertEqual(item[0], init_item.get("mode"), f"R2 mode altered for {rel}")
             self.assertEqual(item[1], init_item.get("hash"), f"R2 hash altered for {rel}")
 
         for rel, item in r3_now.items():
-            init_item = r3_init.get(rel, {})
+            init_item = r3_init[rel]
             self.assertEqual(item[0], init_item.get("mode"), f"R3 mode altered for {rel}")
             self.assertEqual(item[1], init_item.get("hash"), f"R3 hash altered for {rel}")
 

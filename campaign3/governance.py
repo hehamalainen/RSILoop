@@ -1,5 +1,5 @@
 """
-Campaign 3 Governance & Adoption Module (Work Order P0 Corrective Pass C2)
+Campaign 3 Governance & Adoption Module (Work Order P0 Corrective Pass C3)
 Provides JCS RFC 8785 canonicalization, dynamic root registry verification,
 and machine emission functions for W1-W4 governance records.
 """
@@ -88,18 +88,66 @@ def emit_plan_v1_3_adoption(
     workspace_root: str = BASE_DIR
 ) -> Dict[str, Any]:
     """
-    W1 — PLAN ADOPTION RECORD.
+    W1 — PLAN ADOPTION RECORD (Corrected C3).
     Verifies candidate plan bytes, copies to campaign3/project_plan_v1_3.md,
     seals permissions to 0o444, and machine-emits campaign3/plan_v1_3_adoption.json (0o444, JCS).
-    Strictly idempotent and immutable once established.
+    Strictly fail-closed: if adoption already exists, validates complete sealed plan & adoption bytes
+    and returns existing record without modifying any files. Any mismatch fails closed.
     """
     c3_dir = os.path.join(workspace_root, "campaign3")
     os.makedirs(c3_dir, exist_ok=True)
 
     dest_plan_path = os.path.join(c3_dir, "project_plan_v1_3.md")
     adoption_json_path = os.path.join(c3_dir, "plan_v1_3_adoption.json")
+    rel_plan_path = os.path.relpath(dest_plan_path, workspace_root)
+    exec_root_real = os.path.realpath(workspace_root)
 
-    # Read source plan bytes
+    # 1. Check existing adoption record BEFORE doing any writes or chmods!
+    if os.path.exists(adoption_json_path) and os.path.exists(dest_plan_path):
+        _check_no_symlinks(workspace_root, adoption_json_path)
+        _check_no_symlinks(workspace_root, dest_plan_path)
+
+        # Check permission modes
+        mode_plan = stat.S_IMODE(os.stat(dest_plan_path).st_mode)
+        mode_adopt = stat.S_IMODE(os.stat(adoption_json_path).st_mode)
+        if mode_plan != 0o444 or mode_adopt != 0o444:
+            raise GovernanceError(
+                f"Existing adoption files permission mode error: plan={oct(mode_plan)}, adopt={oct(mode_adopt)}"
+            )
+
+        with open(dest_plan_path, "rb") as f_plan:
+            existing_plan_bytes = f_plan.read()
+        existing_plan_sha = hashlib.sha256(existing_plan_bytes).hexdigest()
+
+        with open(adoption_json_path, "r", encoding="utf-8") as f_adopt:
+            existing_adopt_data = json.load(f_adopt)
+
+        # Fail closed on any mismatch
+        if existing_plan_sha != expected_plan_sha256:
+            raise GovernanceError(
+                f"Existing plan SHA mismatch! Expected {expected_plan_sha256}, got {existing_plan_sha}"
+            )
+        if existing_adopt_data.get("plan_sha256") != expected_plan_sha256:
+            raise GovernanceError(
+                f"Existing adoption JSON plan_sha256 mismatch! Expected {expected_plan_sha256}, got {existing_adopt_data.get('plan_sha256')}"
+            )
+        if existing_adopt_data.get("operator_identity") != operator_identity:
+            raise GovernanceError(
+                f"Existing adoption operator_identity mismatch! Expected {operator_identity}, got {existing_adopt_data.get('operator_identity')}"
+            )
+        if existing_adopt_data.get("execution_root_realpath") != exec_root_real:
+            raise GovernanceError(
+                f"Existing adoption execution_root_realpath mismatch! Expected {exec_root_real}, got {existing_adopt_data.get('execution_root_realpath')}"
+            )
+        if existing_adopt_data.get("plan_path") != rel_plan_path:
+            raise GovernanceError(
+                f"Existing adoption plan_path mismatch! Expected {rel_plan_path}, got {existing_adopt_data.get('plan_path')}"
+            )
+
+        # All existing adoption checks passed; return existing record untouched!
+        return existing_adopt_data
+
+    # If adoption does NOT exist, verify source plan bytes and create
     with open(src_plan_path, "rb") as f:
         plan_bytes = f.read()
 
@@ -114,23 +162,6 @@ def emit_plan_v1_3_adoption(
     with open(dest_plan_path, "wb") as f:
         f.write(plan_bytes)
     os.chmod(dest_plan_path, 0o444)
-
-    rel_plan_path = os.path.relpath(dest_plan_path, workspace_root)
-    exec_root_real = os.path.realpath(workspace_root)
-
-    # Idempotency check: if adoption record already exists, preserve original timestamp!
-    if os.path.exists(adoption_json_path):
-        _check_no_symlinks(workspace_root, adoption_json_path)
-        with open(adoption_json_path, "r", encoding="utf-8") as f:
-            existing_data = json.load(f)
-        if (
-            existing_data.get("plan_sha256") == actual_sha256 and
-            existing_data.get("operator_identity") == operator_identity and
-            existing_data.get("execution_root_realpath") == exec_root_real
-        ):
-            # Existing adoption record is valid and matching; return without mutating
-            os.chmod(adoption_json_path, 0o444)
-            return existing_data
 
     timestamp_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -282,16 +313,17 @@ def emit_remote_rfc_status(
     remote_url: str = "https://github.com/hehamalainen/RSILoop.git"
 ) -> Dict[str, Any]:
     """
-    W4 — REMOTE RFC / ACCEPTANCE RESOLUTION (Corrected C2).
-    Fetches all advertised remote branch refs into a temporary repository read-only,
-    inspects the full git tree of every branch via git ls-tree, and searches for any RFC acceptance record.
-    Fails to 'indeterminate_remote_content_not_inspected' on any fetch, network, or tree retrieval error.
+    W4 — REMOTE RFC / ACCEPTANCE RESOLUTION (Corrected Pass C3).
+    Fetches all advertised remote branch refs into a isolated refs/remotes/audit/* namespace in a temporary repo.
+    Verifies fetched commit SHAs match advertised ls-remote SHAs.
+    Lists full tree (git ls-tree -r) for every branch and inspects both acceptance artifacts and candidate RFC documents for ACCEPTED status.
+    Fails closed to 'indeterminate_remote_content_not_inspected' on any fetch, network, SHA mismatch, or tree retrieval error.
     """
     c3_dir = os.path.join(workspace_root, "campaign3")
     os.makedirs(c3_dir, exist_ok=True)
     out_path = os.path.join(c3_dir, "remote_rfc_status.json")
 
-    # 1. Query remote ref list
+    # 1. Query advertised remote refs
     p_refs = subprocess.run(
         ["git", "ls-remote", remote_url],
         cwd=workspace_root,
@@ -321,67 +353,98 @@ def emit_remote_rfc_status(
     remote_output = p_refs.stdout.strip()
 
     # Parse advertised branch refs
-    branch_refs = []
+    advertised_branches = {}
     for line in remote_output.splitlines():
         parts = line.split()
         if len(parts) >= 2:
             ref_sha, ref_name = parts[0], parts[1]
             if ref_name.startswith("refs/heads/"):
-                branch_refs.append((ref_sha, ref_name))
+                branch_short = ref_name.replace("refs/heads/", "")
+                advertised_branches[branch_short] = (ref_sha, ref_name)
 
     accepted_record_found = False
     inspected_branches = []
     inspection_failed = False
     error_msg = ""
 
-    # 2. Fetch all branch refs into a temporary repository read-only to inspect trees deterministically
+    # 2. Fetch all branch refs into an isolated refs/remotes/audit/* namespace in a temporary repo
     with tempfile.TemporaryDirectory() as tmp_git_dir:
-        p_init = subprocess.run(["git", "init"], cwd=tmp_git_dir, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        p_init = subprocess.run(["git", "init", "-b", "tmp_audit_init"], cwd=tmp_git_dir, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         if p_init.returncode != 0:
             inspection_failed = True
             error_msg = "Failed to initialize temporary git repository for remote inspection"
         else:
-            for ref_sha, ref_name in branch_refs:
-                branch_short = ref_name.replace("refs/heads/", "")
-                # Fetch branch commit into temporary repo
-                p_fetch = subprocess.run(
-                    ["git", "fetch", "--depth=1", remote_url, f"{ref_name}:{branch_short}"],
-                    cwd=tmp_git_dir,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                if p_fetch.returncode != 0:
-                    inspection_failed = True
-                    error_msg = f"Failed to fetch remote branch '{ref_name}' ({ref_sha}): {p_fetch.stderr.strip()}"
-                    break
+            p_fetch = subprocess.run(
+                ["git", "fetch", "--depth=1", remote_url, "refs/heads/*:refs/remotes/audit/*"],
+                cwd=tmp_git_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            if p_fetch.returncode != 0:
+                inspection_failed = True
+                error_msg = f"git fetch failed: {p_fetch.stderr.strip()}"
+            else:
+                # Inspect each fetched branch
+                for branch_short, (adv_sha, ref_name) in advertised_branches.items():
+                    audit_ref = f"audit/{branch_short}"
 
-                inspected_branches.append(ref_name)
-
-                # Inspect full tree of fetched branch ref
-                p_tree = subprocess.run(
-                    ["git", "ls-tree", "-r", "--name-only", branch_short],
-                    cwd=tmp_git_dir,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                if p_tree.returncode != 0:
-                    inspection_failed = True
-                    error_msg = f"Failed to list tree for branch '{ref_name}'"
-                    break
-
-                tree_files = p_tree.stdout.splitlines()
-
-                # Search tree files for any RFC acceptance record or accepted RFC status
-                for t_file in tree_files:
-                    lower_f = t_file.lower()
-                    if "acceptance" in lower_f or "rfc1_accepted" in lower_f:
-                        accepted_record_found = True
+                    # Verify fetched commit SHA matches advertised SHA
+                    p_sha = subprocess.run(
+                        ["git", "rev-parse", f"refs/remotes/audit/{branch_short}"],
+                        cwd=tmp_git_dir,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    if p_sha.returncode != 0 or p_sha.stdout.strip() != adv_sha:
+                        inspection_failed = True
+                        error_msg = f"Fetched SHA mismatch for branch '{ref_name}': advertised {adv_sha}, got {p_sha.stdout.strip()}"
                         break
 
-                if accepted_record_found:
-                    break
+                    inspected_branches.append(ref_name)
+
+                    # List full tree recursively
+                    p_tree = subprocess.run(
+                        ["git", "ls-tree", "-r", "--name-only", f"refs/remotes/audit/{branch_short}"],
+                        cwd=tmp_git_dir,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    if p_tree.returncode != 0:
+                        inspection_failed = True
+                        error_msg = f"git ls-tree failed for branch '{ref_name}'"
+                        break
+
+                    tree_files = p_tree.stdout.splitlines()
+
+                    # Inspect files for acceptance artifacts or accepted RFC status
+                    for t_file in tree_files:
+                        lower_f = t_file.lower()
+                        # a. Check acceptance artifact filenames
+                        if "acceptance" in lower_f or "rfc1_accepted" in lower_f:
+                            accepted_record_found = True
+                            break
+                        # b. Check candidate RFC files for ACCEPTED status line
+                        elif "rfc" in lower_f and lower_f.endswith(".md"):
+                            p_show = subprocess.run(
+                                ["git", "show", f"refs/remotes/audit/{branch_short}:{t_file}"],
+                                cwd=tmp_git_dir,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                text=True
+                            )
+                            if p_show.returncode == 0:
+                                for line in p_show.stdout.splitlines():
+                                    line_lower = line.lower()
+                                    if "status:" in line_lower or "status**:" in line_lower:
+                                        if "accepted" in line_lower and "draft" not in line_lower:
+                                            accepted_record_found = True
+                                            break
+
+                    if accepted_record_found:
+                        break
 
     # Read local RFC-1 v2 in R1
     rfc_v2_path = os.path.join(c3_dir, "rfc_1_v2.md")
