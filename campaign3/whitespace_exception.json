@@ -1,0 +1,1 @@
+{"exception_reason":"Immutable plan bytes protected by adopted SHA-256 digest","exempt_lines":[3,91],"file_path":"campaign3/project_plan_v1_3.md","file_sha256":"355740d543b65774f66c45481f120810ba8262da59815a19b30e5eabb416b845","finding_type":"trailing_whitespace"}

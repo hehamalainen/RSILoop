@@ -1,5 +1,5 @@
 """
-Campaign 3 Governance & Adoption Module (Work Order P0 Corrective)
+Campaign 3 Governance & Adoption Module (Work Order P0 Corrective Pass C2)
 Provides JCS RFC 8785 canonicalization, dynamic root registry verification,
 and machine emission functions for W1-W4 governance records.
 """
@@ -10,6 +10,7 @@ import json
 import stat
 import hashlib
 import datetime
+import tempfile
 import subprocess
 from typing import Dict, Any, List, Tuple
 
@@ -90,6 +91,7 @@ def emit_plan_v1_3_adoption(
     W1 — PLAN ADOPTION RECORD.
     Verifies candidate plan bytes, copies to campaign3/project_plan_v1_3.md,
     seals permissions to 0o444, and machine-emits campaign3/plan_v1_3_adoption.json (0o444, JCS).
+    Strictly idempotent and immutable once established.
     """
     c3_dir = os.path.join(workspace_root, "campaign3")
     os.makedirs(c3_dir, exist_ok=True)
@@ -97,6 +99,7 @@ def emit_plan_v1_3_adoption(
     dest_plan_path = os.path.join(c3_dir, "project_plan_v1_3.md")
     adoption_json_path = os.path.join(c3_dir, "plan_v1_3_adoption.json")
 
+    # Read source plan bytes
     with open(src_plan_path, "rb") as f:
         plan_bytes = f.read()
 
@@ -114,6 +117,21 @@ def emit_plan_v1_3_adoption(
 
     rel_plan_path = os.path.relpath(dest_plan_path, workspace_root)
     exec_root_real = os.path.realpath(workspace_root)
+
+    # Idempotency check: if adoption record already exists, preserve original timestamp!
+    if os.path.exists(adoption_json_path):
+        _check_no_symlinks(workspace_root, adoption_json_path)
+        with open(adoption_json_path, "r", encoding="utf-8") as f:
+            existing_data = json.load(f)
+        if (
+            existing_data.get("plan_sha256") == actual_sha256 and
+            existing_data.get("operator_identity") == operator_identity and
+            existing_data.get("execution_root_realpath") == exec_root_real
+        ):
+            # Existing adoption record is valid and matching; return without mutating
+            os.chmod(adoption_json_path, 0o444)
+            return existing_data
+
     timestamp_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     adoption_data = {
@@ -190,7 +208,6 @@ def emit_root_discovery(
             test_out = test_proc.stdout.strip()
             test_code = test_proc.returncode
 
-            # Strict dynamic parsing without hard-coded integer fallbacks
             discovered_count = None
             for line in test_out.splitlines():
                 if "Executed test cases:" in line or "Discovered test cases:" in line or "Ran " in line:
@@ -265,16 +282,16 @@ def emit_remote_rfc_status(
     remote_url: str = "https://github.com/hehamalainen/RSILoop.git"
 ) -> Dict[str, Any]:
     """
-    W4 — REMOTE RFC / ACCEPTANCE RESOLUTION (Corrected).
-    Performs real read-only inspection of remote branch content.
-    If remote inspection cannot be completed due to network or git retrieval error,
-    emits conclusion 'indeterminate_remote_content_not_inspected'.
+    W4 — REMOTE RFC / ACCEPTANCE RESOLUTION (Corrected C2).
+    Fetches all advertised remote branch refs into a temporary repository read-only,
+    inspects the full git tree of every branch via git ls-tree, and searches for any RFC acceptance record.
+    Fails to 'indeterminate_remote_content_not_inspected' on any fetch, network, or tree retrieval error.
     """
     c3_dir = os.path.join(workspace_root, "campaign3")
     os.makedirs(c3_dir, exist_ok=True)
     out_path = os.path.join(c3_dir, "remote_rfc_status.json")
 
-    # 1. Inspect remote refs
+    # 1. Query remote ref list
     p_refs = subprocess.run(
         ["git", "ls-remote", remote_url],
         cwd=workspace_root,
@@ -285,10 +302,9 @@ def emit_remote_rfc_status(
 
     if p_refs.returncode != 0:
         remote_output = p_refs.stdout.strip()
-        conclusion = "indeterminate_remote_content_not_inspected"
         status_data = {
             "accepted_record_found_on_remote": False,
-            "conclusion": conclusion,
+            "conclusion": "indeterminate_remote_content_not_inspected",
             "error_message": f"git ls-remote failed with exit code {p_refs.returncode}: {remote_output}",
             "remote_branches": remote_output,
             "rfc1_v2_sha256": "e15996148e34864d650d5b572e2c6269a9d14b9f58c060c8ede38371d17c197e",
@@ -313,33 +329,59 @@ def emit_remote_rfc_status(
             if ref_name.startswith("refs/heads/"):
                 branch_refs.append((ref_sha, ref_name))
 
-    # 2. Inspect tree content of each remote branch read-only
     accepted_record_found = False
     inspected_branches = []
     inspection_failed = False
+    error_msg = ""
 
-    for ref_sha, ref_name in branch_refs:
-        inspected_branches.append(ref_name)
-        # Attempt read-only archive check for RFC acceptance artifact in branch
-        p_arch = subprocess.run(
-            ["git", "archive", f"--remote={remote_url}", ref_sha, "campaign3/rfc1_acceptance.json"],
-            cwd=workspace_root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        if p_arch.returncode == 0 and len(p_arch.stdout) > 0:
-            accepted_record_found = True
-            break
-        # Also check root level rfc1_acceptance.json
-        p_arch_root = subprocess.run(
-            ["git", "archive", f"--remote={remote_url}", ref_sha, "rfc1_acceptance.json"],
-            cwd=workspace_root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        if p_arch_root.returncode == 0 and len(p_arch_root.stdout) > 0:
-            accepted_record_found = True
-            break
+    # 2. Fetch all branch refs into a temporary repository read-only to inspect trees deterministically
+    with tempfile.TemporaryDirectory() as tmp_git_dir:
+        p_init = subprocess.run(["git", "init"], cwd=tmp_git_dir, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if p_init.returncode != 0:
+            inspection_failed = True
+            error_msg = "Failed to initialize temporary git repository for remote inspection"
+        else:
+            for ref_sha, ref_name in branch_refs:
+                branch_short = ref_name.replace("refs/heads/", "")
+                # Fetch branch commit into temporary repo
+                p_fetch = subprocess.run(
+                    ["git", "fetch", "--depth=1", remote_url, f"{ref_name}:{branch_short}"],
+                    cwd=tmp_git_dir,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                if p_fetch.returncode != 0:
+                    inspection_failed = True
+                    error_msg = f"Failed to fetch remote branch '{ref_name}' ({ref_sha}): {p_fetch.stderr.strip()}"
+                    break
+
+                inspected_branches.append(ref_name)
+
+                # Inspect full tree of fetched branch ref
+                p_tree = subprocess.run(
+                    ["git", "ls-tree", "-r", "--name-only", branch_short],
+                    cwd=tmp_git_dir,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                if p_tree.returncode != 0:
+                    inspection_failed = True
+                    error_msg = f"Failed to list tree for branch '{ref_name}'"
+                    break
+
+                tree_files = p_tree.stdout.splitlines()
+
+                # Search tree files for any RFC acceptance record or accepted RFC status
+                for t_file in tree_files:
+                    lower_f = t_file.lower()
+                    if "acceptance" in lower_f or "rfc1_accepted" in lower_f:
+                        accepted_record_found = True
+                        break
+
+                if accepted_record_found:
+                    break
 
     # Read local RFC-1 v2 in R1
     rfc_v2_path = os.path.join(c3_dir, "rfc_1_v2.md")
@@ -360,16 +402,23 @@ def emit_remote_rfc_status(
             f"Local rfc_1_v2.md SHA-256 mismatch! Expected {expected_rfc_sha}, got {rfc_sha256}"
         )
 
-    conclusion = "accepted_record_found" if accepted_record_found else "no_accepted_record_found"
+    if inspection_failed:
+        conclusion = "indeterminate_remote_content_not_inspected"
+    elif accepted_record_found:
+        conclusion = "accepted_record_found"
+    else:
+        conclusion = "no_accepted_record_found"
 
     status_data = {
-        "accepted_record_found_on_remote": accepted_record_found,
+        "accepted_record_found_on_remote": accepted_record_found if not inspection_failed else False,
         "conclusion": conclusion,
         "inspected_remote_branches": inspected_branches,
         "remote_branches": remote_output,
         "rfc1_v2_sha256": rfc_sha256,
         "rfc1_v2_status_line": status_line
     }
+    if error_msg:
+        status_data["error_message"] = error_msg
 
     canonical_bytes = jcs_canonicalize(status_data)
 

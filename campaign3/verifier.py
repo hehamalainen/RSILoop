@@ -1,5 +1,5 @@
 """
-Campaign 3 Verifier Module (Work Order P0 — W5)
+Campaign 3 Verifier Module (Work Order P0 — W5 Corrective C2)
 Provides strict, read-only verification requiring a trusted Git commit SHA.
 Recomputes every artifact hash and compares against Git blobs from trusted_commit_sha.
 Fails closed on hash mismatch, non-0o444 mode, symlink, non-regular file, missing anchor,
@@ -32,6 +32,8 @@ P0_ARTIFACTS = [
     "campaign3/root_discovery.json",
     "campaign3/root_registry.json",
     "campaign3/remote_rfc_status.json",
+    "campaign3/whitespace_exception.json",
+    "campaign3/historical_roots_initial_snapshot.json",
 ]
 
 
