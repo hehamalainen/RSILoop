@@ -1,5 +1,5 @@
 """
-Campaign 3 Governance & Adoption Module (Work Order P0 Corrective Pass C3)
+Campaign 3 Governance & Adoption Module (Work Order P0 Corrective Pass C4)
 Provides JCS RFC 8785 canonicalization, dynamic root registry verification,
 and machine emission functions for W1-W4 governance records.
 """
@@ -88,11 +88,10 @@ def emit_plan_v1_3_adoption(
     workspace_root: str = BASE_DIR
 ) -> Dict[str, Any]:
     """
-    W1 — PLAN ADOPTION RECORD (Corrected C3).
+    W1 — PLAN ADOPTION RECORD (Corrected C4).
     Verifies candidate plan bytes, copies to campaign3/project_plan_v1_3.md,
     seals permissions to 0o444, and machine-emits campaign3/plan_v1_3_adoption.json (0o444, JCS).
-    Strictly fail-closed: if adoption already exists, validates complete sealed plan & adoption bytes
-    and returns existing record without modifying any files. Any mismatch fails closed.
+    Strictly fail-closed: rejects asymmetric existence or any schema/byte mismatch in existing adoption state.
     """
     c3_dir = os.path.join(workspace_root, "campaign3")
     os.makedirs(c3_dir, exist_ok=True)
@@ -102,12 +101,20 @@ def emit_plan_v1_3_adoption(
     rel_plan_path = os.path.relpath(dest_plan_path, workspace_root)
     exec_root_real = os.path.realpath(workspace_root)
 
-    # 1. Check existing adoption record BEFORE doing any writes or chmods!
-    if os.path.exists(adoption_json_path) and os.path.exists(dest_plan_path):
+    plan_exists = os.path.exists(dest_plan_path)
+    adopt_exists = os.path.exists(adoption_json_path)
+
+    # Reject asymmetric adoption state
+    if plan_exists != adopt_exists:
+        raise GovernanceError(
+            f"Asymmetric adoption state detected! plan_exists={plan_exists}, adopt_exists={adopt_exists}. Fail closed."
+        )
+
+    # 1. Validate complete existing adoption state if both exist
+    if plan_exists and adopt_exists:
         _check_no_symlinks(workspace_root, adoption_json_path)
         _check_no_symlinks(workspace_root, dest_plan_path)
 
-        # Check permission modes
         mode_plan = stat.S_IMODE(os.stat(dest_plan_path).st_mode)
         mode_adopt = stat.S_IMODE(os.stat(adoption_json_path).st_mode)
         if mode_plan != 0o444 or mode_adopt != 0o444:
@@ -119,8 +126,17 @@ def emit_plan_v1_3_adoption(
             existing_plan_bytes = f_plan.read()
         existing_plan_sha = hashlib.sha256(existing_plan_bytes).hexdigest()
 
-        with open(adoption_json_path, "r", encoding="utf-8") as f_adopt:
-            existing_adopt_data = json.load(f_adopt)
+        try:
+            with open(adoption_json_path, "r", encoding="utf-8") as f_adopt:
+                existing_adopt_data = json.load(f_adopt)
+        except Exception as e:
+            raise GovernanceError(f"Corrupt existing adoption JSON record: {e}")
+
+        expected_keys = {"adoption_timestamp_utc", "execution_root_realpath", "operator_identity", "plan_path", "plan_sha256"}
+        if set(existing_adopt_data.keys()) != expected_keys:
+            raise GovernanceError(
+                f"Existing adoption JSON schema key mismatch! Expected {sorted(list(expected_keys))}, got {sorted(list(existing_adopt_data.keys()))}"
+            )
 
         # Fail closed on any mismatch
         if existing_plan_sha != expected_plan_sha256:
@@ -157,8 +173,6 @@ def emit_plan_v1_3_adoption(
             f"Plan SHA-256 mismatch! Expected {expected_plan_sha256}, got {actual_sha256}"
         )
 
-    if os.path.exists(dest_plan_path):
-        os.chmod(dest_plan_path, 0o644)
     with open(dest_plan_path, "wb") as f:
         f.write(plan_bytes)
     os.chmod(dest_plan_path, 0o444)
@@ -175,8 +189,6 @@ def emit_plan_v1_3_adoption(
 
     canonical_bytes = jcs_canonicalize(adoption_data)
 
-    if os.path.exists(adoption_json_path):
-        os.chmod(adoption_json_path, 0o644)
     with open(adoption_json_path, "wb") as f:
         f.write(canonical_bytes + b"\n")
     os.chmod(adoption_json_path, 0o444)
@@ -313,11 +325,11 @@ def emit_remote_rfc_status(
     remote_url: str = "https://github.com/hehamalainen/RSILoop.git"
 ) -> Dict[str, Any]:
     """
-    W4 — REMOTE RFC / ACCEPTANCE RESOLUTION (Corrected Pass C3).
-    Fetches all advertised remote branch refs into a isolated refs/remotes/audit/* namespace in a temporary repo.
+    W4 — REMOTE RFC / ACCEPTANCE RESOLUTION (Corrected Pass C4).
+    Fetches all advertised remote branch refs into an isolated refs/remotes/audit/* namespace in a temporary repo.
     Verifies fetched commit SHAs match advertised ls-remote SHAs.
     Lists full tree (git ls-tree -r) for every branch and inspects both acceptance artifacts and candidate RFC documents for ACCEPTED status.
-    Fails closed to 'indeterminate_remote_content_not_inspected' on any fetch, network, SHA mismatch, or tree retrieval error.
+    Fails closed to 'indeterminate_remote_content_not_inspected' on any fetch, network, SHA mismatch, tree retrieval, or RFC show error.
     """
     c3_dir = os.path.join(workspace_root, "campaign3")
     os.makedirs(c3_dir, exist_ok=True)
@@ -386,7 +398,8 @@ def emit_remote_rfc_status(
                 error_msg = f"git fetch failed: {p_fetch.stderr.strip()}"
             else:
                 # Inspect each fetched branch
-                for branch_short, (adv_sha, ref_name) in advertised_branches.items():
+                for branch_short in sorted(advertised_branches.keys()):
+                    adv_sha, ref_name = advertised_branches[branch_short]
                     audit_ref = f"audit/{branch_short}"
 
                     # Verify fetched commit SHA matches advertised SHA
@@ -435,7 +448,12 @@ def emit_remote_rfc_status(
                                 stderr=subprocess.PIPE,
                                 text=True
                             )
-                            if p_show.returncode == 0:
+                            if p_show.returncode != 0:
+                                # Candidate RFC content retrieval failure MUST set inspection_failed!
+                                inspection_failed = True
+                                error_msg = f"git show failed for candidate RFC file '{t_file}' in branch '{ref_name}': {p_show.stderr.strip()}"
+                                break
+                            else:
                                 for line in p_show.stdout.splitlines():
                                     line_lower = line.lower()
                                     if "status:" in line_lower or "status**:" in line_lower:
@@ -443,7 +461,7 @@ def emit_remote_rfc_status(
                                             accepted_record_found = True
                                             break
 
-                    if accepted_record_found:
+                    if accepted_record_found or inspection_failed:
                         break
 
     # Read local RFC-1 v2 in R1

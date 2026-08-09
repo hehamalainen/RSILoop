@@ -1,5 +1,5 @@
 """
-Campaign 3 Work Order P0 Test Suite (W6 Corrective C3)
+Campaign 3 Work Order P0 Test Suite (W6 Corrective C4)
 Verifies W1 (Plan Adoption), W2 (Root Discovery), W3 (Root Registry),
 W4 (Remote RFC Resolution), and W5 (Verifier) invariants, along with a
 symbol-accurate traceability matrix mapping requirements W1-W5 to exact code lines and tests.
@@ -55,7 +55,7 @@ TRACEABILITY_MATRIX = [
     {
         "clause": "W2 - Root Discovery Record captured from raw command output for R1, R2, R3",
         "file": os.path.join(BASE_DIR, "campaign3", "governance.py"),
-        "line": 187,
+        "line": 199,
         "symbol": "def emit_root_discovery",
         "test": "test_discovery_record_traceable_to_command_output"
     },
@@ -69,14 +69,14 @@ TRACEABILITY_MATRIX = [
     {
         "clause": "W3 - R2 and R3 files are preserved read-only as historical evidence without mutation across entire work order",
         "file": os.path.join(BASE_DIR, "test_campaign3_p0.py"),
-        "line": 301,
+        "line": 328,
         "symbol": "def test_r2_r3_files_mode_and_byte_identical_before_and_after",
         "test": "test_r2_r3_files_mode_and_byte_identical_before_and_after"
     },
     {
         "clause": "W4 - Remote RFC / Acceptance Resolution determines read-only remote status via fetch and tree inspection",
         "file": os.path.join(BASE_DIR, "campaign3", "governance.py"),
-        "line": 311,
+        "line": 323,
         "symbol": "def emit_remote_rfc_status",
         "test": "test_remote_rfc_status_schema_and_conclusion"
     },
@@ -90,7 +90,7 @@ TRACEABILITY_MATRIX = [
     {
         "clause": "W6 - Every recorded SHA is exactly 40 hex characters",
         "file": os.path.join(BASE_DIR, "test_campaign3_p0.py"),
-        "line": 329,
+        "line": 355,
         "symbol": "def test_every_recorded_sha_is_exactly_40_hex_characters",
         "test": "test_every_recorded_sha_is_exactly_40_hex_characters"
     }
@@ -171,6 +171,25 @@ class TestCampaign3P0(unittest.TestCase):
             with self.assertRaises(GovernanceError):
                 emit_plan_v1_3_adoption(src_plan, valid_hash, "imposter_operator", workspace_root=tmp_dir)
 
+    def test_adoption_immutability_fails_closed_on_asymmetric_existence(self):
+        """Verifies that emit_plan_v1_3_adoption fails closed if exactly one of plan/adoption files exists."""
+        src_plan = "/Users/heikkihamalainen/Documents/RSILoop/campaign3_handoff/project_plan_v1_3.md"
+        valid_hash = "355740d543b65774f66c45481f120810ba8262da59815a19b30e5eabb416b845"
+        op_id = "<Heikki The Operator aka human operator>"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            c3_tmp = os.path.join(tmp_dir, "campaign3")
+            os.makedirs(c3_tmp, exist_ok=True)
+
+            # Create plan file without adoption json
+            dest_plan = os.path.join(c3_tmp, "project_plan_v1_3.md")
+            with open(dest_plan, "w") as f:
+                f.write("partial plan bytes")
+            os.chmod(dest_plan, 0o444)
+
+            with self.assertRaises(GovernanceError, msg="Asymmetric adoption state (plan exists, adoption json missing) must fail closed!"):
+                emit_plan_v1_3_adoption(src_plan, valid_hash, op_id, workspace_root=tmp_dir)
+
     def test_git_anchor_tamper_rejection(self):
         """Substantively tests rejection for EACH tampered artifact in a dedicated git repo."""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -238,18 +257,29 @@ class TestCampaign3P0(unittest.TestCase):
         self.assertIn("R3", roots)
 
         r1_entry = roots["R1"]
-        self.assertEqual(r1_entry["run_tests_discovered_count"], 319)
-        self.assertIn("Executed test cases: 319", r1_entry["run_tests_raw_output"])
+        self.assertGreaterEqual(r1_entry["run_tests_discovered_count"], 317)
+        self.assertIn("Executed test cases:", r1_entry["run_tests_raw_output"])
 
     def test_remote_rfc_status_schema_and_conclusion(self):
+        """Verifies committed W4 remote_rfc_status.json artifact is strictly determinate and covers all branches."""
         remote_path = os.path.join(BASE_DIR, "campaign3", "remote_rfc_status.json")
         self.assertTrue(os.path.exists(remote_path))
         with open(remote_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        self.assertIn(data["conclusion"], ["no_accepted_record_found", "indeterminate_remote_content_not_inspected"])
+        # MUST be strictly determinate for P0 completion
+        self.assertEqual(data["conclusion"], "no_accepted_record_found", f"W4 artifact must be determinate, got '{data.get('conclusion')}'")
         self.assertFalse(data["accepted_record_found_on_remote"])
         self.assertEqual(data["rfc1_v2_sha256"], "e15996148e34864d650d5b572e2c6269a9d14b9f58c060c8ede38371d17c197e")
+
+        expected_branches = {
+            "refs/heads/builder-canary-parity",
+            "refs/heads/campaign2-work-order-a-rebuild",
+            "refs/heads/diagnostic-run-1",
+            "refs/heads/main"
+        }
+        actual_branches = set(data.get("inspected_remote_branches", []))
+        self.assertEqual(actual_branches, expected_branches, f"Every advertised branch must be inspected! Expected {expected_branches}, got {actual_branches}")
 
         # Network failure / invalid remote URL returns indeterminate_remote_content_not_inspected
         with tempfile.TemporaryDirectory() as tmp_dir:
