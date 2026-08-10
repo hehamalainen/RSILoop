@@ -181,7 +181,7 @@ P12 admission arithmetic:
 
 ### Milestone 1.5 — operational pilot
 
-The 12 admission tasks receive a deterministic, family-balanced operational-only subpartition under a separate `/v3/operational-pilot` domain. RFC-1 v3 freezes role quotas, filling order, mutation count, `k`, and exact logical/transport-attempt arithmetic before P15 [OPEN ITEM: P15 role quotas, filling order, mutation count and call arithmetic. See p1_open_items.json].
+The 12 admission tasks receive a deterministic, family-balanced operational-only subpartition under a separate `/v3/operational-pilot` domain. RFC-1 v3 freezes role quotas, filling order, mutation count, `k`, and exact logical/transport-attempt arithmetic before P15.
 
 P15 reports no p-value or effect claim. Its scores, traces, and observed variance cannot inform `B`.
 
@@ -192,6 +192,8 @@ Pilot-triggered requalification:
 | Provider, evaluator, loader, scorer, prompt interface, or normalization | Repeat conformance and P12 admission |
 | Guided/control procedure, envelope, trace contract, or acceptance rule | Protocol amendment and repeat P15 |
 | Randomization or durability only | Repeat affected validation before final lock |
+
+[OPEN ITEM: P15 role quotas, filling order, mutation count and call arithmetic. See p1_open_items.json]
 
 ## 5. Production and launch gates
 
