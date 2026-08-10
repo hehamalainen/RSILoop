@@ -14,7 +14,7 @@ For block `b`, fixed confirmatory set `C`, and `k` replicates:
 
 where `G` is guided search, `U` is matched unguided search, and `B` is the frozen baseline evaluated contemporaneously in the final microblocks.
 
-**Note on k:** `k` is an OPEN ITEM [See p1_open_items.json]. `D_b` and `A_b` are defined symbolically in terms of `k`; the estimand is incomplete until `k` is decided externally.
+**Note on k:** Confirmatory/P15 `k` is an OPEN ITEM [OPEN ITEM: k. See p1_open_items.json]. `D_b` and `A_b` are defined symbolically in terms of `k`; the estimand is incomplete until `k` is decided externally. (`k_admission = 2` is allowed only as an authoritative plan-fixed P12 value).
 **Note on Scores:** Scores `Y` are BOUNDED DISCRETE RATIONALS computed from integer (earned, maximum) pairs on [0,1], per §5 launch criteria. They are not continuous and not Gaussian.
 
 Primary estimand: `mu_delta = E[D_b]`.
@@ -34,7 +34,7 @@ At one-sided `alpha = 0.05`, compute preregistered one-sided lower confidence bo
 
 `L_A = mean(A) - t_(0.95, B-1) * sd(A) / sqrt(B)`
 
-**Note on Inference Implementation:** The exact inference implementation for the one-sided lower confidence bounds is an OPEN ITEM [See p1_open_items.json].
+**Note on Inference Implementation:** The exact inference implementation for the one-sided lower confidence bounds is an OPEN ITEM [OPEN ITEM: Exact inference implementation. See p1_open_items.json].
 
 Campaign success requires both:
 
@@ -66,8 +66,8 @@ P1/P2 freeze:
 - the discrete scorer and adaptive-procedure model [OPEN ITEM: adaptive-procedure model. See p1_open_items.json];
 - the parameter grid and scenario weights [OPEN ITEM: a-priori scenario grid and weights. See p1_open_items.json];
 - target power [OPEN ITEM: target power. See p1_open_items.json];
-- maximum affordable even block count `B_max` [OPEN ITEM. See p1_open_items.json];
-- the deterministic rule mapping simulation results to an even `B` [OPEN ITEM. See p1_open_items.json];
+- maximum affordable even block count `B_max` [OPEN ITEM: B_max. See p1_open_items.json];
+- the deterministic rule mapping simulation results to an even `B` [OPEN ITEM: B. See p1_open_items.json];
 - simulation seeds and Monte Carlo error tolerance [OPEN ITEM: simulation seeds. See p1_open_items.json] [OPEN ITEM: Monte Carlo error tolerance. See p1_open_items.json].
 
 The selection rule returns the smallest even `B <= B_max` satisfying the frozen power criterion across the preregistered required scenarios.
@@ -156,3 +156,55 @@ RFC-1 v3 labels every ceiling as one of:
 For each ceiling it records the maximum possible overshoot and whether it applies to logical calls, transport attempts, output tokens, active time, wall time, or cost. No hard token or spend cap is claimed unless the provider interface actually enforces it prospectively. [OPEN ITEM: ceiling values/classifications. See p1_open_items.json]
 
 **Note on Acceptance:** Do not mutate the RFC bytes or status line after acceptance.
+
+## 3. RFC-1 v3 and acceptance mechanism
+
+### 3.2 Acceptance without self-reference
+
+1. Freeze final RFC-1 v3 bytes with status `FINAL FOR OPERATOR DECISION` and compute SHA-256.
+2. Emit a separate JCS RFC 8785 acceptance JSON containing the RFC path/hash, RFC source commit, controlling-plan path/hash, reviewer-artifact hashes, decision, UTC timestamp, and operator identity.
+3. The acceptance record contains neither its own hash nor the commit that will contain it.
+4. Anchor the pair in a subsequent dedicated commit and by an operator-held digest or signed remote tag/commit.
+5. Do not mutate the RFC bytes or status line after acceptance. Any later change creates a new version and ledger entry.
+
+## 4. Phase sequence
+
+### Milestone 1 — headroom answer
+
+P12 admission arithmetic:
+
+- 24 initial logical calls per candidate: 12 tasks times `k_admission = 2`;
+- automatic increase to 36 only under the frozen third-sample rule;
+- maximum 4 shortlisted candidates;
+- maximum 144 logical calls overall;
+- transport attempts separately counted and capped.
+
+### Milestone 1.5 — operational pilot
+
+The 12 admission tasks receive a deterministic, family-balanced operational-only subpartition under a separate `/v3/operational-pilot` domain. RFC-1 v3 freezes role quotas, filling order, mutation count, `k`, and exact logical/transport-attempt arithmetic before P15.
+
+P15 reports no p-value or effect claim. Its scores, traces, and observed variance cannot inform `B`.
+
+Pilot-triggered requalification:
+
+| Changed component | Required consequence |
+|---|---|
+| Provider, evaluator, loader, scorer, prompt interface, or normalization | Repeat conformance and P12 admission |
+| Guided/control procedure, envelope, trace contract, or acceptance rule | Protocol amendment and repeat P15 |
+| Randomization or durability only | Repeat affected validation before final lock |
+
+## 5. Production and launch gates
+
+Before P12 or P18 as applicable:
+
+- production provider is implemented and resolves the exact service/model metadata available;
+- evaluator produces bounded, provenance-labelled traces for the guided payload;
+- candidate generator receives only registered task inputs;
+- scorer validates integer bounds, denominator/resolution, and exact rational normalization at the orchestration boundary;
+- adapters cannot observe arm identity or control core scheduling, ceilings, outcomes, or tier allocation;
+- retry classification is proven at the transport boundary;
+- worktree is clean including untracked files;
+- HEAD equals the approved commit;
+- launch lock binds canonical realpath, commit, RFC/registration, task allocation, preflight manifest, evidence manifest, provider configuration, and relevant runtime artifacts;
+- full discovered test suite passes with zero skips, warnings, and unraisable exceptions;
+- dry runs and operational-pilot consequences are closed.

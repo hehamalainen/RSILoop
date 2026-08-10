@@ -72,11 +72,25 @@ class TestCampaign3P1(unittest.TestCase):
         self.assertNotIn("DRAFT-to-ACCEPTED", self.rfc_text)
         self.assertIn("DRAFT", self.rfc_text)
 
-    def test_open_items_have_no_corresponding_value(self):
-        for item in self.open_items_data["open_items"]:
-            param = item["parameter"]
-            # Basic sanity check that there's no numeric assignment
-            self.assertFalse(re.search(fr'\b{param}\s*=\s*\d+', self.rfc_text), f"Found numeric assignment for {param}")
+    def test_bidirectional_open_item_completeness(self):
+        import re
+        # 1. Extract all placeholders from RFC
+        matches = re.findall(r'\[OPEN ITEM: (.*?)\. See p1_open_items\.json\]', self.rfc_text)
+        rfc_placeholders = set(matches)
+        
+        # 2. Extract all entries from open_items register
+        register_params = set(item["parameter"] for item in self.open_items_data["open_items"])
+        
+        # 3. Assert bidirectional completeness
+        self.assertEqual(rfc_placeholders, register_params, f"Mismatch between RFC placeholders and register entries. RFC has: {rfc_placeholders}, Register has: {register_params}")
+        
+        # 4. Also ensure no numeric assignment for these params in RFC
+        for param in register_params:
+            if param != "k":
+                self.assertFalse(re.search(fr'\b{param}\s*=\s*\d+', self.rfc_text), f"Found numeric assignment for {param}")
+        
+        # Exception for k: k_admission = 2 is allowed
+        self.assertIn("k_admission = 2", self.rfc_text)
 
     def test_timestamps_valid_utc_and_not_in_future(self):
         now = datetime.datetime.now(datetime.timezone.utc)
