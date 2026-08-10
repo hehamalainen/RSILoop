@@ -74,21 +74,35 @@ class TestCampaign3P1(unittest.TestCase):
 
     def test_bidirectional_open_item_completeness(self):
         import re
+        import collections
         # 1. Extract all placeholders from RFC
         matches = re.findall(r'\[OPEN ITEM: (.*?)\. See p1_open_items\.json\]', self.rfc_text)
+
+        # Check for duplicates in RFC placeholders
+        rfc_counts = collections.Counter(matches)
+        rfc_duplicates = {k: v for k, v in rfc_counts.items() if v > 1}
+        self.assertFalse(rfc_duplicates, f"Duplicate OPEN ITEM placeholders found in RFC: {rfc_duplicates}")
+
         rfc_placeholders = set(matches)
-        
+
         # 2. Extract all entries from open_items register
-        register_params = set(item["parameter"] for item in self.open_items_data["open_items"])
-        
+        register_params = [item["parameter"] for item in self.open_items_data["open_items"]]
+
+        # Check for duplicates in register
+        register_counts = collections.Counter(register_params)
+        register_duplicates = {k: v for k, v in register_counts.items() if v > 1}
+        self.assertFalse(register_duplicates, f"Duplicate parameters found in p1_open_items.json: {register_duplicates}")
+
+        register_params_set = set(register_params)
+
         # 3. Assert bidirectional completeness
-        self.assertEqual(rfc_placeholders, register_params, f"Mismatch between RFC placeholders and register entries. RFC has: {rfc_placeholders}, Register has: {register_params}")
-        
+        self.assertEqual(rfc_placeholders, register_params_set, f"Mismatch between RFC placeholders and register entries. RFC has: {rfc_placeholders}, Register has: {register_params_set}")
+
         # 4. Also ensure no numeric assignment for these params in RFC
-        for param in register_params:
+        for param in register_params_set:
             if param != "k":
                 self.assertFalse(re.search(fr'\b{param}\s*=\s*\d+', self.rfc_text), f"Found numeric assignment for {param}")
-        
+
         # Exception for k: k_admission = 2 is allowed
         self.assertIn("k_admission = 2", self.rfc_text)
 

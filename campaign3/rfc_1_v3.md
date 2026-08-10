@@ -123,7 +123,7 @@ The sole permitted asymmetry is the registered mutation-information payload:
 
 Scores and traces advance atomically only when the associated proposal becomes the accepted parent. Rejected-child feedback must never be paired with accepted-parent text.
 
-The exact guided and control instructions, trace bounds, selection/tie-breaking rule, and allowed metadata are frozen in RFC-1 v3.
+The exact guided and control instructions [OPEN ITEM: guided/control instructions. See p1_open_items.json], trace bounds [OPEN ITEM: trace bounds. See p1_open_items.json], selection/tie-breaking rule [OPEN ITEM: selection/tie-breaking rule. See p1_open_items.json], and allowed metadata [OPEN ITEM: allowed metadata. See p1_open_items.json] are frozen in RFC-1 v3.
 
 ## 2.8 Failure, retry, and invalidation taxonomy
 
@@ -133,7 +133,7 @@ Retry within the same logical call and schedule position is allowed only for obj
 
 - process-spawn failure before execution;
 - connection refusal, DNS failure, or TLS failure proven before request transmission;
-- specifically permitted provider status responses with authenticated zero response-body bytes.
+- specifically permitted provider status responses with authenticated zero response-body bytes [OPEN ITEM: permitted provider-specific zero-byte retry statuses. See p1_open_items.json].
 
 The retry uses the identical request bytes and identity. Every transport attempt is recorded.
 
@@ -181,7 +181,7 @@ P12 admission arithmetic:
 
 ### Milestone 1.5 — operational pilot
 
-The 12 admission tasks receive a deterministic, family-balanced operational-only subpartition under a separate `/v3/operational-pilot` domain. RFC-1 v3 freezes role quotas, filling order, mutation count, `k`, and exact logical/transport-attempt arithmetic before P15.
+The 12 admission tasks receive a deterministic, family-balanced operational-only subpartition under a separate `/v3/operational-pilot` domain. RFC-1 v3 freezes role quotas, filling order, mutation count, `k`, and exact logical/transport-attempt arithmetic before P15 [OPEN ITEM: P15 role quotas, filling order, mutation count and call arithmetic. See p1_open_items.json].
 
 P15 reports no p-value or effect claim. Its scores, traces, and observed variance cannot inform `B`.
 
