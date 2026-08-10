@@ -388,6 +388,14 @@ class TestCampaign3P0(unittest.TestCase):
                 f"Symbol '{item['symbol']}' not found at or around line {item['line']} in {item['file']}"
             )
 
+    def test_p0_operator_decision_present_and_valid(self):
+        decision_path = os.path.join(BASE_DIR, "campaign3", "p0_operator_decision.json")
+        self.assertTrue(os.path.exists(decision_path))
+        with open(decision_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["decision"], "ACCEPT_P0")
+        self.assertEqual(data["trusted_commit_sha"], "c26d4ec499d93142bc557c7d83f71f8de98cd3b3")
+
 
 if __name__ == "__main__":
     unittest.main()

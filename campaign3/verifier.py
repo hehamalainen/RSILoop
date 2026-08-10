@@ -34,6 +34,7 @@ P0_ARTIFACTS = [
     "campaign3/remote_rfc_status.json",
     "campaign3/whitespace_exception.json",
     "campaign3/historical_roots_initial_snapshot.json",
+    "campaign3/p0_operator_decision.json",
 ]
 
 
