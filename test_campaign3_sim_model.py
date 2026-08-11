@@ -114,13 +114,28 @@ class TestCampaign3SimModel(unittest.TestCase):
             self.assertIn("selection_bias_offset", report_json["fixture_two_point_null"])
             self.assertNotIn("selection_bias_offset", report_json["fixture_zero_transition"])
 
+            # Verify every manifest digest
+            manifest_lines = []
+            sim_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "campaign3", "sim")
+            for fname in ["model.py", "non_normative_fixtures.json", "prng.py", "rational.py", "report.py"]:
+                with open(os.path.join(sim_dir, fname), "rb") as f:
+                    manifest_lines.append(f"{fname} {hashlib.sha256(f.read()).hexdigest()}")
+            expected_spec_hash = hashlib.sha256("\n".join(manifest_lines).encode("utf-8")).hexdigest()
+
+            for fixture_name, rep in report_json.items():
+                self.assertEqual(rep["spec_hash"], expected_spec_hash)
+
     def test_se1_6_conformance(self):
         """MC moments must converge and pass targets independently."""
         if not self.report:
             self.fail("No checked-in moments_report.json found.")
 
         for fixture_name, rep in self.report.items():
-            self.assertTrue(rep["passed_targets"])
+            tol = rep["intended_moments"]
+            passed_A = abs(rep["mean_A"] - tol["mean_A_target"]) <= tol["mean_A_tol"]
+            passed_D = abs(rep["mean_D"] - tol["mean_D_target"]) <= tol["mean_D_tol"]
+            self.assertTrue(passed_A, f"Failed mean_A target in {fixture_name}")
+            self.assertTrue(passed_D, f"Failed mean_D target in {fixture_name}")
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,7 +35,7 @@
     }
   },
   "fixture_two_point_null": {
-    "description": "Matched symmetric two-point mutation null. Both arms identical, giving E[D]=0 and E[A]>0.",
+    "description": "E[A] = 2 × ½ × 0.1 = 0.1; matched arm marginals imply E[D] = 0.",
     "is_selection_null": true,
     "num_search_tasks": 1,
     "num_conf_tasks": 1,

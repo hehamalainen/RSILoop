@@ -6,11 +6,11 @@ from typing import Dict, Any
 from .model import SimulationModel
 from .prng import DomainSeparatedPRNG
 
-def compute_spec_hash(fixture_bytes: bytes) -> str:
+def compute_spec_hash() -> str:
     # Documented canonical manifest recipe:
     # Emit a canonical `path -> SHA-256(raw bytes)` manifest and hash that manifest
     base_dir = os.path.dirname(__file__)
-    files = ["model.py", "prng.py", "rational.py", "report.py"]
+    files = ["model.py", "non_normative_fixtures.json", "prng.py", "rational.py", "report.py"]
 
     manifest_lines = []
     for fname in files:
@@ -19,13 +19,10 @@ def compute_spec_hash(fixture_bytes: bytes) -> str:
             file_hash = hashlib.sha256(f.read()).hexdigest()
             manifest_lines.append(f"{fname} {file_hash}")
 
-    fixture_hash = hashlib.sha256(fixture_bytes).hexdigest()
-    manifest_lines.append(f"non_normative_fixtures.json {fixture_hash}")
-
     manifest_str = "\n".join(manifest_lines)
     return hashlib.sha256(manifest_str.encode("utf-8")).hexdigest()
 
-def run_fixture(fixture_name: str, fixture: Dict[str, Any], iterations: int = 1000) -> Dict[str, Any]:
+def run_fixture(fixture_name: str, fixture: Dict[str, Any], raw_fixture_hash: str, iterations: int = 1000) -> Dict[str, Any]:
     model = SimulationModel(fixture, fixture_name)
 
     D_vals = []
@@ -47,10 +44,9 @@ def run_fixture(fixture_name: str, fixture: Dict[str, Any], iterations: int = 10
     sd_A = float(np.std(A_arr, ddof=1)) if iterations > 1 else 0.0
     se_D = float(sd_D / np.sqrt(iterations)) if iterations > 0 else 0.0
     se_A = float(sd_A / np.sqrt(iterations)) if iterations > 0 else 0.0
-
-    fixture_bytes = json.dumps(fixture, sort_keys=True).encode('utf-8')
-    fixture_hash = hashlib.sha256(fixture_bytes).hexdigest()
-    spec_hash = compute_spec_hash(fixture_bytes)
+    canonical_fixture_bytes = json.dumps(fixture, sort_keys=True).encode('utf-8')
+    canonical_fixture_hash = hashlib.sha256(canonical_fixture_bytes).hexdigest()
+    spec_hash = compute_spec_hash()
 
     out = {
         "mean_D": mean_D,
@@ -60,7 +56,8 @@ def run_fixture(fixture_name: str, fixture: Dict[str, Any], iterations: int = 10
         "se_D": se_D,
         "se_A": se_A,
         "fixed_task_effects_hash": model.fixed_task_effects_hash,
-        "fixture_hash": fixture_hash,
+        "raw_fixture_hash": raw_fixture_hash,
+        "canonical_fixture_hash": canonical_fixture_hash,
         "spec_hash": spec_hash,
         "iteration_count": iterations,
         "prng_identity": DomainSeparatedPRNG.ALGORITHM,
@@ -82,12 +79,15 @@ def run_fixture(fixture_name: str, fixture: Dict[str, Any], iterations: int = 10
     return out
 
 def generate_report(fixtures_path: str, output_path: str, iterations: int = 1000):
-    with open(fixtures_path, 'r') as f:
-        fixtures = json.load(f)
+    with open(fixtures_path, 'rb') as f:
+        raw_fixture_bytes = f.read()
+    raw_fixture_hash = hashlib.sha256(raw_fixture_bytes).hexdigest()
+
+    fixtures = json.loads(raw_fixture_bytes.decode('utf-8'))
 
     report = {}
     for name, fixture in fixtures.items():
-        report[name] = run_fixture(name, fixture, iterations)
+        report[name] = run_fixture(name, fixture, raw_fixture_hash, iterations)
 
     with open(output_path, 'w') as f:
         json.dump(report, f, indent=2)
