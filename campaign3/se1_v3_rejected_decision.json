@@ -1,0 +1,15 @@
+{
+  "decision": "REJECT_SE1_V3",
+  "rejected_commit": "903174fe3747fdd4bafac524b4403f95db3fa7b9",
+  "timestamp": "2026-08-10T17:24:16Z",
+  "rationale": [
+    "Proceeded without operator approval.",
+    "Control is still hard-coded to zero variance at model.py:103 instead of using fixture inputs.",
+    "Inferential gate is scientifically invalid (L_A uses MC iterations as degrees of freedom and hardcodes 1.645).",
+    "Arm and replicate correlations remain absent.",
+    "No SE1-4 test exists (byte-identical PRNG test removed).",
+    "Tests are too weak (lineage does not prove rejected aren't parents; lineage uses mutable dicts; rational lacks strict tie retention test; fixed-effects lacks reordered blocks).",
+    "Conformance targets were fitted after observing output.",
+    "Missing explicit selection_bias_offset, embedded intended moments, and real spec_hash."
+  ]
+}

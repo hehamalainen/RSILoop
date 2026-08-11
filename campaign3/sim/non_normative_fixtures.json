@@ -1,0 +1,70 @@
+{
+  "fixture_zero_transition": {
+    "description": "Deterministic zero step for both arms - E[D]=E[A]=0.",
+    "is_selection_null": false,
+    "num_search_tasks": 4,
+    "num_conf_tasks": 4,
+    "num_replicates": 3,
+    "mutation_count": 5,
+    "search_denominators": [10, 20, 15, 25],
+    "conf_denominators": [12, 18, 22, 14],
+    "task_effect_mean": 0.5,
+    "task_effect_cov": [
+      [0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      [0.0, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0],
+      [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01]
+    ],
+    "arm_correlation": 0.0,
+    "replicate_correlation": 0.0,
+    "guided_params": {
+      "step_type": "zero"
+    },
+    "unguided_params": {
+      "step_type": "zero"
+    },
+    "moments_tolerance": {
+      "mean_A_target": 0.0,
+      "mean_A_tol": 1e-4,
+      "mean_D_target": 0.0,
+      "mean_D_tol": 1e-4
+    }
+  },
+  "fixture_two_point_null": {
+    "description": "Matched symmetric two-point mutation null. Both arms identical, giving E[D]=0 and E[A]>0.",
+    "is_selection_null": true,
+    "num_search_tasks": 1,
+    "num_conf_tasks": 1,
+    "num_replicates": 2,
+    "mutation_count": 2,
+    "search_denominators": [10],
+    "conf_denominators": [10],
+    "task_effect_mean": 0.5,
+    "task_effect_cov": [
+      [0.0, 0.0],
+      [0.0, 0.0]
+    ],
+    "arm_correlation": 0.5,
+    "replicate_correlation": 0.2,
+    "guided_params": {
+      "step_type": "two_point",
+      "delta": 0.1,
+      "failure_rate": 0.0
+    },
+    "unguided_params": {
+      "step_type": "two_point",
+      "delta": 0.1,
+      "failure_rate": 0.0
+    },
+    "moments_tolerance": {
+      "mean_A_target": 0.10,
+      "mean_A_tol": 0.015,
+      "mean_D_target": 0.0,
+      "mean_D_tol": 0.01
+    }
+  }
+}

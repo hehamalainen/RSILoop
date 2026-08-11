@@ -1,0 +1,33 @@
+{
+  "fixture_zero_transition": {
+    "mean_D": 0.0,
+    "mean_A": 0.0,
+    "sd_D": 0.0,
+    "sd_A": 0.0,
+    "se_D": 0.0,
+    "se_A": 0.0,
+    "fixed_task_effects_hash": "6380a57ebd9bebb9df7c56e473bc97d46a7c0db32fb299e8093d1e01fb2227a2",
+    "fixture_hash": "3c4b3f55d26596c14f63e94d182e40d131a252a8e90d0d7eb0ca5fcf2a1e5412",
+    "spec_hash": "ef78c9e59f0304e7c27ecdb0055dc2ed495bd8748d1dab44a356762d12394179",
+    "iteration_count": 1000,
+    "prng_identity": "numpy.random.Generator(PCG64)",
+    "prng_version": "numpy=2.5.1",
+    "passed_targets": true
+  },
+  "fixture_two_point_null": {
+    "mean_D": 0.00225,
+    "mean_A": 0.10130000000000002,
+    "sd_D": 0.06329647655236383,
+    "sd_A": 0.051195028380995454,
+    "se_D": 0.0020016103376891176,
+    "se_A": 0.0016189289456090808,
+    "fixed_task_effects_hash": "606e5166986dd9f186277d16e3d18bae3887a944a829487b59fd8672bbb20251",
+    "fixture_hash": "d83025df9562b79d2064ed931f3fec8749564b92e2bec41ef8e16ad86af83e60",
+    "spec_hash": "fe2650a56054a927b20783fb5ddf040b73ecdc275bda84c73e194539f58cb196",
+    "iteration_count": 1000,
+    "prng_identity": "numpy.random.Generator(PCG64)",
+    "prng_version": "numpy=2.5.1",
+    "selection_bias_offset": 0.10130000000000002,
+    "passed_targets": true
+  }
+}
