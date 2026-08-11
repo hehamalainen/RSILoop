@@ -20,7 +20,7 @@ def compute_spec_hash() -> str:
             manifest_lines.append(f"{fname} {file_hash}")
 
     manifest_str = "\n".join(manifest_lines)
-    return hashlib.sha256(manifest_str.encode("utf-8")).hexdigest()
+    return manifest_str, hashlib.sha256(manifest_str.encode("utf-8")).hexdigest()
 
 def run_fixture(fixture_name: str, fixture: Dict[str, Any], raw_fixture_hash: str, iterations: int = 1000) -> Dict[str, Any]:
     model = SimulationModel(fixture, fixture_name)
@@ -46,7 +46,7 @@ def run_fixture(fixture_name: str, fixture: Dict[str, Any], raw_fixture_hash: st
     se_A = float(sd_A / np.sqrt(iterations)) if iterations > 0 else 0.0
     canonical_fixture_bytes = json.dumps(fixture, sort_keys=True).encode('utf-8')
     canonical_fixture_hash = hashlib.sha256(canonical_fixture_bytes).hexdigest()
-    spec_hash = compute_spec_hash()
+    spec_manifest, spec_hash = compute_spec_hash()
 
     out = {
         "mean_D": mean_D,
@@ -58,6 +58,7 @@ def run_fixture(fixture_name: str, fixture: Dict[str, Any], raw_fixture_hash: st
         "fixed_task_effects_hash": model.fixed_task_effects_hash,
         "raw_fixture_hash": raw_fixture_hash,
         "canonical_fixture_hash": canonical_fixture_hash,
+        "spec_manifest": spec_manifest,
         "spec_hash": spec_hash,
         "iteration_count": iterations,
         "prng_identity": DomainSeparatedPRNG.ALGORITHM,

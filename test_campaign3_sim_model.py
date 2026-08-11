@@ -120,9 +120,11 @@ class TestCampaign3SimModel(unittest.TestCase):
             for fname in ["model.py", "non_normative_fixtures.json", "prng.py", "rational.py", "report.py"]:
                 with open(os.path.join(sim_dir, fname), "rb") as f:
                     manifest_lines.append(f"{fname} {hashlib.sha256(f.read()).hexdigest()}")
-            expected_spec_hash = hashlib.sha256("\n".join(manifest_lines).encode("utf-8")).hexdigest()
+            manifest_str = "\n".join(manifest_lines)
+            expected_spec_hash = hashlib.sha256(manifest_str.encode("utf-8")).hexdigest()
 
             for fixture_name, rep in report_json.items():
+                self.assertEqual(rep["spec_manifest"], manifest_str)
                 self.assertEqual(rep["spec_hash"], expected_spec_hash)
 
     def test_se1_6_conformance(self):
