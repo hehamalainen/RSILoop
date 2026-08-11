@@ -9,7 +9,7 @@ class DomainSeparatedPRNG:
     No global random module usage.
     """
     ALGORITHM = "numpy.random.Generator(PCG64)"
-    VERSION = "numpy=2.0.0_compatible" # Using standard numpy PCG64
+    VERSION = f"numpy={np.__version__}"
 
     def __init__(self, domain_string: str = "campaign3_simulation_v1"):
         self.domain_string = domain_string

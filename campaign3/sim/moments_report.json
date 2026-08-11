@@ -8,10 +8,17 @@
     "se_A": 0.0,
     "fixed_task_effects_hash": "6380a57ebd9bebb9df7c56e473bc97d46a7c0db32fb299e8093d1e01fb2227a2",
     "fixture_hash": "3c4b3f55d26596c14f63e94d182e40d131a252a8e90d0d7eb0ca5fcf2a1e5412",
-    "spec_hash": "ef78c9e59f0304e7c27ecdb0055dc2ed495bd8748d1dab44a356762d12394179",
+    "spec_hash": "3c9ea8f3d930a2d90f71f3be61bc79e4cb39587245176e7a423444335565dff1",
     "iteration_count": 1000,
     "prng_identity": "numpy.random.Generator(PCG64)",
     "prng_version": "numpy=2.5.1",
+    "intended_moments": {
+      "mean_A_target": 0.0,
+      "mean_A_tol": 0.0001,
+      "mean_D_target": 0.0,
+      "mean_D_tol": 0.0001
+    },
+    "analytical_derivation": "Deterministic zero step for both arms - E[D]=E[A]=0.",
     "passed_targets": true
   },
   "fixture_two_point_null": {
@@ -23,11 +30,18 @@
     "se_A": 0.0016189289456090808,
     "fixed_task_effects_hash": "606e5166986dd9f186277d16e3d18bae3887a944a829487b59fd8672bbb20251",
     "fixture_hash": "d83025df9562b79d2064ed931f3fec8749564b92e2bec41ef8e16ad86af83e60",
-    "spec_hash": "fe2650a56054a927b20783fb5ddf040b73ecdc275bda84c73e194539f58cb196",
+    "spec_hash": "7b64944385ec08f282f9e7280c9edc6160ee87eeacae78b05036da21f142ea5d",
     "iteration_count": 1000,
     "prng_identity": "numpy.random.Generator(PCG64)",
     "prng_version": "numpy=2.5.1",
     "selection_bias_offset": 0.10130000000000002,
+    "intended_moments": {
+      "mean_A_target": 0.1,
+      "mean_A_tol": 0.015,
+      "mean_D_target": 0.0,
+      "mean_D_tol": 0.01
+    },
+    "analytical_derivation": "Matched symmetric two-point mutation null. Both arms identical, giving E[D]=0 and E[A]>0.",
     "passed_targets": true
   }
 }
