@@ -1,0 +1,314 @@
+{
+  "schema_version": "3.0.0",
+  "system_parameters": {
+    "num_search_tasks": 8,
+    "num_conf_tasks": 8,
+    "search_denominators": [
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10
+    ],
+    "conf_denominators": [
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10
+    ],
+    "k_domain": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "even_B_domain": [
+      2,
+      4,
+      6,
+      8,
+      10,
+      12,
+      14,
+      16,
+      18,
+      20,
+      24,
+      28,
+      32,
+      40
+    ],
+    "mutation_count_M": 5
+  },
+  "scenarios": [
+    {
+      "scenario_id": "N_delta_boundary",
+      "scenario_class": "N_delta",
+      "description": "Boundary face where true mean_D <= 0.10, and mean_A safely passes (mean_A >= 0.20).",
+      "model_parameters": {
+        "task_effect_mean": 0.5,
+        "task_effect_variance": 0.01,
+        "arm_correlation": 0.0,
+        "replicate_correlation": 0.0,
+        "guided_params": {
+          "step_type": "normal",
+          "step_mean": 0.038,
+          "step_variance": 0.01,
+          "failure_rate": 0.0
+        },
+        "unguided_params": {
+          "step_type": "normal",
+          "step_mean": 0.0,
+          "step_variance": 0.01,
+          "failure_rate": 0.0
+        }
+      },
+      "target_moments": {
+        "mean_D": 0.0975,
+        "mean_A": 0.3053,
+        "sd_D": 0.1281,
+        "sd_A": 0.0935,
+        "rho_D_A": 0.7244
+      },
+      "conformance_tolerances": {
+        "mean_D_tol": 0.015,
+        "mean_A_tol": 0.015,
+        "sd_D_tol": 0.02,
+        "sd_A_tol": 0.02,
+        "rho_tol": 0.06
+      }
+    },
+    {
+      "scenario_id": "N_A_boundary",
+      "scenario_class": "N_A",
+      "description": "Boundary face where true mean_A = 0.00, mean_D = 0.00 (Type I error bounded <= 0.05).",
+      "model_parameters": {
+        "task_effect_mean": 0.5,
+        "task_effect_variance": 0.01,
+        "arm_correlation": 0.0,
+        "replicate_correlation": 0.0,
+        "guided_params": {
+          "step_type": "zero"
+        },
+        "unguided_params": {
+          "step_type": "zero"
+        }
+      },
+      "target_moments": {
+        "mean_D": 0.0,
+        "mean_A": 0.0,
+        "sd_D": 0.0,
+        "sd_A": 0.0,
+        "rho_D_A": 0.0
+      },
+      "conformance_tolerances": {
+        "mean_D_tol": 0.001,
+        "mean_A_tol": 0.001,
+        "sd_D_tol": 0.001,
+        "sd_A_tol": 0.001,
+        "rho_tol": 0.001
+      }
+    },
+    {
+      "scenario_id": "N_intersection_zero_cov",
+      "scenario_class": "N_intersection_zero_cov",
+      "description": "Joint null point (mean_D = 0.00, mean_A = 0.12) under zero cross-arm covariance.",
+      "model_parameters": {
+        "task_effect_mean": 0.5,
+        "task_effect_variance": 0.01,
+        "arm_correlation": 0.0,
+        "replicate_correlation": 0.0,
+        "guided_params": {
+          "step_type": "two_point",
+          "delta": 0.05,
+          "failure_rate": 0.0
+        },
+        "unguided_params": {
+          "step_type": "two_point",
+          "delta": 0.05,
+          "failure_rate": 0.0
+        }
+      },
+      "target_moments": {
+        "mean_D": -0.0004,
+        "mean_A": 0.131,
+        "sd_D": 0.0559,
+        "sd_A": 0.0396,
+        "rho_D_A": 0.7031
+      },
+      "conformance_tolerances": {
+        "mean_D_tol": 0.015,
+        "mean_A_tol": 0.015,
+        "sd_D_tol": 0.02,
+        "sd_A_tol": 0.02,
+        "rho_tol": 0.06
+      }
+    },
+    {
+      "scenario_id": "N_intersection_pos_cov",
+      "scenario_class": "N_intersection_pos_cov",
+      "description": "Joint null point with positive arm/replicate latent correlation (rho_arm=0.5, rho_rep=0.2).",
+      "model_parameters": {
+        "task_effect_mean": 0.5,
+        "task_effect_variance": 0.01,
+        "arm_correlation": 0.5,
+        "replicate_correlation": 0.2,
+        "guided_params": {
+          "step_type": "two_point",
+          "delta": 0.05,
+          "failure_rate": 0.0
+        },
+        "unguided_params": {
+          "step_type": "two_point",
+          "delta": 0.05,
+          "failure_rate": 0.0
+        }
+      },
+      "target_moments": {
+        "mean_D": -0.0006,
+        "mean_A": 0.1371,
+        "sd_D": 0.0515,
+        "sd_A": 0.0429,
+        "rho_D_A": 0.5924
+      },
+      "conformance_tolerances": {
+        "mean_D_tol": 0.015,
+        "mean_A_tol": 0.015,
+        "sd_D_tol": 0.02,
+        "sd_A_tol": 0.02,
+        "rho_tol": 0.06
+      }
+    },
+    {
+      "scenario_id": "H1_target_primary",
+      "scenario_class": "H1_target",
+      "description": "Primary target alternative (mean_D >= 0.15, mean_A >= 0.05).",
+      "model_parameters": {
+        "task_effect_mean": 0.5,
+        "task_effect_variance": 0.01,
+        "arm_correlation": 0.2,
+        "replicate_correlation": 0.1,
+        "guided_params": {
+          "step_type": "normal",
+          "step_mean": 0.08,
+          "step_variance": 0.01,
+          "failure_rate": 0.0
+        },
+        "unguided_params": {
+          "step_type": "normal",
+          "step_mean": 0.0,
+          "step_variance": 0.01,
+          "failure_rate": 0.0
+        }
+      },
+      "target_moments": {
+        "mean_D": 0.1714,
+        "mean_A": 0.347,
+        "sd_D": 0.0995,
+        "sd_A": 0.0641,
+        "rho_D_A": 0.5319
+      },
+      "conformance_tolerances": {
+        "mean_D_tol": 0.015,
+        "mean_A_tol": 0.015,
+        "sd_D_tol": 0.02,
+        "sd_A_tol": 0.02,
+        "rho_tol": 0.06
+      }
+    },
+    {
+      "scenario_id": "H1_target_large",
+      "scenario_class": "H1_target",
+      "description": "Secondary large-effect alternative (mean_D >= 0.20, mean_A >= 0.10).",
+      "model_parameters": {
+        "task_effect_mean": 0.5,
+        "task_effect_variance": 0.01,
+        "arm_correlation": 0.2,
+        "replicate_correlation": 0.1,
+        "guided_params": {
+          "step_type": "normal",
+          "step_mean": 0.15,
+          "step_variance": 0.01,
+          "failure_rate": 0.0
+        },
+        "unguided_params": {
+          "step_type": "normal",
+          "step_mean": 0.0,
+          "step_variance": 0.01,
+          "failure_rate": 0.0
+        }
+      },
+      "target_moments": {
+        "mean_D": 0.2992,
+        "mean_A": 0.5019,
+        "sd_D": 0.0928,
+        "sd_A": 0.0305,
+        "rho_D_A": 0.2423
+      },
+      "conformance_tolerances": {
+        "mean_D_tol": 0.015,
+        "mean_A_tol": 0.015,
+        "sd_D_tol": 0.02,
+        "sd_A_tol": 0.02,
+        "rho_tol": 0.06
+      }
+    },
+    {
+      "scenario_id": "stress_heavy_tail",
+      "scenario_class": "stress_heavy_tail",
+      "description": "Stress scenario with 10% transition failure rate and heavy tail.",
+      "model_parameters": {
+        "task_effect_mean": 0.5,
+        "task_effect_variance": 0.02,
+        "arm_correlation": 0.3,
+        "replicate_correlation": 0.2,
+        "guided_params": {
+          "step_type": "normal",
+          "step_mean": 0.12,
+          "step_variance": 0.04,
+          "failure_rate": 0.1
+        },
+        "unguided_params": {
+          "step_type": "normal",
+          "step_mean": 0.0,
+          "step_variance": 0.02,
+          "failure_rate": 0.1
+        }
+      },
+      "target_moments": {
+        "mean_D": 0.1705,
+        "mean_A": 0.4048,
+        "sd_D": 0.1199,
+        "sd_A": 0.069,
+        "rho_D_A": 0.4728
+      },
+      "conformance_tolerances": {
+        "mean_D_tol": 0.015,
+        "mean_A_tol": 0.015,
+        "sd_D_tol": 0.02,
+        "sd_A_tol": 0.02,
+        "rho_tol": 0.06
+      }
+    }
+  ],
+  "decision_rule": {
+    "mc_iterations_N": 10000,
+    "nominal_type_I_level": 0.05,
+    "type_I_tolerance_epsilon": 0.005,
+    "target_power_candidates": [
+      0.8,
+      0.9,
+      0.95
+    ],
+    "family_confidence_level": 0.99,
+    "t_table_source": "p2_reference_algorithms.md#t-critical-table"
+  }
+}

@@ -1,0 +1,236 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Campaign3_P2_SimulationSpec",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "system_parameters",
+    "scenarios",
+    "decision_rule"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["3.0.0"]
+    },
+    "system_parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "num_search_tasks",
+        "num_conf_tasks",
+        "search_denominators",
+        "conf_denominators",
+        "k_domain",
+        "even_B_domain",
+        "mutation_count_M"
+      ],
+      "properties": {
+        "num_search_tasks": {
+          "type": "integer",
+          "enum": [8]
+        },
+        "num_conf_tasks": {
+          "type": "integer",
+          "enum": [8]
+        },
+        "search_denominators": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 8 },
+          "minItems": 8,
+          "maxItems": 8
+        },
+        "conf_denominators": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 8 },
+          "minItems": 8,
+          "maxItems": 8
+        },
+        "k_domain": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "even_B_domain": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 2, "multipleOf": 2 },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "mutation_count_M": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scenario_id",
+          "scenario_class",
+          "description",
+          "model_parameters",
+          "target_moments",
+          "conformance_tolerances"
+        ],
+        "properties": {
+          "scenario_id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_]+$"
+          },
+          "scenario_class": {
+            "type": "string",
+            "enum": [
+              "N_delta",
+              "N_A",
+              "N_intersection_zero_cov",
+              "N_intersection_pos_cov",
+              "H1_target",
+              "stress_heavy_tail"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "model_parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "task_effect_mean",
+              "task_effect_variance",
+              "arm_correlation",
+              "replicate_correlation",
+              "guided_params",
+              "unguided_params"
+            ],
+            "properties": {
+              "task_effect_mean": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+              },
+              "task_effect_variance": {
+                "type": "number",
+                "minimum": 0.0
+              },
+              "arm_correlation": {
+                "type": "number",
+                "minimum": -1.0,
+                "maximum": 1.0
+              },
+              "replicate_correlation": {
+                "type": "number",
+                "minimum": -1.0,
+                "maximum": 1.0
+              },
+              "guided_params": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["step_type"],
+                "properties": {
+                  "step_type": {
+                    "type": "string",
+                    "enum": ["zero", "two_point", "normal"]
+                  },
+                  "delta": { "type": "number" },
+                  "step_mean": { "type": "number" },
+                  "step_variance": { "type": "number", "minimum": 0.0 },
+                  "failure_rate": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+                }
+              },
+              "unguided_params": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["step_type"],
+                "properties": {
+                  "step_type": {
+                    "type": "string",
+                    "enum": ["zero", "two_point", "normal"]
+                  },
+                  "delta": { "type": "number" },
+                  "step_mean": { "type": "number" },
+                  "step_variance": { "type": "number", "minimum": 0.0 },
+                  "failure_rate": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+                }
+              }
+            }
+          },
+          "target_moments": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["mean_D", "mean_A"],
+            "properties": {
+              "mean_D": { "type": "number" },
+              "mean_A": { "type": "number" },
+              "sd_D": { "type": "number", "minimum": 0.0 },
+              "sd_A": { "type": "number", "minimum": 0.0 },
+              "rho_D_A": { "type": "number", "minimum": -1.0, "maximum": 1.0 }
+            }
+          },
+          "conformance_tolerances": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "mean_D_tol",
+              "mean_A_tol",
+              "sd_D_tol",
+              "sd_A_tol",
+              "rho_tol"
+            ],
+            "properties": {
+              "mean_D_tol": { "type": "number", "exclusiveMinimum": 0.0 },
+              "mean_A_tol": { "type": "number", "exclusiveMinimum": 0.0 },
+              "sd_D_tol": { "type": "number", "exclusiveMinimum": 0.0 },
+              "sd_A_tol": { "type": "number", "exclusiveMinimum": 0.0 },
+              "rho_tol": { "type": "number", "exclusiveMinimum": 0.0 }
+            }
+          }
+        }
+      }
+    },
+    "decision_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mc_iterations_N",
+        "nominal_type_I_level",
+        "type_I_tolerance_epsilon",
+        "target_power_candidates",
+        "family_confidence_level",
+        "t_table_source"
+      ],
+      "properties": {
+        "mc_iterations_N": {
+          "type": "integer",
+          "minimum": 1000
+        },
+        "nominal_type_I_level": {
+          "type": "number",
+          "enum": [0.05]
+        },
+        "type_I_tolerance_epsilon": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "target_power_candidates": {
+          "type": "array",
+          "items": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+          "uniqueItems": true
+        },
+        "family_confidence_level": {
+          "type": "number",
+          "enum": [0.99]
+        },
+        "t_table_source": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

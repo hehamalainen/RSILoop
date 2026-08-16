@@ -1,0 +1,11 @@
+{
+  "tombstone_type": "QUARANTINED_INVALID_REPORT",
+  "status": "RETIRED_MODEL_INADEQUATE",
+  "controlling_finding": "MODEL_INADEQUATE: Frozen SE-1 SimulationModel cannot instantiate N_A (mu_D > 0.10, mu_A = 0) or N_intersection (mu_D = 0.10, mu_A = 0) due to structural invariant mu_Delta <= mu_A.",
+  "invalidation_timestamp": "2026-08-16T22:45:00+03:00",
+  "quarantined_payload": {
+    "archived_path": "campaign3/sim/invalid_round2/p2_tradeoff_report.json",
+    "sha256": "9b1e889c8489289a285e64c4b164456878aab049813c526c12b2973f866f224c"
+  },
+  "action_required": "Do not consume for decision mapping. Awaiting SE-2 RFC approval before executing any new simulation grids."
+}

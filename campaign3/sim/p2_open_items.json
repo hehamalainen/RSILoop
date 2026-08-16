@@ -1,0 +1,157 @@
+{
+  "schema_version": "3.0.0",
+  "open_items": [
+    {
+      "id": 1,
+      "name": "k",
+      "status": "OPERATOR_BLOCKED",
+      "clause_ref": "§2.1",
+      "who_decides": "Operator affordability",
+      "description": "Number of replicates per task across arms; requires operator budget envelope."
+    },
+    {
+      "id": 2,
+      "name": "Exact inference implementation",
+      "status": "PROPOSED",
+      "clause_ref": "§2.2",
+      "who_decides": "Science review",
+      "description": "Exact rational aggregation, float64 conversion, ddof=1 sample SD, frozen t-critical table, and dual IUT gate."
+    },
+    {
+      "id": 3,
+      "name": "simulation model of bounded discrete scores",
+      "status": "MODEL_INADEQUATE",
+      "clause_ref": "§2.4",
+      "who_decides": "Science review",
+      "description": "Frozen SE-1 SimulationModel enforces structural invariant mu_Delta <= mu_A because unguided search gains are non-negative (E[A_u] >= 0). It cannot instantiate the IUT null boundary face N_A (mu_Delta > 0.10, mu_A = 0.00) or N_intersection (mu_Delta = 0.10, mu_A = 0.00). Requires SE-2 model amendment with mechanistic search-to-confirmatory transfer."
+    },
+    {
+      "id": 4,
+      "name": "adaptive-procedure model",
+      "status": "PROPOSED",
+      "clause_ref": "§2.4",
+      "who_decides": "Science review",
+      "description": "Shared-parent Search state machine with M mutations, strict > acceptance, and out-of-sample Confirmatory evaluation."
+    },
+    {
+      "id": 5,
+      "name": "a-priori scenario grid and weights",
+      "status": "PROPOSED",
+      "clause_ref": "§2.4",
+      "who_decides": "Science review",
+      "description": "Scenario register in p2_scenarios.json specifying N_delta, N_A, N_intersection (zero and positive covariance), H1 targets, and stress cases without averaging weights."
+    },
+    {
+      "id": 6,
+      "name": "target power",
+      "status": "OPERATOR_BLOCKED",
+      "clause_ref": "§2.4",
+      "who_decides": "Science review & Operator",
+      "description": "Evaluated across candidates {0.80, 0.90, 0.95}; final freeze requires operator budget review."
+    },
+    {
+      "id": 7,
+      "name": "B_max",
+      "status": "OPERATOR_BLOCKED",
+      "clause_ref": "§2.4",
+      "who_decides": "Operator affordability",
+      "description": "Maximum affordable even block count; bound set by operator costing envelope."
+    },
+    {
+      "id": 8,
+      "name": "B",
+      "status": "PROPOSED",
+      "clause_ref": "§2.4",
+      "who_decides": "Science review",
+      "description": "Deterministic rule selecting the smallest even B satisfying simultaneous Clopper-Pearson bounds, or returning underpowered_no_launch."
+    },
+    {
+      "id": 9,
+      "name": "simulation seeds",
+      "status": "PROPOSED",
+      "clause_ref": "§2.4",
+      "who_decides": "Science review",
+      "description": "Domain-separated PRNG streams keyed deterministically by SHA-256 hash of the controlling plan."
+    },
+    {
+      "id": 10,
+      "name": "Monte Carlo error tolerance",
+      "status": "PROPOSED",
+      "clause_ref": "§2.4",
+      "who_decides": "Science review",
+      "description": "Family-wise Clopper-Pearson bounds with epsilon = 0.005 for Type I UCB and exact LCB on target power."
+    },
+    {
+      "id": 11,
+      "name": "schedule generator",
+      "status": "PROPOSED",
+      "clause_ref": "§2.5",
+      "who_decides": "Science review",
+      "description": "Cyclic permutation mapping indexed by (block, task, replicate) guaranteeing exact 50/50 Search balance and near-balance across 6 final permutations."
+    },
+    {
+      "id": 12,
+      "name": "filling algorithm",
+      "status": "PROPOSED",
+      "clause_ref": "§2.6",
+      "who_decides": "Science review",
+      "description": "Family-grouped canonical length-prefixed SHA-256 sorting filling 12 Admission, 8 Search, 8 Confirmatory, and 6 Secondary tasks."
+    },
+    {
+      "id": 13,
+      "name": "ceiling values/classifications",
+      "status": "ENGINEERING_BLOCKED",
+      "clause_ref": "§2.9",
+      "who_decides": "Operator & Engineering",
+      "description": "Hard preventive vs. post-call accounting boundaries for tokens, calls, and timeouts."
+    },
+    {
+      "id": 14,
+      "name": "guided/control instructions",
+      "status": "ENGINEERING_BLOCKED",
+      "clause_ref": "§2.7",
+      "who_decides": "Science review",
+      "description": "Exact UTF-8 prompt byte strings for Guided (with search scores/traces) and Unguided (task-agnostic mutation)."
+    },
+    {
+      "id": 15,
+      "name": "trace bounds",
+      "status": "ENGINEERING_BLOCKED",
+      "clause_ref": "§2.7",
+      "who_decides": "Engineering",
+      "description": "Evaluator trace token sizing, truncation algorithms, and maximum overshoot bounds."
+    },
+    {
+      "id": 16,
+      "name": "selection/tie-breaking rule",
+      "status": "PROPOSED",
+      "clause_ref": "§2.7",
+      "who_decides": "Science review",
+      "description": "Exact rational strict inequality child_score > parent_score; incumbent parent is strictly retained on ties."
+    },
+    {
+      "id": 17,
+      "name": "allowed metadata",
+      "status": "ENGINEERING_BLOCKED",
+      "clause_ref": "§2.7",
+      "who_decides": "Science review & Engineering",
+      "description": "Field-level JSON schemas for mutation payloads across Guided and Unguided arms."
+    },
+    {
+      "id": 18,
+      "name": "P15 role quotas, filling order, mutation count and call arithmetic",
+      "status": "PROPOSED",
+      "clause_ref": "§4",
+      "who_decides": "Science review",
+      "description": "12 Admission tasks (4/4/4), M mutations, and total pilot call identity 2 * (60 + 24M)k evaluator runs."
+    },
+    {
+      "id": 19,
+      "name": "permitted provider-specific zero-byte retry statuses",
+      "status": "ENGINEERING_BLOCKED",
+      "clause_ref": "§2.8",
+      "who_decides": "Engineering",
+      "description": "Evidence-backed classification of safe pre-transmission vs. unsafe ambiguous transport errors."
+    }
+  ]
+}

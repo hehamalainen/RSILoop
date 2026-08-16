@@ -1,0 +1,11 @@
+{
+  "tombstone_type": "QUARANTINED_INVALID_SCENARIOS",
+  "status": "RETIRED_MODEL_INADEQUATE",
+  "controlling_finding": "MODEL_INADEQUATE: Frozen SE-1 SimulationModel cannot instantiate N_A (mu_D > 0.10, mu_A = 0) or N_intersection (mu_D = 0.10, mu_A = 0) due to structural invariant mu_Delta <= mu_A.",
+  "invalidation_timestamp": "2026-08-16T22:45:00+03:00",
+  "quarantined_payload": {
+    "archived_path": "campaign3/sim/invalid_round2/p2_scenarios.json",
+    "sha256": "601a74b22b87aa58beaa35b4153d3184f7c87ffe52e13ff35a6fa544bc25c07a"
+  },
+  "action_required": "Do not consume as active simulation scenarios. Requires SE-2 Model RFC."
+}

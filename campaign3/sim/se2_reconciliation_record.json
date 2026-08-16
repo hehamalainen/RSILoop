@@ -1,0 +1,68 @@
+{
+  "reconciliation_record_id": "SE2_RECONCILIATION_RECORD_V2",
+  "controlling_plan_hash": "355740d543b65774f66c45481f120810ba8262da59815a19b30e5eabb416b845",
+  "rfc_hash": "bfe80fc98406392058c47298c113eb03a37d248fad42d7b3ad3c39151c0c0ee6",
+  "base_commit": "76fd7dbbe29b5dc025c5c1fb311007c30c6fa44a",
+  "branch": "campaign3-se1-v4",
+  "timestamp_utc": "2026-08-17T18:28:32.879579+00:00",
+  "inventory_confirmation": {
+    "total_approved_untracked_paths": 18,
+    "paths": [
+      "campaign3/sim/calibrator_v2.py",
+      "campaign3/sim/generate_se2_walkthrough.py",
+      "campaign3/sim/invalid_round2/p2_scenarios.json",
+      "campaign3/sim/invalid_round2/p2_tradeoff_report.json",
+      "campaign3/sim/model_v2.py",
+      "campaign3/sim/p2_open_items.json",
+      "campaign3/sim/p2_reference_algorithms.md",
+      "campaign3/sim/p2_scenarios.json",
+      "campaign3/sim/p2_sim.py",
+      "campaign3/sim/p2_simulation_spec.schema.json",
+      "campaign3/sim/p2_tradeoff_report.json",
+      "campaign3/sim/prng_v2.py",
+      "campaign3/sim/quantizer.py",
+      "campaign3/sim/se1_constructibility_analysis.md",
+      "campaign3/sim/se2_model_rfc.md",
+      "campaign3/sim/se2_reconciliation_record.json",
+      "test_campaign3_p2_sim.py",
+      "test_campaign3_se2_engine.py"
+    ],
+    "status": "APPROVED_MATCH_ADDENDUM_A"
+  },
+  "superseded_evidence": {
+    "quarantined_directory": "campaign3/sim/invalid_round2/",
+    "classification": "SUPERSEDED_EVIDENCE_MODEL_INADEQUATE",
+    "artifacts": [
+      {
+        "path": "campaign3/sim/invalid_round2/p2_scenarios.json",
+        "sha256": "601a74b22b87aa58beaa35b4153d3184f7c87ffe52e13ff35a6fa544bc25c07a",
+        "status": "SUPERSEDED_INVALID"
+      },
+      {
+        "path": "campaign3/sim/invalid_round2/p2_tradeoff_report.json",
+        "sha256": "9b1e889c8489289a285e64c4b164456878aab049813c526c12b2973f866f224c",
+        "status": "SUPERSEDED_INVALID"
+      }
+    ]
+  },
+  "test_discovery": {
+    "addendum_e_command": "python3 -m unittest test_campaign3_sim_model.py test_campaign3_p2_sim.py test_campaign3_se2_engine.py",
+    "targeted_tests_status": "PASSED",
+    "targeted_test_count": 31,
+    "targeted_tests_passed": 31,
+    "master_discovery_test_count": 364
+  },
+  "environment_record": {
+    "system_platform": "Darwin",
+    "platform_release": "25.6.0",
+    "python_version": "3.14.3",
+    "parity_preflight_verbatim": "run_tests.py stops during Campaign 2 parity preflight with worker exit code 71; full discovery produced 43 worker/sandbox permission errors and one existing allowlist failure. Recorded verbatim."
+  },
+  "execution_boundaries_enforced": {
+    "large_mc_power_grid": "NOT_EXECUTED",
+    "frozen_production_scenario_register": "NOT_FROZEN",
+    "k_b_selection": "NOT_SELECTED",
+    "campaign_scientific_launch": "NOT_LAUNCHED",
+    "model_calls": "ZERO_TOKENS"
+  }
+}
