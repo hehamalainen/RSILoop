@@ -1,0 +1,103 @@
+{
+  "accepted_anchors": {
+    "controlling_plan_hash": "355740d543b65774f66c45481f120810ba8262da59815a19b30e5eabb416b845",
+    "se2_engine_anchor_commit": "04ead33cb89779d023de68e0d611387fcebc8b53",
+    "se3_cost_model_anchor_commit": "ed47c027c34dcb7a5272ab559d1cab6888e5ad65"
+  },
+  "affordability_and_lifecycle_ceilings": {
+    "canary_calls": {
+      "ceiling_type": "LAUNCH_BLOCKING",
+      "status": "UNRESOLVED_LAUNCH_BLOCKING"
+    },
+    "p12_task_admission": {
+      "ceiling_type": "HARD_PREVENTIVE",
+      "max_logical_calls": 144,
+      "scope": "Screening admission tasks for up to four benchmark candidates"
+    },
+    "p15_operational_pilot": {
+      "ceiling_type": "HARD_PREVENTIVE",
+      "max_logical_calls": 552,
+      "scope": "Two-block clean-path scheduled maximum (528 evaluation + 24 mutation calls at M=3, k=2)"
+    },
+    "p18_production_campaign": {
+      "ceiling_type": "HARD_PREVENTIVE",
+      "design_max_logical_calls": 4928,
+      "hard_preventive_logical_call_ceiling": 5000,
+      "hard_preventive_transport_attempt_ceiling": 15000,
+      "max_transport_attempts_at_r3": 14784,
+      "overshoot_allowance": 0
+    },
+    "token_affordability_assumptions": {
+      "central_advisory_forecast_tokens": 2014672,
+      "status": "OPERATOR_ACCEPTED_AFFORDABILITY_ASSUMPTIONS",
+      "token_provenance": {
+        "c2_mutation_mean_tokens": 70,
+        "c2_solution_mean_tokens": 428,
+        "upper_mutation_assumption_tokens": 250,
+        "upper_solution_assumption_tokens": 1200
+      },
+      "upper_planning_exposure_tokens": 5662800
+    }
+  },
+  "declaration": "I have explicitly verified and accepted the Campaign 3 design axes, fixed parameter selections, comprehensive lifecycle budgeting, transport attempt ceilings, retry taxonomy boundaries, and token planning assumptions. SE-4 is authorized to proceed to Stage SE-4A (specification and parameter freeze only, with zero simulation execution).",
+  "design_parameters": {
+    "B_max": 22,
+    "candidate_b_domain": [
+      2,
+      4,
+      6,
+      8,
+      10,
+      12,
+      14,
+      16,
+      18,
+      20,
+      22
+    ],
+    "k": 2,
+    "M": 3,
+    "per_block_logical_calls": 224,
+    "per_block_logical_formula": "(58 + 18M)k",
+    "search_baseline_axis": "SEPARATE",
+    "total_p18_logical_formula": "(58 + 18M)kB",
+    "variant": "SEPARATE_REPLICATE_SPECIFIC"
+  },
+  "evidence_manifest": [
+    {
+      "path": "campaign3/cost_model.py",
+      "sha256": "956ad8a7564c41829d384450d0f85694bb1ca03955e5f8b8cb8a2d4e78279648"
+    },
+    {
+      "path": "campaign3/cost_model_report.json",
+      "sha256": "d806403f82bc6c4f7baa11f45ca6822112db6686c444d9c97538176fc0931d59"
+    },
+    {
+      "path": "campaign3/cost_model_report.md",
+      "sha256": "a8db7dc69fdd454aeb6443fa4f16252d3adaa56314eb97309614f0faeb13e78f"
+    },
+    {
+      "path": "test_campaign3_cost_model.py",
+      "sha256": "a740172c3633807029fdc68a51129f2cd0edebc7fecb57d474f91cc276972f70"
+    }
+  ],
+  "governance_status": "OFFICIALLY_RECORDED_OPERATOR_DECISION",
+  "operator_decision": "ACCEPT_DESIGN_AXES_AND_AFFORDABILITY_RULING",
+  "operator_identity": "heikkiohamalainen",
+  "retry_governance": {
+    "max_attempts_per_logical_call": 3,
+    "permitted_pre_transmission_failures": [
+      "process_spawn_failure",
+      "connection_refusal",
+      "dns_failure",
+      "tls_failure_before_request_transmission"
+    ],
+    "provider_specific_zero_body_status": "UNRESOLVED_ENGINEERING_BLOCKED",
+    "rule": "Retry only objectively proven safe cases with identical request identity; otherwise recover authenticated bytes or fail closed. Never create replacement randomness."
+  },
+  "se4_staging": {
+    "se4a": "SPECIFICATION_AND_PARAMETER_FREEZE_NO_SIMULATION_EXECUTION",
+    "se4b": "CONFORMANCE_VALIDATION_FIRST_THEN_POWER_GRID_EXECUTION"
+  },
+  "timestamp_utc": "2026-08-18T09:07:02Z"
+}
