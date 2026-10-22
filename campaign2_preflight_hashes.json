@@ -133,7 +133,7 @@
   "campaign2/model_provider.py": "e4ae9e24a7b0d86f959a7a20ab2bda0ad9d0f921e5b6034a81a9c6db76e01d46",
   "campaign2/orchestrator.py": "5a2b6ba6fd17c621a1d1e4c12993e2343659401047082bcbe339150ecf79dce5",
   "campaign2/preflight_registry.py": "d00da13c157baad1fa7b66fb2a2b47e6f3ced5f014fdeef2ba68a8466e376e3f",
-  "campaign2/proxy.py": "840820044afc0b05e353f66e4135e20090f3e9b8d91fa73e4c51d229f5642ca6",
+  "campaign2/proxy.py": "947f8598b1cbfe6bfd5e6a8d667d5d29a041ac736152f3de6d4a7e4d42ea5ac1",
   "campaign2/registration.py": "5964a3ffe6ff63fadbad1135c7de6fd51473146decbbe9de1a00f7d40674b9cf",
   "campaign2/reporting.py": "61ac7f70a14476acdf39a06eefe97e50c6c7fbeedfd6e9e3628fd1a1f466e0fa",
   "campaign2/scorer.py": "9a24687f8120b4617fe609e4211d4adc3f3cb1d0feb9e5f775aadd8ecc0bfbbd",

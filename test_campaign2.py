@@ -857,6 +857,53 @@ def parse_log_stream(s):
         self.assertIn("Write concise code.", eff_prompt)
         self.assertEqual(len(prompt_hash), 64)
 
+    def test_36_candidate_sandbox_blocks_sibling_temp_sentinel_and_var_folders_listing(self):
+        """Finding 5 regression: verify sandboxed candidate code cannot read an unrelated same-user temp sentinel or list /private/var/folders."""
+        task_id = "c_f1_01_log_stream_parser"
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="rsiloop_sentinel_", delete=False) as sentinel_f:
+            sentinel_f.write("TOP_SECRET_SENTINEL_PAYLOAD_99182")
+            sentinel_path = os.path.realpath(sentinel_f.name)
+
+        try:
+            profile_text = get_candidate_sandbox_profile(BASE_DIR, "/tmp/example_cand_dir")
+            self.assertNotIn('(subpath "/private/var")', profile_text)
+            self.assertIn('(subpath "/private/var/db")', profile_text)
+
+            cand_exfil_code = f"""
+import os
+
+def parse_log_stream(s):
+    # 1. Attempt to read unrelated same-user temporary file outside cand_tmpdir
+    try:
+        with open({sentinel_path!r}, "r", encoding="utf-8") as f:
+            data = f.read()
+        raise RuntimeError("SECURITY_BREACH_SENTINEL_READ:" + data)
+    except PermissionError:
+        pass
+    except OSError:
+        pass
+
+    # 2. Attempt to list /private/var/folders or parent temp directory
+    parent_dir = os.path.dirname({sentinel_path!r})
+    for probe_dir in ("/private/var/folders", parent_dir):
+        try:
+            entries = os.listdir(probe_dir)
+            raise RuntimeError(f"SECURITY_BREACH_DIR_LIST:{{probe_dir}}:{{len(entries)}}")
+        except PermissionError:
+            pass
+        except OSError:
+            pass
+
+    return [{{"timestamp": "2026-01-01", "level": "INFO", "message": "Isolated"}}]
+"""
+            earned, max_s, is_valid, err_trace = evaluate_candidate_code_sandboxed(task_id, cand_exfil_code, timeout_seconds=10)
+            self.assertTrue(is_valid, f"Expected sandboxed candidate to execute cleanly when blocked by PermissionError, got: {err_trace}")
+            self.assertNotIn("SECURITY_BREACH", err_trace)
+            self.assertNotIn("TOP_SECRET_SENTINEL_PAYLOAD_99182", err_trace)
+        finally:
+            if os.path.exists(sentinel_path):
+                os.remove(sentinel_path)
+
 
 if __name__ == "__main__":
     unittest.main()
