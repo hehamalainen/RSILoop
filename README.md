@@ -1,92 +1,120 @@
-# RSILoop: Host-Contained Recursive Self-Improvement Experiment
+# RSILoop: Containment-Hardened Recursive Self-Improvement Research Prototype
 
-A bi-level prompt-optimization harness that uses the local **Codex CLI** (remote API model inference) as both the candidate solution generator and the meta-optimizer. The harness evaluates candidate solutions in a macOS `sandbox-exec` jail, then feeds failure traces to the optimizer to mutate system prompts across three independent trials.
+**RSILoop** is an experimental evaluation, containment, and statistical-design prototype for studying **Level 1 Recursive Self-Improvement (RSI)** in LLM-based coding agents. It evaluates candidate code inside a deny-default macOS `sandbox-exec` jail with pre-execution `setrlimit` attestation, pairs failure traces with a meta-optimizer to mutate system prompts under an immutable prompt envelope, and archives cryptographically anchored run evidence.
 
-## Current Status — Campaign 2 Work Order B (Orchestration & Launch Preflight)
+---
 
-**Status: NO-GO pending adversarial review and an operator-issued launch lock. No Sol calls are authorized.**
-- **Active Base Commit**: Pinned to base commit `96e04c94ef44b974301bbe9e4fedd2ba4281022d`.
-- **CLI Integration**: Wired into `rsi_loop.py`; resume requires both `--resume` and an exact sealed `--resume-attempt-id run_<id>`.
-- **Model Interface**: Pluggable `ModelProvider` architecture supporting `MockModelProvider` (vertical slice testing) and `SolModelProvider` (Work Order C production stub).
-- **Per-Trial Call Arithmetic**: Fully enforced per-trial call counts (202 for Suite C full-run, 86 for Suite P pilot) across baseline, mutation, winner selection, and post-selection microblock trios.
+## Project Overview & Current Release State
 
-**Operator Amendment — Legacy Model Deletion**:
-The 491 MB Qwen GGUF model (`models/Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf`) and active model calibration paths have been deleted as an explicit operator amendment. Model-based difficulty stratification is completely withdrawn and replaced with deterministic, machine-recomputable, family-blocked tier assignment (`campaign2_tier_assignment.json`). No local or cloud difficulty-proxy model is required.
+This repository contains four distinct, self-contained components:
 
-### Registered Report Language & Principles
-- Tier assignment is balanced by structural task FAMILY, not by measured difficulty. Families are not difficulty strata.
-- The primary comparison remains paired on the REALIZED confirmatory tasks; the pairing is unaffected by assignment.
-- Difficulty imbalance across tiers may reduce statistical power and complicates interpretation of a null result.
-- Generalization from the eight confirmatory tasks to the full 16-task population is limited.
-- The Qwen 0.5B proxy was inadequate; model proxies in general were not shown to be invalid.
+1. **Campaign 1 (`rsi_loop.py`, `evaluator.py`, `candidate_runner.py`, `benchmarks/`)**:
+   - The foundational bi-level prompt-optimization harness and host-supervised RPC proxy.
+2. **Campaign 2 (`campaign2/`, `benchmarks/campaign2/`, `campaign_archive_manifest.json`, `campaign_claim_record.json`)**:
+   - A 30-task, 4-family benchmark population (`suite_c`: 22 tasks, `suite_p`: 8 tasks) with 90 calibrated defect rungs (`campaign2_parity_matrix.json`), deterministic SHA-256 rejection-sampled family-blocked tier assignment (`campaign2_tier_assignment.json`), crash-recoverable checkpoint durability (`campaign2/durability.py`), and a 3-record append-only invocation ledger (`campaign2/attempt_lifecycle.py`).
+   - **Recorded Campaign 2 Pilot Outcome**: The non-mock Suite P pilot (`history/run_1786134848_cfb514d2/campaign2_pilot_report.json`, sealed under `campaign_archive_manifest.json` and `campaign_claim_record.json`) terminated at the prespecified **`no_headroom`** stop rule (baseline solved 100% of pilot tasks at $1.0$, yielding $\Delta = 0.0$ across optimizer and control arms) and did **not** advance to the confirmatory Suite C run.
+3. **Campaign 3 Statistical Design & Cost Algebra (`campaign3/`, `campaign3/sim/`)**:
+   - Governance and preregistration drafting (`campaign3/governance.py`, `campaign3/verifier.py`, `campaign3/p1_verifier.py`), deterministic Monte Carlo simulation and two-stage moment calibration (`campaign3/sim/model_v2.py`, `campaign3/sim/calibrator_v2.py`, `campaign3/sim/quantizer.py`), and closed-form call/token cost algebra across all four protocol variants (`campaign3/cost_model.py`, `campaign3/cost_model_report.md`).
+   - **Note on Campaign 2 vs. Campaign 3 Conformance**: The `campaign2/` directory is retained as the historical Campaign 2 implementation and archive verifier. For Campaign 3 conformance, `parse_and_classify_jsonl_output(..., require_transport_evidence=True)` and `is_permitted_local_retry(..., require_transport_evidence=True)` reject post-spawn CLI retries lacking transport-level zero-bytes-sent proof, and `Campaign2Orchestrator(..., atomic_parent_feedback=True)` updates parent prompts, scores, and failure traces atomically only on accepted improvements.
+4. **Discovery Probe Sidecar (`discovery_probe/`)**:
+   - A dependency-free, text-only active rule-discovery benchmark inspired by [DiG-bench](https://arxiv.org/abs/2608.12593). Episodes commit to a hidden composition of string operations via SHA-256 before exploration and score only locked holdout challenge predictions. See [`discovery_probe/README.md`](discovery_probe/README.md).
+
+---
+
+## Requirements & Installation
+
+- **Operating System**: macOS (requires `/usr/bin/sandbox-exec` for Seatbelt containment profiles)
+- **Python**: Python `3.11+` (tested on Python 3.11–3.14)
+- **Runtime Dependencies**: `numpy>=1.26.0` (used by Campaign 3 simulation and calibration modules)
+
+Create a virtual environment and install dependencies:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+---
+
+## Model-Free Smoke Examples (Zero API Keys or Paid Inference Required)
+
+All verification, simulation, and sidecar tools run completely offline without API keys or external network calls:
+
+### 1. Play or Script the Active Rule-Discovery Sidecar (`discovery_probe`)
+
+Run an interactive hidden-rule discovery episode (or pass `--reveal-rules` for the execution-control condition):
+
+```bash
+python3 -m discovery_probe --seed 42 --tier 2
+```
+
+Run a non-interactive programmatic smoke check:
+
+```bash
+python3 -c '
+from discovery_probe import DiscoverySession, verify_result_commitment
+session = DiscoverySession(seed=42, tier=2)
+print("Commitment:", session.rule_commitment)
+print("Probe abc =>", session.probe("abc"))
+challenges = session.challenges()
+guesses = [session._rule.apply(c) for c in challenges]
+res = session.submit(guesses)
+print("Solved:", res.solved, "Score:", res.score, "Commitment Valid:", verify_result_commitment(res))
+'
+```
+
+### 2. Run Campaign 2 Mock Pilot Orchestration (Offline Vertical Slice)
+
+Run the Campaign 2 orchestrator in offline mock mode (`MockModelProvider`) to exercise the full 3-phase trial pipeline (baseline, counterbalanced optimizer/control mutations, and post-selection microblock trios):
+
+```bash
+python3 -m unittest test_campaign2_orchestration.TestCampaign2Orchestrator.test_suite_p_pilot_call_arithmetic_86_calls -v
+```
+
+### 3. Evaluate Campaign 3 Cost Algebra & Simulation Engine
+
+Inspect closed-form call and token budgets across the four Campaign 3 protocol variants:
+
+```bash
+python3 -m unittest test_campaign3_cost_model.py -v
+```
+
+---
+
+## Running the Full Regression & Hygiene Suite
+
+Because Git does not preserve read-only (`0444`) file modes across fresh clones, `run_tests.py` automatically invokes [`scripts/reseal_readonly_artifacts.py`](scripts/reseal_readonly_artifacts.py) to verify every sealed artifact's SHA-256 digest against its committed manifest/anchor before restoring `0444` permissions.
+
+Run the complete verification suite (enforces zero skips, zero warnings, and zero unraisable exceptions):
+
+```bash
+python3 run_tests.py
+```
+
+Run the standalone release hygiene and allowlist verifier:
+
+```bash
+python3 scripts/check_release_hygiene.py
+```
 
 ---
 
 ## Threat Model & Host Containment
 
-- **Process Isolation**: The candidate solution and the runner communication shim share a Python interpreter and process. Therefore, protocol authenticity is not guaranteed against active exploitation by candidate code (e.g., introspection to locate control descriptors).
-- **Correlation**: Request UUIDs provide stale-frame and accidental output pollution protection, not protocol cryptographic authenticity.
-- **Boundary**: The achieved boundary is **host containment** (preventing arbitrary filesystem writes, network operations, or process spawning on the host using macOS `sandbox-exec` and `setrlimit`).
-- **Resource Enforcement**: The Campaign 2 worker installs CPU (`RLIMIT_CPU`), file-descriptor (`RLIMIT_NOFILE`), file-size (`RLIMIT_FSIZE`), and core-dump (`RLIMIT_CORE`) limits before it reports readiness. The host rejects readiness unless the worker attests expected limits and confirms candidate import has not started.
-- **Residual Host-Availability Risk**: Process address-space ceilings (`RLIMIT_AS`) are unconstrained by `setrlimit` at the OS layer on the macOS XNU kernel. A memory-bound candidate process can create host memory pressure or stall before wall-clock supervision terminates the process. This residual availability risk is accepted for the frozen, non-adversarial benchmark population.
-- **Phase-Based Timeout & Exit Attribution**: Startup/readiness wall timeouts or process crashes are infrastructure failures. A non-exiting candidate import/execution wall timeout raises `CandidateTimeoutError` and invalidates the campaign attempt because it is not attributable to a scored outcome. Explicit worker exits and signals during candidate phases remain phase-attributed candidate failures.
-- **Source Policy**: Campaign 2 applies no AST denylist. Python semantics are not selectively biased by a hidden import/call policy; containment and budgets are enforced at runtime.
+- **Process Isolation**: In Campaign 1 (`candidate_runner.py`), the candidate solution and runner RPC shim share a Python process; in Campaign 2 (`campaign2/proxy.py`), the host supervisor runs `test_harness.py` in the trusted host process and communicates over pipes with a deny-default sandboxed worker (`worker.py` + `candidate.py`).
+- **Filesystem Containment**: Candidate workers are restricted by macOS `sandbox-exec` (`candidate.sb.template` and `get_candidate_sandbox_profile()` in [`campaign2/proxy.py`](campaign2/proxy.py)). Candidate code may read/write only its isolated per-evaluation temporary directory (`cand_tmpdir`) and cannot read the repository or unrelated same-user temporary files under `/private/var/folders`.
+- **Resource Enforcement**: Workers install CPU (`RLIMIT_CPU`), file-descriptor (`RLIMIT_NOFILE`), file-size (`RLIMIT_FSIZE`), and core-dump (`RLIMIT_CORE`) limits before reporting `READY`.
+- **Residual Host-Availability Limitation**: macOS XNU does not enforce `RLIMIT_AS` via `setrlimit`. Memory-bound candidate code is bounded by wall-clock supervision (`CandidateTimeoutError`) rather than kernel address-space limits. Do not run untrusted adversarial workloads outside a dedicated VM or container.
 
 ---
 
-## Architecture
+## Repository Structure
 
-```
-campaign2/proxy.py host supervisor  (trusted)
-  └── generated worker.py + candidate.py  (deny-default macOS sandbox)
-```
-
-The worker completes its RLIMIT-backed READY handshake before the host sends the explicit `load_candidate` request.
-
-### Key files
-
-```
-├── benchmarks/
-│   ├── campaign2/                # Campaign 2 30-task benchmark population
-│   │   ├── suite_c/              # 22 Suite C tasks (F1, F2, F3, F4)
-│   │   └── suite_p/              # 8 Suite P tasks (F1, F2, F3, F4)
-│   ├── circular_buffer/          # Legacy optimization task
-│   └── huffman_coding/           # Legacy optimization task
-├── campaign2/
-│   ├── proxy.py                  # Sandboxed candidate worker IPC & host supervisor
-│   ├── manifest.py               # Preflight manifest & sealed evidence verifier
-│   ├── attempt_identity.py       # Sealed exact-attempt resume identity
-│   ├── durability.py             # Crash-recoverable exact-head checkpoints
-│   ├── orchestrator.py           # Randomized trials and task-labelled Schema 3 evidence
-│   ├── tier_assignment.py        # SHA-256 rejection sampling family-blocked tier assignment
-│   ├── scorer.py                 # Task scoring & evaluation utilities
-│   └── defects.py                # Benchmark task defect ladder verifier
-├── campaign2_archive/            # Archived audit records (read-only 0o444)
-├── campaign2_parity_matrix.json  # 120-row sealed parity matrix (0o444)
-├── campaign2_tier_assignment.json# Family-blocked tier assignment artifact (0o444)
-├── campaign2_evidence_hashes.json# Sealed scientific evidence manifest (0o444)
-├── evaluator.py                  # Host supervisor: RunnerProxy, MRO registry, class/instance caching
-├── rsi_loop.py                   # Orchestrator: smoke+canary, three trials, promotion gate, RunContext
-└── run_tests.py                  # Strict combined test launcher (enforces zero skips, zero warnings)
-```
-
----
-
-## Getting Started
-
-### Requirements
-
-- macOS (sandbox-exec required)
-- Python 3.11+
-
-### Branch Topology & Verification
-
-Scientific launch remains blocked until an operator-reviewed launch lock authenticates the exact final Git commit.
-
-### Run the test suite
-
-Run the strict test launcher from outside any sandbox (sandbox-exec calls require host access). The launcher enforces zero skips, zero warnings, and returns nonzero on any warnings, unraisable exceptions, skips, failures, or errors:
-
-```bash
-python3 run_tests.py
-```
+- [`rsi_loop.py`](rsi_loop.py), [`evaluator.py`](evaluator.py), [`candidate_runner.py`](candidate_runner.py), [`sandbox_worker.py`](sandbox_worker.py) — Campaign 1 bi-level loop and sandboxed RPC evaluator.
+- [`campaign2/`](campaign2/) — Campaign 2 containment proxy, manifest/archive verifiers, durability checkpoints, attempt lifecycle ledger, model provider, and orchestrator.
+- [`campaign3/`](campaign3/) — Campaign 3 governance, preregistration verifiers, cost model, and `campaign3/sim/` Monte Carlo simulation & calibration engine.
+- [`discovery_probe/`](discovery_probe/) — Dependency-free active rule-discovery sidecar benchmark.
+- [`benchmarks/`](benchmarks/) — Campaign 1 tasks and Campaign 2 30-task Suite C / Suite P population with 90 defect rungs.
+- [`scripts/`](scripts/) — Content-verifying read-only mode restoration (`reseal_readonly_artifacts.py`) and release hygiene gate (`check_release_hygiene.py`).
+- [`LICENSE`](LICENSE) & [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — MIT License and first/third-party provenance documentation.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) & [`SECURITY.md`](SECURITY.md) — Contribution guidelines and private vulnerability reporting policy.
