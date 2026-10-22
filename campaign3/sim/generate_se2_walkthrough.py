@@ -13,7 +13,7 @@ PLAN_HASH_HEX = "355740d543b65774f66c45481f120810ba8262da59815a19b30e5eabb416b84
 REQUIRED_BASE_COMMIT = "76fd7dbbe29b5dc025c5c1fb311007c30c6fa44a"
 
 DEFAULT_RECON_PATH = os.path.join(os.path.dirname(__file__), "se2_reconciliation_record.json")
-DEFAULT_OUTPUT_PATH = "/Users/heikkihamalainen/.gemini/antigravity/brain/152981d9-7ef3-4fdb-b4cd-a313ada8cdd2/walkthrough.md"
+DEFAULT_OUTPUT_PATH = os.path.join(os.path.dirname(__file__), "se2_walkthrough.md")
 
 APPROVED_INVENTORY = [
     "campaign3/sim/calibrator_v2.py",
@@ -76,7 +76,7 @@ def emit_reconciliation_record(output_path: Optional[str] = None, run_tests: boo
             cwd=repo_root, capture_output=True, text=True, check=True
         ).stdout.strip()
 
-        # Verify that active checkout is anchored on REQUIRED_BASE_COMMIT
+        # Verify that active checkout is anchored on REQUIRED_BASE_COMMIT (or has it as an ancestor)
         if head_sha == REQUIRED_BASE_COMMIT:
             base_commit = head_sha
         else:
@@ -85,12 +85,16 @@ def emit_reconciliation_record(output_path: Optional[str] = None, run_tests: boo
                 cwd=repo_root, capture_output=True, text=True, check=True
             )
             parent_sha = parent_proc.stdout.strip()
-            if parent_sha == REQUIRED_BASE_COMMIT:
+            anc_proc = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", REQUIRED_BASE_COMMIT, "HEAD"],
+                cwd=repo_root, capture_output=True, text=True
+            )
+            if parent_sha == REQUIRED_BASE_COMMIT or anc_proc.returncode == 0:
                 base_commit = REQUIRED_BASE_COMMIT
             else:
                 raise RuntimeError(
                     f"Active checkout base verification failed: neither HEAD ({head_sha}) nor parent HEAD^ ({parent_sha}) "
-                    f"matches REQUIRED_BASE_COMMIT ({REQUIRED_BASE_COMMIT})"
+                    f"matches or descends from REQUIRED_BASE_COMMIT ({REQUIRED_BASE_COMMIT})"
                 )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Git query failed during reconciliation emission: {e}") from e

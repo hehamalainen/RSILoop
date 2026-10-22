@@ -30,18 +30,18 @@ flowchart TD
 ---
 
 ## 📂 Codebase Navigation
-- **[rsi_loop.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/rsi_loop.py)**: Main bi-level optimization driver (JSONL parser + Greedy Policy, RunContext).
-- **[evaluator.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/evaluator.py)**: Sandbox execution evaluator with dynamic class/instance caching and unified clean exit.
-- **[candidate_runner.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/candidate_runner.py)**: Host-contained runner enforcing irreversible resource limits and RPC envelope codec.
-- **[test_evaluator.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/test_evaluator.py)**: Containment, IPC, and reference solution regression tests.
-- **[test_rsi_loop.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/test_rsi_loop.py)**: Orchestrator, preflight verification, and E2E state tests.
-- **[run_tests.py](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/run_tests.py)**: Strict test runner enforcing zero skips and zero ResourceWarnings.
-- **[prompt_templates/](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/prompt_templates/)**:
+- **[rsi_loop.py](rsi_loop.py)**: Main bi-level optimization driver (JSONL parser + Greedy Policy, RunContext).
+- **[evaluator.py](evaluator.py)**: Sandbox execution evaluator with dynamic class/instance caching and unified clean exit.
+- **[candidate_runner.py](candidate_runner.py)**: Host-contained runner enforcing irreversible resource limits and RPC envelope codec.
+- **[test_evaluator.py](test_evaluator.py)**: Containment, IPC, and reference solution regression tests.
+- **[test_rsi_loop.py](test_rsi_loop.py)**: Orchestrator, preflight verification, and E2E state tests.
+- **[run_tests.py](run_tests.py)**: Strict test runner enforcing zero skips and zero ResourceWarnings.
+- **[prompt_templates/](prompt_templates/)**:
   - `inner_agent_baseline.txt`: Initial prompt for the generator.
   - `meta_optimizer.txt`: System prompt guiding the prompt mutation logic.
   - `best_prompt.txt`: Convenience copy of the best performing prompt.
-- **[benchmarks/](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/benchmarks/)**: target problems and verification files.
-- **[docs/walkthrough.md](file:///Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/docs/walkthrough.md)**: Details structural design, results, and long-term directions.
+- **[benchmarks/](benchmarks/)**: target problems and verification files.
+- **[docs/walkthrough.md](docs/walkthrough.md)**: Details structural design, results, and long-term directions.
 
 ---
 
