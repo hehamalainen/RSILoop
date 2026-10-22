@@ -1597,6 +1597,69 @@ class TestSealedInvalidationSecurity(unittest.TestCase):
                 orch.run_trial(0)
             self.assertIn("max_s", str(ctx.exception))
 
+    def test_atomic_parent_feedback_pairing_after_rejected_child_round(self):
+        """Finding 8 regression: verify rejected child round does not overwrite accepted parent feedback/traces in subsequent mutations."""
+        captured_mutations = []
+
+        class TrackingProvider:
+            def __init__(self):
+                self.mut_idx = 0
+
+            def generate_candidate(self, task_id, effective_prompt, call_id):
+                if "OPT_ROUND_1_ACCEPTED" in effective_prompt:
+                    return "# code_round1", 50
+                if "OPT_ROUND_2_REJECTED" in effective_prompt:
+                    return "# code_round2", 50
+                if "OPT_ROUND_3_FINAL" in effective_prompt:
+                    return "# code_round3", 50
+                return "# code_baseline", 50
+
+            def mutate_prompt(self, mutable_body, failure_context, call_id):
+                self.mut_idx += 1
+                captured_mutations.append((mutable_body, failure_context))
+                if self.mut_idx == 1:
+                    return "OPT_ROUND_1_ACCEPTED", 60
+                if self.mut_idx == 2:
+                    return "OPT_ROUND_2_REJECTED", 60
+                if self.mut_idx == 3:
+                    return "OPT_ROUND_3_FINAL", 60
+                return f"CTRL_ROUND_{self.mut_idx}", 60
+
+        class RungEvaluator:
+            def evaluate(self, task_id, code):
+                if "code_round1" in code:
+                    return 7, 10, True, "ACCEPTED_PARENT_TRACE_R1"
+                if "code_round2" in code:
+                    return 2, 10, True, "REJECTED_CHILD_TRACE_R2"
+                if "code_round3" in code:
+                    return 8, 10, True, "ACCEPTED_TRACE_R3"
+                return 4, 10, True, "BASELINE_TRACE_R0"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ta_data = generate_family_blocked_assignment()
+            reg_data = dict(verify_master_registration(BASE_DIR))
+            # Force trial 0 arm_sign = +1 so slot_a is the optimizer arm
+            reg_data["arm_assignment_vectors"] = [1] + list(reg_data["arm_assignment_vectors"][1:])
+
+            orch = Campaign2Orchestrator(
+                model_provider=TrackingProvider(),
+                task_evaluator=RungEvaluator(),
+                tier_assignment=ta_data,
+                registration=reg_data,
+                suite="suite_p",
+                workspace_root=tmp_dir,
+            )
+            orch.run_trial(0)
+
+            # Optimizer arm executes mutations 1, 2, 3 in slot_a
+            self.assertGreaterEqual(len(captured_mutations), 3)
+            round3_parent_body, round3_fail_ctx = captured_mutations[2]
+            self.assertEqual(round3_parent_body, "OPT_ROUND_1_ACCEPTED")
+            self.assertIn("ACCEPTED_PARENT_TRACE_R1", round3_fail_ctx)
+            self.assertNotIn("REJECTED_CHILD_TRACE_R2", round3_fail_ctx)
+            self.assertIn("score 14/20", round3_fail_ctx)
+            self.assertNotIn("score 4/20", round3_fail_ctx)
+
 
 if __name__ == "__main__":
     unittest.main()

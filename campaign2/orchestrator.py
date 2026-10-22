@@ -267,8 +267,10 @@ class Campaign2Orchestrator:
         ledger: Optional[AttemptLedger] = None,
         checkpoint_mgr: Optional[CheckpointManager] = None,
         workspace_root: str = BASE_DIR,
+        atomic_parent_feedback: bool = True,
     ):
         self.model = model_provider
+        self.atomic_parent_feedback = atomic_parent_feedback
         if task_evaluator is None:
             from campaign2.model_provider import ProductionTaskEvaluator
             task_evaluator = ProductionTaskEvaluator()
@@ -553,8 +555,9 @@ class Campaign2Orchestrator:
                         result.total_tokens += tokens
                         phase2_call_count += 1
 
-                last_round_scores = rnd_scores
-                last_round_errors = rnd_errors
+                if not self.atomic_parent_feedback:
+                    last_round_scores = rnd_scores
+                    last_round_errors = rnd_errors
 
                 # EQUAL-TASK WEIGHTED ROUND EVALUATION
                 rnd_task_means = [
@@ -574,6 +577,9 @@ class Campaign2Orchestrator:
                         best_opt_frac = rnd_frac
                         best_opt_depth = rnd
                         slot_scores[slot] = rnd_scores
+                        if self.atomic_parent_feedback:
+                            last_round_scores = rnd_scores
+                            last_round_errors = rnd_errors
                 else:
                     mut_record.was_improving = False
                     self.exploratory.record_control_mutation(mut_tokens)
@@ -583,6 +589,9 @@ class Campaign2Orchestrator:
                         best_ctrl_body = new_body
                         best_ctrl_frac = rnd_frac
                         slot_scores[slot] = rnd_scores
+                        if self.atomic_parent_feedback:
+                            last_round_scores = rnd_scores
+                            last_round_errors = rnd_errors
 
                 slot_bodies[slot] = current_body
 
