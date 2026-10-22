@@ -46,7 +46,7 @@
     {
       "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/campaign2_preflight_hashes.json",
       "relative_path": "campaign2_preflight_hashes.json",
-      "sha256": "0a9d50759f51a909b52bd7567bd29d3ed5e507649aa871319854aabd94b1c2d2",
+      "sha256": "576c6c67dcbd89d4f63cdb0da2e7306287f99b15c1b024aedd4bc8826d0d31ab",
       "size_bytes": 19610,
       "st_mode": 292
     },
@@ -229,6 +229,6 @@
   "campaign_id": "campaign_2_gpt5_6_sol",
   "canonical_report_path": "history/run_1786134848_cfb514d2/campaign2_pilot_report.json",
   "canonical_report_sha256": "7d95b7b46902052711939a005cf427b697e58711dc040254665a56bcb9903ad3",
-  "created_at_iso": "2026-10-22T22:36:13.206135+00:00",
+  "created_at_iso": "2026-10-22T22:43:07.647729+00:00",
   "schema_version": "3"
 }

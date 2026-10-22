@@ -904,6 +904,66 @@ def parse_log_stream(s):
             if os.path.exists(sentinel_path):
                 os.remove(sentinel_path)
 
+    def test_37_strict_transport_evidence_blocks_unverified_stderr_retry(self):
+        """Finding 7 regression: verify require_transport_evidence=True invalidates post-spawn HTTP 429/503 stderr exits with usage_known=False."""
+        import hashlib
+        from campaign2.model_provider import parse_and_classify_jsonl_output
+        from campaign2.attempt_lifecycle import is_permitted_local_retry
+
+        for stderr_payload in (b"Error: HTTP 429 Too Many Requests\n", b"Error: 503 Service Unavailable\n"):
+            strict_parsed = parse_and_classify_jsonl_output(
+                b"",
+                stderr_payload,
+                return_code=1,
+                require_transport_evidence=True,
+            )
+            self.assertEqual(strict_parsed["classification"], "invalidated")
+            self.assertFalse(strict_parsed["usage_known"])
+
+            legacy_parsed = parse_and_classify_jsonl_output(
+                b"",
+                stderr_payload,
+                return_code=1,
+                require_transport_evidence=False,
+            )
+            self.assertEqual(legacy_parsed["classification"], "transient_infrastructure_error")
+
+            comp_record = {
+                "classification": legacy_parsed["classification"],
+                "parse_state": legacy_parsed["parse_state"],
+                "usage_known": legacy_parsed["usage_known"],
+                "tokens": 0,
+                "return_code": 1,
+                "duration": 0.25,
+                "started_record_hash": "a" * 64,
+                "text_hash": "",
+                "raw_stdout_digest": legacy_parsed["stdout_hash"],
+                "raw_stderr_digest": legacy_parsed["stderr_hash"],
+            }
+            self.assertFalse(
+                is_permitted_local_retry(comp_record, has_process_started=True, require_transport_evidence=True)
+            )
+            self.assertTrue(
+                is_permitted_local_retry(comp_record, has_process_started=True, require_transport_evidence=False)
+            )
+
+        # Pre-spawn OS failure (has_process_started=False, usage_known=True) remains retryable under strict mode
+        spawn_fail_record = {
+            "classification": "spawn_failure",
+            "parse_state": "spawn_failure",
+            "usage_known": True,
+            "tokens": 0,
+            "return_code": -1,
+            "duration": 0.0,
+            "started_record_hash": "",
+            "text_hash": "",
+            "raw_stdout_digest": hashlib.sha256(b"").hexdigest(),
+            "raw_stderr_digest": hashlib.sha256(b"").hexdigest(),
+        }
+        self.assertTrue(
+            is_permitted_local_retry(spawn_fail_record, has_process_started=False, require_transport_evidence=True)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

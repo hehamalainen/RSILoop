@@ -46,11 +46,22 @@ class AttemptInvalidatedError(AttemptLifecycleError):
 PERMITTED_LOCAL_RETRIES = {"spawn_failure", "transient_infrastructure_error"}
 
 
-def is_permitted_local_retry(comp: Dict[str, Any], has_process_started: bool) -> bool:
+def is_permitted_local_retry(
+    comp: Dict[str, Any],
+    has_process_started: bool,
+    *,
+    require_transport_evidence: bool = False,
+) -> bool:
     """
     Shared strict retry-eligibility predicate for both live execution and recovery.
 
-    A completion record is a permitted local retry IF AND ONLY IF it matches one of:
+    When `require_transport_evidence=True` (Campaign 3 strict conformance), ONLY pre-exec
+    `spawn_failure` (`has_process_started is False`, `usage_known is True`, `tokens == 0`)
+    is retryable; any post-spawn exit (`has_process_started is True`, `usage_known is False`)
+    lacks transport-level proof that no request was transmitted and is rejected (`False`).
+
+    In legacy Campaign 2 archive mode (`require_transport_evidence=False`), a completion
+    record is a permitted local retry IF AND ONLY IF it matches one of:
     1. spawn_failure:
        - has_process_started is False
        - comp.get("classification") == "spawn_failure"
@@ -64,7 +75,8 @@ def is_permitted_local_retry(comp: Dict[str, Any], has_process_started: bool) ->
        - comp.get("raw_stderr_digest") is a 64-character hex string
        - comp.get("duration") is int or float, not bool, duration >= 0.0 and math.isfinite(duration)
 
-    2. transient_infrastructure_error:
+    2. transient_infrastructure_error (legacy Campaign 2 archive only):
+       - require_transport_evidence is False
        - has_process_started is True
        - comp.get("classification") == "transient_infrastructure_error"
        - comp.get("parse_state") == "nonzero_exit"
@@ -123,6 +135,8 @@ def is_permitted_local_retry(comp: Dict[str, Any], has_process_started: bool) ->
             and started_record_hash == ""
         )
     elif classification == "transient_infrastructure_error":
+        if require_transport_evidence:
+            return False
         return (
             has_process_started is True
             and parse_state == "nonzero_exit"

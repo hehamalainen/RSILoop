@@ -315,13 +315,26 @@ def create_fresh_invocation_scratch_dir(workspace_root: str = BASE_DIR, is_mock:
         raise
 
 
-def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, return_code: int = 0) -> Dict[str, Any]:
+def parse_and_classify_jsonl_output(
+    stdout_bytes: bytes,
+    stderr_bytes: bytes,
+    return_code: int = 0,
+    *,
+    require_transport_evidence: bool = False,
+) -> Dict[str, Any]:
     """
     Parses CLI JSONL output and classifies response strictly (C1-11, P0-3, P0-4).
     Raw bytes hashed BEFORE strict UTF-8 decoding.
     Enforces load-bearing zero-event retry invariant: if ANY JSONL event exists,
     classification is invalidated and retries are strictly forbidden.
     Requires exactly one turn.completed event as final line and non-empty final agent message.
+
+    Note on Campaign 2 vs Campaign 3 retry conformance (Finding 7):
+    When `require_transport_evidence=True` (Campaign 3 strict conformance), any non-zero CLI
+    exit lacks transport-level proof that zero request bytes were transmitted or processed
+    (`usage_known=False`), and is therefore classified as `"invalidated"` (non-retryable)
+    regardless of stderr keywords such as HTTP 429/503. The default (`False`) preserves
+    historical Campaign 2 archive replay compatibility only.
     """
     stdout_hash = hashlib.sha256(stdout_bytes).hexdigest()
     stderr_hash = hashlib.sha256(stderr_bytes).hexdigest()
@@ -357,8 +370,9 @@ def parse_and_classify_jsonl_output(stdout_bytes: bytes, stderr_bytes: bytes, re
         is_transient = any(kw in stderr_text for kw in transient_kw)
 
         # Zero-Stdout Load-Bearing Invariant: If ANY raw stdout was emitted (has_stdout=True),
-        # or if stderr does not contain transport failure keywords, retry is strictly forbidden!
-        if has_stdout or not is_transient:
+        # if stderr does not contain transport failure keywords, or if strict transport evidence
+        # is required (Campaign 3 conformance), retry is strictly forbidden!
+        if require_transport_evidence or has_stdout or not is_transient:
             classification = "invalidated"
         else:
             classification = "transient_infrastructure_error"
@@ -508,6 +522,7 @@ class SolModelProvider(ModelProvider):
         ledger: Optional[Any] = None,
         mock_subprocess: bool = False,
         attempt_id: Optional[str] = None,
+        require_transport_evidence: bool = False,
     ):
         self.model_name = model_name
         self.workspace_root = workspace_root
@@ -516,6 +531,7 @@ class SolModelProvider(ModelProvider):
         self.ledger = ledger
         self.mock_subprocess = mock_subprocess
         self.is_mock = mock_subprocess
+        self.require_transport_evidence = require_transport_evidence
         if attempt_id:
             self.attempt_id = attempt_id
         elif ledger and hasattr(ledger, "ledger_path") and ledger.ledger_path:
@@ -766,7 +782,12 @@ class SolModelProvider(ModelProvider):
                     if os.path.exists(scratch_dir):
                         raise ExecutableBoundaryError(f"Scratch directory cleanup failed or residue remains: {scratch_dir}")
 
-            parsed = parse_and_classify_jsonl_output(stdout_bytes, stderr_bytes, return_code)
+            parsed = parse_and_classify_jsonl_output(
+                stdout_bytes,
+                stderr_bytes,
+                return_code,
+                require_transport_evidence=self.require_transport_evidence,
+            )
 
             text_val = parsed.get("text", "")
             text_hash = hashlib.sha256(text_val.encode("utf-8")).hexdigest() if text_val else ""
@@ -819,7 +840,14 @@ class SolModelProvider(ModelProvider):
 
             from campaign2.attempt_lifecycle import is_permitted_local_retry
             has_started = (started_hash != "")
-            if is_permitted_local_retry(completion_record, has_started) and invocation_ordinal < max_attempts:
+            if (
+                is_permitted_local_retry(
+                    completion_record,
+                    has_started,
+                    require_transport_evidence=self.require_transport_evidence,
+                )
+                and invocation_ordinal < max_attempts
+            ):
                 time.sleep(0.1 * (2 ** (invocation_ordinal - 1)))
                 continue
             raise last_exception
