@@ -1,0 +1,92 @@
+{
+  "schema_version": "1.0",
+  "project_name": "RSILoop",
+  "release_candidate_branch": "release/public-prototype-rc1",
+  "base_commit_sha": "e6d5630adfdb91085a70e13ddf627757edbfaa98",
+  "source_repository_lineage": {
+    "canonical_source": "campaign3_fresh_checkout (e6d5630adfdb91085a70e13ddf627757edbfaa98)",
+    "ancestry_supersets": [
+      "builder_worktree (5d5af00c564c600efde9394c94e9c39499257699)",
+      "campaign2_fix_worktree (b54d6a61715ef5dd22bb054fa5783aaa4cffdac8)",
+      "round7_fix_worktree (0297eac73a82383d1146d834aab52a2a56cdcd06)",
+      "rsi_loop (f42a895a99fc5f3e7ccbfbfd9669ae4ce6ea0d3a)"
+    ],
+    "ported_sidecars": [
+      "discovery_probe/",
+      "test_discovery_probe.py"
+    ],
+    "excluded_outer_workspace_artifacts": [
+      "RSILoop_Campaign2_Scientific_Readiness_Review_v2.zip",
+      "RSILoop_Campaign2_Scientific_Readiness_Review_v2.zip.sha256",
+      "scientific_readiness_review/",
+      "scientific_readiness_review_v2/",
+      "campaign3_handoff/",
+      "rsi_loop_private/",
+      ".DS_Store"
+    ]
+  },
+  "allowed_publication_refs": [
+    "refs/heads/release/public-prototype-rc1",
+    "refs/heads/main"
+  ],
+  "allowed_root_files": [
+    ".gitignore",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "README.md",
+    "RELEASE_ALLOWLIST.json",
+    "SECURITY.md",
+    "THIRD_PARTY_NOTICES.md",
+    "agents.md",
+    "author_all_30_tasks.py",
+    "best_manifest.json",
+    "campaign2_cpu_gate_record.json",
+    "campaign2_evidence_hashes.json",
+    "campaign2_launch_lock.json",
+    "campaign2_master_registration.json",
+    "campaign2_parity_matrix.json",
+    "campaign2_preflight_hashes.json",
+    "campaign2_registration_anchor.hash",
+    "campaign2_tier_assignment.json",
+    "campaign_archive_anchor.hash",
+    "campaign_archive_manifest.json",
+    "campaign_claim_record.json",
+    "candidate.sb.template",
+    "candidate_runner.py",
+    "evaluator.py",
+    "generator.sb.template",
+    "preflight_hashes.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "rsi_loop.py",
+    "run_tests.py",
+    "sandbox_worker.py",
+    "solution.py",
+    "test_campaign2.py",
+    "test_campaign2_archival.py",
+    "test_campaign2_orchestration.py",
+    "test_campaign2_work_order_c1.py",
+    "test_campaign3_cost_model.py",
+    "test_campaign3_p0.py",
+    "test_campaign3_p1.py",
+    "test_campaign3_p2_sim.py",
+    "test_campaign3_se2_engine.py",
+    "test_campaign3_sim_model.py",
+    "test_discovery_probe.py",
+    "test_evaluator.py",
+    "test_release_hygiene.py",
+    "test_rsi_loop.py",
+    "verify_env.py"
+  ],
+  "allowed_top_level_directories": [
+    "benchmarks",
+    "campaign2",
+    "campaign2_archive",
+    "campaign3",
+    "discovery_probe",
+    "docs",
+    "history",
+    "prompt_templates",
+    "scripts"
+  ]
+}
