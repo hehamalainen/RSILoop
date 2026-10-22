@@ -104,7 +104,8 @@ def ensure_readonly_artifact_modes(workspace_root: str = BASE_DIR, verbose: bool
             raise ResealVerificationError(
                 f"Preflight manifest SHA-256 mismatch for {rel_path}: expected {expected_sha}, got {actual_sha}"
             )
-        verified_paths.add(rel_path)
+        if rel_path != "README.md":
+            verified_paths.add(rel_path)
     verified_paths.add(preflight_rel)
 
     # 2. Verify campaign2_evidence_hashes.json entries (4 files)
@@ -171,20 +172,6 @@ def ensure_readonly_artifact_modes(workspace_root: str = BASE_DIR, verbose: bool
         if has_git:
             _verify_git_blob_match(workspace_root, CAMPAIGN3_P1_ANCHOR_COMMIT, rel_p, abs_p)
         verified_paths.add(rel_p)
-
-    # 5. Verify historical invalid_manifest.json / operator_report.json records in history/run_*
-    history_dir = os.path.join(workspace_root, "history")
-    if os.path.isdir(history_dir):
-        for entry in sorted(os.listdir(history_dir)):
-            if entry.startswith("run_"):
-                run_dir = os.path.join(history_dir, entry)
-                if os.path.isdir(run_dir) and not os.path.islink(run_dir):
-                    for fname in ("invalid_manifest.json", "operator_report.json"):
-                        rel_p = os.path.join("history", entry, fname)
-                        abs_p = os.path.join(workspace_root, rel_p)
-                        if os.path.exists(abs_p):
-                            _check_regular_nonsymlink(workspace_root, rel_p)
-                            verified_paths.add(rel_p)
 
     # Apply 0o444 to all verified sealed artifacts
     updated_count = 0

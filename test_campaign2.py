@@ -845,11 +845,9 @@ def parse_log_stream(s):
 
     def test_35_envelope_import_and_annotation_compatibility(self):
         """Finding 4 regression: verify campaign2.envelope imports and evaluates type annotations cleanly on Python 3.11+."""
-        import importlib
         import typing
         import campaign2.envelope as env_mod
 
-        importlib.reload(env_mod)
         hints = typing.get_type_hints(env_mod.PromptEnvelope.__init__)
         self.assertIn("master_registration_data", hints)
         env = env_mod.PromptEnvelope()

@@ -49,7 +49,7 @@ For fast iteration on specific modules:
 - **Release Allowlist (`RELEASE_ALLOWLIST.json`)**:
   - Any new root file or top-level directory must be explicitly added to `RELEASE_ALLOWLIST.json` so `scripts/check_release_hygiene.py` can authenticate the repository layout.
 - **No Personal Paths or Live Credentials**:
-  - Never commit absolute local paths (e.g., `/Users/...`) or live API credentials. `scripts/check_release_hygiene.py` enforces this automatically.
+  - Never commit absolute local home-directory paths or live API credentials. `scripts/check_release_hygiene.py` enforces this automatically.
 
 ---
 

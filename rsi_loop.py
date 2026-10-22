@@ -878,7 +878,7 @@ def run_evaluation_on_candidate(candidate_dir: str, test_harness_path: str) -> d
 def _list_optimization_benchmarks() -> list:
     return sorted(
         d for d in os.listdir(BENCHMARKS_DIR)
-        if os.path.isdir(os.path.join(BENCHMARKS_DIR, d)) and d != "validation"
+        if os.path.isdir(os.path.join(BENCHMARKS_DIR, d)) and d not in ("validation", "campaign2", "holdout")
     )
 
 def _list_validation_benchmarks() -> list:
@@ -2203,8 +2203,13 @@ def verify_holdout_hashes(private_dir: str):
 
 # ── Private Holdout evaluation ────────────────────────────────────────────────
 
-PRIVATE_DIR = os.path.join(
+_SIBLING_PRIVATE_DIR = os.path.join(
     os.path.dirname(BASE_DIR), "rsi_loop_private", "benchmarks"
+)
+PRIVATE_DIR = (
+    _SIBLING_PRIVATE_DIR
+    if os.path.isdir(_SIBLING_PRIVATE_DIR)
+    else os.path.join(BASE_DIR, "benchmarks", "holdout")
 )
 
 def run_holdout_evaluation(

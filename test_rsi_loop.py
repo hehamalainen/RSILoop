@@ -69,6 +69,9 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
         p = mock.patch("rsi_loop.BEST_MANIFEST_PATH", os.path.realpath(os.path.join(self.tmp_dir, "best_manifest.json")))
         p.start()
         self.patchers.append(p)
+        p_hist = mock.patch("rsi_loop.HISTORY_DIR", os.path.realpath(os.path.join(self.tmp_dir, "history")))
+        p_hist.start()
+        self.patchers.append(p_hist)
 
     def tearDown(self):
         for patcher in self.patchers:

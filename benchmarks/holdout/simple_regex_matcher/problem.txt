@@ -1,0 +1,9 @@
+Implement a class `SimpleRegexMatcher` that matches simple wildcard patterns. It must support:
+- `__init__(self, pattern: str)`: Initializes and compiles the pattern string.
+- `match(self, text: str) -> bool`: Returns True if the input text matches the compiled pattern, and False otherwise.
+
+Supported Wildcards:
+- `?`: Matches exactly one of any character.
+- `*`: Matches zero or more of any character.
+
+The class must be defined in a file named `solution.py`.
