@@ -418,9 +418,12 @@ class RunnerProxy:
         else:
             codex_prefix = "/opt/homebrew" # fallback
 
+        venv_candidate = os.path.join(BASE_DIR, ".venv")
+        virtualenv_path = venv_candidate if os.path.exists(venv_candidate) else real_python_prefix
+
         sb_content = tmpl.format(
             repository_root=BASE_DIR,
-            virtualenv_path=os.path.join(BASE_DIR, ".venv"),
+            virtualenv_path=virtualenv_path,
             candidate_dir=self._candidate_dir,
             temp_dir=self._temp_dir,
             real_python_exe=real_python_exe,
@@ -440,6 +443,8 @@ class RunnerProxy:
             raise HarnessInfrastructureError("sandbox-exec not available on this system")
 
         venv_python = os.path.join(BASE_DIR, ".venv", "bin", "python")
+        if not os.path.exists(venv_python):
+            venv_python = sys.executable
         runner_path = os.path.join(BASE_DIR, "candidate_runner.py")
 
         allowed_env = {

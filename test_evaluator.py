@@ -201,9 +201,12 @@ def solve():
         proxy = RunnerProxy(self.candidate_dir, self.candidate_dir)
         sb_path = proxy._build_candidate_sb()
 
+        venv_python = os.path.join(BASE_DIR, ".venv", "bin", "python")
+        if not os.path.exists(venv_python):
+            venv_python = sys.executable
         cmd = [
             "sandbox-exec", "-f", sb_path,
-            os.path.join(BASE_DIR, ".venv", "bin", "python"),
+            venv_python,
             "-u",
             os.path.join(BASE_DIR, "candidate_runner.py"),
         ]

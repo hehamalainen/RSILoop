@@ -82,6 +82,8 @@ def _start_runner(candidate_dir: str, sb_path: str) -> None:
     """Spawn candidate_runner.py under candidate.sb sandbox."""
     global _runner_proc
     venv_python = os.path.join(BASE_DIR, ".venv", "bin", "python")
+    if not os.path.exists(venv_python):
+        venv_python = sys.executable
     runner_path = os.path.join(BASE_DIR, "candidate_runner.py")
 
     allowed_env = {

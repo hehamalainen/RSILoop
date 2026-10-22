@@ -19,6 +19,17 @@ def main():
     workspace_root = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, workspace_root)
 
+    # Restore read-only (0o444) permissions on clean Git clones AFTER verifying SHA-256 digests
+    from scripts.reseal_readonly_artifacts import (
+        ensure_readonly_artifact_modes,
+        ResealVerificationError,
+    )
+    try:
+        ensure_readonly_artifact_modes(workspace_root)
+    except ResealVerificationError as exc:
+        sys.stderr.write(f"FATAL: Artifact reseal verification failed: {exc}\n")
+        sys.exit(1)
+
     # STRICTLY READ-ONLY Verification of preflight, evidence, parity matrix, and tier assignment artifacts
     from campaign2.manifest import (
         verify_campaign2_manifest,

@@ -127,9 +127,15 @@ class TestCampaign3P1(unittest.TestCase):
             "campaign3/verifier.py",
             "test_campaign3_p0.py"
         }
-        # Branch point is c26d4ec499d93142bc557c7d83f71f8de98cd3b3
+        # Branch point is c26d4ec499d93142bc557c7d83f71f8de98cd3b3; P1 closeout is 8cdd4021aa9287a52b6f0eef8b21c375921a6d89
         diff_output = subprocess.check_output(
-            ["git", "diff", "--name-only", "c26d4ec499d93142bc557c7d83f71f8de98cd3b3"],
+            [
+                "git",
+                "diff",
+                "--name-only",
+                "c26d4ec499d93142bc557c7d83f71f8de98cd3b3..8cdd4021aa9287a52b6f0eef8b21c375921a6d89",
+            ],
+            cwd=BASE_DIR,
             text=True
         ).strip()
 

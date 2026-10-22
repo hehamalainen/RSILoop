@@ -2,233 +2,233 @@
   "artifact_count": 32,
   "artifacts": [
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/best_manifest.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/best_manifest.json",
       "relative_path": "best_manifest.json",
       "sha256": "1565f8059e851099cf650809fdaa24cb96e0662e8fd0b10e3c975b6b0ff349a2",
       "size_bytes": 205,
-      "st_mode": 420
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/campaign2_cpu_gate_record.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/campaign2_cpu_gate_record.json",
       "relative_path": "campaign2_cpu_gate_record.json",
       "sha256": "a731fd67a969eb000d180f6abdb053c6984349d7102955b0e03744963def045b",
       "size_bytes": 21023,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/campaign2_evidence_hashes.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/campaign2_evidence_hashes.json",
       "relative_path": "campaign2_evidence_hashes.json",
       "sha256": "88b3c5d267466476976fd0a970d0f95fa31a7a8b008070ba54695297ea4ba1a9",
       "size_bytes": 478,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/campaign2_launch_lock.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/campaign2_launch_lock.json",
       "relative_path": "campaign2_launch_lock.json",
       "sha256": "b7e29308e0a1ce9665d604264c38764d9043d9edcd467dd3d3f2586e71407779",
       "size_bytes": 478,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/campaign2_master_registration.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/campaign2_master_registration.json",
       "relative_path": "campaign2_master_registration.json",
       "sha256": "f8fbf8b916a59874d4b39767f7ce55b08cc84f3fac4dc5c7c37f36702b128b0a",
       "size_bytes": 9883,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/campaign2_parity_matrix.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/campaign2_parity_matrix.json",
       "relative_path": "campaign2_parity_matrix.json",
       "sha256": "1cc77a2e63a574f66e634a12184109826b3fe0461ffaeb991a093c09a518bac4",
       "size_bytes": 57714,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/campaign2_preflight_hashes.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/campaign2_preflight_hashes.json",
       "relative_path": "campaign2_preflight_hashes.json",
-      "sha256": "6a2b3de1d33a474a082216ac8bfb8f49e099e792e6212cc7c16524523e4146b1",
+      "sha256": "5c05c96c533cdc3738a9fc5eae82e6f618540d61804ba2fb6752ef662a993ee8",
       "size_bytes": 19610,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/campaign2_registration_anchor.hash",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/campaign2_registration_anchor.hash",
       "relative_path": "campaign2_registration_anchor.hash",
       "sha256": "6890cd638c3aad988d4fb2f58b271ce21c2725e1fbf9a19ebaf4c563dbd793ec",
       "size_bytes": 65,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/campaign2_tier_assignment.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/campaign2_tier_assignment.json",
       "relative_path": "campaign2_tier_assignment.json",
       "sha256": "328e85faf8a4dc74368f25c3631dbdf0e5af7bcdb70ebec97c71ba94b6613b4e",
       "size_bytes": 6213,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/campaign2_launch_checklist.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/campaign2_launch_checklist.json",
       "relative_path": "history/campaign2_launch_checklist.json",
       "sha256": "f8be52403c8bc75c9814b4ab49ea55f003c41805f79e725125f7d08b557ac63b",
       "size_bytes": 2205,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/campaign2_pilot_preflight_registry_incident.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/campaign2_pilot_preflight_registry_incident.json",
       "relative_path": "history/campaign2_pilot_preflight_registry_incident.json",
       "sha256": "1e58cd841c86642fde3977fc4737a7c32475d3a82335c371c3ef61aee5cb17f2",
       "size_bytes": 823,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/campaign2_pilot_scientific_start.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/campaign2_pilot_scientific_start.json",
       "relative_path": "history/campaign2_pilot_scientific_start.json",
       "sha256": "4bbe30e33739b733604075a0069f047cb54138c7f9a86c3e1491be3b5d333401",
       "size_bytes": 124,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/legacy/best_manifest.json.archive_4a68892a14e74064998a9cf01b9710c6.backup",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/legacy/best_manifest.json.archive_4a68892a14e74064998a9cf01b9710c6.backup",
       "relative_path": "history/legacy/best_manifest.json.archive_4a68892a14e74064998a9cf01b9710c6.backup",
       "sha256": "ae8b95accb655476c723f558a1634a14ba3374ad08570ca37ac1d70e4f8d8572",
       "size_bytes": 1926,
-      "st_mode": 420
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/legacy/best_manifest.json.archive_c3bd39bfab6342d8bbb214615092b0af.backup",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/legacy/best_manifest.json.archive_c3bd39bfab6342d8bbb214615092b0af.backup",
       "relative_path": "history/legacy/best_manifest.json.archive_c3bd39bfab6342d8bbb214615092b0af.backup",
       "sha256": "d880b66ff7c0587087d09e0df0480847ba5a025b73d857f610b737f959546d3b",
       "size_bytes": 204,
-      "st_mode": 384
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1784409881_d5134082/invalid_manifest.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1784409881_d5134082/invalid_manifest.json",
       "relative_path": "history/run_1784409881_d5134082/invalid_manifest.json",
       "sha256": "0cb4ace96bc890e0dbc21c4ae36482aa5fb11917d48948987b3a4a57d7d53df2",
       "size_bytes": 881,
-      "st_mode": 420
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1785357988_aaf6d755/huffman_preflight/solution.py",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1785357988_aaf6d755/huffman_preflight/solution.py",
       "relative_path": "history/run_1785357988_aaf6d755/huffman_preflight/solution.py",
       "sha256": "38eef312ab080101657133dd6adabb5fc1729dc7092f78c68a21d892250189a8",
       "size_bytes": 3739,
-      "st_mode": 420
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1785357988_aaf6d755/inner_agent_best.txt",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1785357988_aaf6d755/inner_agent_best.txt",
       "relative_path": "history/run_1785357988_aaf6d755/inner_agent_best.txt",
       "sha256": "df54209bc41559c18cbc1fff04bb3f65643229ec66eaa11c8ff85de4f911c46c",
       "size_bytes": 501,
-      "st_mode": 420
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1785357988_aaf6d755/operator_report.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1785357988_aaf6d755/operator_report.json",
       "relative_path": "history/run_1785357988_aaf6d755/operator_report.json",
       "sha256": "119c1a6bf268396129c6c10915a7f556ac200e5f679a4cba14831ba0dc41c05b",
       "size_bytes": 3172,
-      "st_mode": 420
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1785357988_aaf6d755/preflight_huffman.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1785357988_aaf6d755/preflight_huffman.json",
       "relative_path": "history/run_1785357988_aaf6d755/preflight_huffman.json",
       "sha256": "e564a8bdd769521b3e73107278e0efff9d05d96121416875b112037dd35a74bf",
       "size_bytes": 762,
-      "st_mode": 420
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1785357988_aaf6d755/run_manifest.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1785357988_aaf6d755/run_manifest.json",
       "relative_path": "history/run_1785357988_aaf6d755/run_manifest.json",
       "sha256": "55e886028b11868134d09345d688887c6307d6210e18e08754a0f09a44628653",
       "size_bytes": 3709,
-      "st_mode": 420
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1785624487_6c9c3d1a/huffman_preflight/solution.py",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1785624487_6c9c3d1a/huffman_preflight/solution.py",
       "relative_path": "history/run_1785624487_6c9c3d1a/huffman_preflight/solution.py",
       "sha256": "54cfad94982b13ef3bc4d224f0f17c30afbee6f36770ca62ae155f8d457d0cca",
       "size_bytes": 3525,
-      "st_mode": 420
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1785624487_6c9c3d1a/inner_agent_best.txt",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1785624487_6c9c3d1a/inner_agent_best.txt",
       "relative_path": "history/run_1785624487_6c9c3d1a/inner_agent_best.txt",
       "sha256": "df54209bc41559c18cbc1fff04bb3f65643229ec66eaa11c8ff85de4f911c46c",
       "size_bytes": 501,
-      "st_mode": 420
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1785624487_6c9c3d1a/operator_report.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1785624487_6c9c3d1a/operator_report.json",
       "relative_path": "history/run_1785624487_6c9c3d1a/operator_report.json",
       "sha256": "03749a19b049996a58754c45caadda351bc95fce3b6947871ab7e5db8d1257a8",
       "size_bytes": 3192,
-      "st_mode": 420
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1785624487_6c9c3d1a/preflight_huffman.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1785624487_6c9c3d1a/preflight_huffman.json",
       "relative_path": "history/run_1785624487_6c9c3d1a/preflight_huffman.json",
       "sha256": "21a73f3e4d64c1f8b3c64c7079d2a0d91fcaabf16850e547e37e0dea495a4428",
       "size_bytes": 814,
-      "st_mode": 420
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1785624487_6c9c3d1a/run_manifest.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1785624487_6c9c3d1a/run_manifest.json",
       "relative_path": "history/run_1785624487_6c9c3d1a/run_manifest.json",
       "sha256": "b0d4e31409239feb3e1ae5dc2afb7b735fe50891174da40e5e4f98ba4f488475",
       "size_bytes": 3763,
-      "st_mode": 420
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1786134848_cfb514d2/campaign2_attempt_identity.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1786134848_cfb514d2/campaign2_attempt_identity.json",
       "relative_path": "history/run_1786134848_cfb514d2/campaign2_attempt_identity.json",
       "sha256": "65e9b8dfba33c9f32f6e03187606c0731809f9690a7e45b14ad58eb0a7fec79b",
       "size_bytes": 450,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1786134848_cfb514d2/campaign2_attempt_identity.sha256",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1786134848_cfb514d2/campaign2_attempt_identity.sha256",
       "relative_path": "history/run_1786134848_cfb514d2/campaign2_attempt_identity.sha256",
       "sha256": "6390efe2e68704db46b2181cd06e4c2634652480682ac310bf7e78a77c0e7de5",
       "size_bytes": 65,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1786134848_cfb514d2/campaign2_pilot_checkpoint.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1786134848_cfb514d2/campaign2_pilot_checkpoint.json",
       "relative_path": "history/run_1786134848_cfb514d2/campaign2_pilot_checkpoint.json",
       "sha256": "84ae66d17fbc55c90474053425ab96804703adf4318a1bb8c107976c6a66e17c",
       "size_bytes": 114172,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1786134848_cfb514d2/campaign2_pilot_checkpoint.json.state_anchor",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1786134848_cfb514d2/campaign2_pilot_checkpoint.json.state_anchor",
       "relative_path": "history/run_1786134848_cfb514d2/campaign2_pilot_checkpoint.json.state_anchor",
       "sha256": "99e9fa44e2b04a62d76efa12812a9610f3dfc70bb95bde5c61c3a8fa5bc4e632",
       "size_bytes": 131,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1786134848_cfb514d2/campaign2_pilot_ledger.jsonl",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1786134848_cfb514d2/campaign2_pilot_ledger.jsonl",
       "relative_path": "history/run_1786134848_cfb514d2/campaign2_pilot_ledger.jsonl",
       "sha256": "04969a6e30ad7122f08aa81cb2c793e12a9e7680348d6df7b81334cd39d47690",
       "size_bytes": 485799,
-      "st_mode": 420
+      "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1786134848_cfb514d2/campaign2_pilot_report.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1786134848_cfb514d2/campaign2_pilot_report.json",
       "relative_path": "history/run_1786134848_cfb514d2/campaign2_pilot_report.json",
       "sha256": "7d95b7b46902052711939a005cf427b697e58711dc040254665a56bcb9903ad3",
       "size_bytes": 81132,
       "st_mode": 292
     },
     {
-      "absolute_path": "/Users/heikkihamalainen/.gemini/antigravity/scratch/rsi_loop/history/run_1786134848_cfb514d2/operator_report.json",
+      "absolute_path": "/Users/heikkihamalainen/Projects/rsiloop-release/history/run_1786134848_cfb514d2/operator_report.json",
       "relative_path": "history/run_1786134848_cfb514d2/operator_report.json",
       "sha256": "82195b864a7570cf7532e8480891641328a1ffaee620c1b27824b20fd266506e",
       "size_bytes": 1231,
-      "st_mode": 384
+      "st_mode": 292
     }
   ],
   "campaign_id": "campaign_2_gpt5_6_sol",
   "canonical_report_path": "history/run_1786134848_cfb514d2/campaign2_pilot_report.json",
   "canonical_report_sha256": "7d95b7b46902052711939a005cf427b697e58711dc040254665a56bcb9903ad3",
-  "created_at_iso": "2026-08-08T13:18:56.456995+00:00",
+  "created_at_iso": "2026-10-22T22:31:27.344292+00:00",
   "schema_version": "3"
 }
