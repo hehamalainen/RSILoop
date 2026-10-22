@@ -1,7 +1,7 @@
 {
   "campaign_id": "campaign_2_gpt5_6_sol",
   "canonical_report_sha256": "7d95b7b46902052711939a005cf427b697e58711dc040254665a56bcb9903ad3",
-  "manifest_sha256": "ce9b6575d5d8ccc15e8d3a2c7c40f99324da1a149ec371155f943c00e0f688e1",
+  "manifest_sha256": "bc26aaecc5a6dad20086c87599c5680611df3517ee51c3e29ef1da6f82c15e7e",
   "sanctioned_claim": "For the service presented as gpt-5.6-sol during the campaign window, Campaign 1's Huffman task and Campaign 2's eight Suite P tasks provided insufficient baseline headroom under their preregistered gates.",
   "schema_version": "3"
 }

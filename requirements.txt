@@ -1,0 +1,8 @@
+# Core runtime & Campaign 3 simulation dependencies (Python 3.11+)
+numpy>=1.26.0
+
+# Optional provider SDKs used only by verify_env.py environment diagnostics:
+# openai>=1.0.0
+# anthropic>=0.20.0
+# google-genai>=0.3.0
+# python-dotenv>=1.0.0

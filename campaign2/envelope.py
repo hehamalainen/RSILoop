@@ -9,7 +9,7 @@ P0-6 — PROMPT-ENVELOPE PROTECTION:
 """
 
 import hashlib
-from typing import Tuple
+from typing import Optional, Tuple
 
 
 IMMUTABLE_CONTRACT = (

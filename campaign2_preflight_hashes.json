@@ -125,7 +125,7 @@
   "campaign2/cpu_gate.py": "afd53c84ad5e59e53e31aa1c7354a1fde6df0fb102b1b6fca5c303729f740381",
   "campaign2/defects.py": "2d8797df93ea4573407cc177b736fd3dfe34561f5deabbb6f5c4620e9a2f2288",
   "campaign2/durability.py": "94504d0100dda210e76a798dc6ed874780271c9ca64b66bca498955777c6646b",
-  "campaign2/envelope.py": "81fa93ad4beeae7bcdf2f6665c2f81590b51fc2a718d6c92c6eff4bfc6149f05",
+  "campaign2/envelope.py": "a54497d6b93a0ef47a09779d819b04dbf42e270e3a3744e7acbb4bad7ad75da3",
   "campaign2/ladder.py": "da928d5cc17c53153c4c24b8365c7e332d8a8a61819048b216e8203694c38c39",
   "campaign2/launch_checklist.py": "61306669263f87b124c46b0173341f0d3c6d5e98609f2e4e5d8f88fdc9edc504",
   "campaign2/launch_lock.py": "f1ed6a353bf1cf97e5b213215a7615e50884f86e1fed1d2e61638f4cc04f5db6",

@@ -843,6 +843,20 @@ def parse_log_stream(s):
         self.assertIn("CandidateException", err_trace_a)
         self.assertIn("Runtime error always", err_trace_a)
 
+    def test_35_envelope_import_and_annotation_compatibility(self):
+        """Finding 4 regression: verify campaign2.envelope imports and evaluates type annotations cleanly on Python 3.11+."""
+        import importlib
+        import typing
+        import campaign2.envelope as env_mod
+
+        importlib.reload(env_mod)
+        hints = typing.get_type_hints(env_mod.PromptEnvelope.__init__)
+        self.assertIn("master_registration_data", hints)
+        env = env_mod.PromptEnvelope()
+        eff_prompt, prompt_hash = env.build_effective_prompt("Write concise code.")
+        self.assertIn("Write concise code.", eff_prompt)
+        self.assertEqual(len(prompt_hash), 64)
+
 
 if __name__ == "__main__":
     unittest.main()
