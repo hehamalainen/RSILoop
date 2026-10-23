@@ -5,11 +5,12 @@ Content-verifying setup script for read-only (0o444) artifact modes after a fres
 Git tracks only the executable bit (100644 vs 100755), so a fresh `git clone` checks out
 read-only sealed artifacts with mode `0o644`. Because RSILoop's preflight, archival, and
 governance verifiers enforce `0o444` on sealed artifacts, this module verifies the SHA-256
-content digest of every sealed artifact against its committed manifest or Git commit anchor
-BEFORE restoring mode `0o444`.
+content digest and cryptographic/Git anchors of every sealed artifact BEFORE restoring
+required file modes.
 
-Never overwrites or modifies file contents. Fails closed if any file is missing, is a symlink,
-or fails SHA-256 verification.
+Never overwrites or modifies file contents. Fails closed without altering any file permissions
+if any file is missing, is a symlink, fails SHA-256 or claim verification, or if required
+Git commit anchors are unavailable.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import os
 import stat
 import subprocess
 import sys
-from typing import Dict, List, Set, Tuple
+from typing import Dict, Set, Tuple
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if BASE_DIR not in sys.path:
@@ -31,7 +32,7 @@ CAMPAIGN3_P1_ANCHOR_COMMIT = "8cdd4021aa9287a52b6f0eef8b21c375921a6d89"
 
 
 class ResealVerificationError(RuntimeError):
-    """Raised when an artifact fails content verification prior to mode restoration."""
+    """Raised when an artifact fails content or anchor verification prior to mode restoration."""
 
 
 def _compute_sha256(path: str) -> str:
@@ -65,6 +66,28 @@ def _check_regular_nonsymlink(workspace_root: str, rel_path: str) -> str:
     return curr
 
 
+def _require_git_worktree(workspace_root: str) -> None:
+    """
+    Detect whether workspace_root is inside a Git repository using `git rev-parse`
+    (supporting both `.git` directories and `.git` gitdir files used by worktrees/submodules).
+    Fails closed when Git metadata is absent or invalid.
+    """
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=workspace_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        raise ResealVerificationError(f"Git executable unavailable during reseal verification: {exc}") from exc
+    if res.returncode != 0 or res.stdout.strip() != "true":
+        raise ResealVerificationError(
+            f"Workspace is not a valid Git work tree; required governance anchors cannot be verified: {workspace_root}"
+        )
+
+
 def _verify_git_blob_match(workspace_root: str, commit_sha: str, rel_path: str, abs_path: str) -> None:
     res = subprocess.run(
         ["git", "cat-file", "-p", f"{commit_sha}:{rel_path}"],
@@ -84,13 +107,70 @@ def _verify_git_blob_match(workspace_root: str, commit_sha: str, rel_path: str, 
         )
 
 
+def _verify_claim_record(
+    claim_abs: str,
+    expected_manifest_sha: str,
+    expected_report_sha: str,
+) -> None:
+    from campaign2.archival import (
+        CANONICAL_REPORT_SHA256,
+        FORBIDDEN_CLAIM_PHRASES,
+        SANCTIONED_CLAIM_TEXT,
+    )
+
+    with open(claim_abs, "rb") as f:
+        claim_bytes = f.read()
+    try:
+        claim_data = json.loads(claim_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise ResealVerificationError(f"Invalid JSON in campaign_claim_record.json: {exc}") from exc
+
+    if not isinstance(claim_data, dict):
+        raise ResealVerificationError("campaign_claim_record.json must be a JSON object")
+    if claim_data.get("schema_version") != "3":
+        raise ResealVerificationError(
+            f"Invalid claim record schema_version: {claim_data.get('schema_version')!r}"
+        )
+    if claim_data.get("campaign_id") != "campaign_2_gpt5_6_sol":
+        raise ResealVerificationError(
+            f"Invalid claim record campaign_id: {claim_data.get('campaign_id')!r}"
+        )
+    sanctioned_claim = claim_data.get("sanctioned_claim", "")
+    if sanctioned_claim != SANCTIONED_CLAIM_TEXT:
+        raise ResealVerificationError(
+            f"Claim record sanctioned_claim mismatch: got {sanctioned_claim!r}"
+        )
+    for phrase in FORBIDDEN_CLAIM_PHRASES:
+        if phrase.lower() in sanctioned_claim.lower():
+            raise ResealVerificationError(
+                f"Claim record contains forbidden phrase: {phrase!r}"
+            )
+    if expected_report_sha != CANONICAL_REPORT_SHA256:
+        raise ResealVerificationError(
+            f"Archive manifest canonical_report_sha256 mismatch: {expected_report_sha!r}"
+        )
+    if claim_data.get("canonical_report_sha256") != CANONICAL_REPORT_SHA256:
+        raise ResealVerificationError(
+            "Claim record canonical_report_sha256 mismatch against CANONICAL_REPORT_SHA256"
+        )
+    if claim_data.get("manifest_sha256") != expected_manifest_sha:
+        raise ResealVerificationError(
+            f"Claim record manifest_sha256 mismatch: expected {expected_manifest_sha}, "
+            f"got {claim_data.get('manifest_sha256')}"
+        )
+    expected_claim_bytes = (json.dumps(claim_data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if claim_bytes != expected_claim_bytes:
+        raise ResealVerificationError("campaign_claim_record.json is not canonically formatted")
+
+
 def ensure_readonly_artifact_modes(workspace_root: str = BASE_DIR, verbose: bool = False) -> Tuple[int, int]:
     """
-    Verify SHA-256 content hashes against committed manifests/anchors and ensure mode 0o444
-    on all sealed artifacts.
+    Verify SHA-256 content hashes, claim record invariants, and Git commit anchors across all
+    sealed artifacts BEFORE restoring mode 0o444 on any file.
 
     Returns (verified_count, chmod_updated_count).
     """
+    _require_git_worktree(workspace_root)
     verified_paths: Set[str] = set()
 
     # 1. Verify campaign2_preflight_hashes.json entries (145 files)
@@ -126,14 +206,14 @@ def ensure_readonly_artifact_modes(workspace_root: str = BASE_DIR, verbose: bool
         verified_paths.add(rel_path)
     verified_paths.add(evidence_rel)
 
-    # 3. Verify campaign_archive_manifest.json entries (32 files) and anchor
+    # 3. Verify campaign_archive_manifest.json entries (32 files), anchor, and claim record
     archive_manifest_rel = "campaign_archive_manifest.json"
     archive_anchor_rel = "campaign_archive_anchor.hash"
     claim_record_rel = "campaign_claim_record.json"
 
     archive_manifest_abs = _check_regular_nonsymlink(workspace_root, archive_manifest_rel)
     archive_anchor_abs = _check_regular_nonsymlink(workspace_root, archive_anchor_rel)
-    _check_regular_nonsymlink(workspace_root, claim_record_rel)
+    claim_record_abs = _check_regular_nonsymlink(workspace_root, claim_record_rel)
 
     with open(archive_anchor_abs, "r", encoding="utf-8") as f:
         expected_manifest_sha = f.read().strip()
@@ -145,6 +225,13 @@ def ensure_readonly_artifact_modes(workspace_root: str = BASE_DIR, verbose: bool
 
     with open(archive_manifest_abs, "r", encoding="utf-8") as f:
         archive_data = json.load(f)
+
+    _verify_claim_record(
+        claim_record_abs,
+        expected_manifest_sha=actual_manifest_sha,
+        expected_report_sha=archive_data.get("canonical_report_sha256", ""),
+    )
+
     for item in archive_data.get("artifacts", []):
         rel_p = item["relative_path"]
         expected_sha = item["sha256"]
@@ -158,24 +245,21 @@ def ensure_readonly_artifact_modes(workspace_root: str = BASE_DIR, verbose: bool
 
     verified_paths.update([archive_manifest_rel, archive_anchor_rel, claim_record_rel])
 
-    # 4. Verify Campaign 3 P0 and P1 sealed governance artifacts
+    # 4. Verify Campaign 3 P0 and P1 sealed governance artifacts against Git anchors (fail-closed)
     from campaign3.verifier import P0_ARTIFACTS
     from campaign3.p1_verifier import P1_ARTIFACTS
 
-    has_git = os.path.isdir(os.path.join(workspace_root, ".git"))
     for rel_p in P0_ARTIFACTS:
         abs_p = _check_regular_nonsymlink(workspace_root, rel_p)
-        if has_git:
-            _verify_git_blob_match(workspace_root, CAMPAIGN3_P0_ANCHOR_COMMIT, rel_p, abs_p)
+        _verify_git_blob_match(workspace_root, CAMPAIGN3_P0_ANCHOR_COMMIT, rel_p, abs_p)
         verified_paths.add(rel_p)
 
     for rel_p in P1_ARTIFACTS:
         abs_p = _check_regular_nonsymlink(workspace_root, rel_p)
-        if has_git:
-            _verify_git_blob_match(workspace_root, CAMPAIGN3_P1_ANCHOR_COMMIT, rel_p, abs_p)
+        _verify_git_blob_match(workspace_root, CAMPAIGN3_P1_ANCHOR_COMMIT, rel_p, abs_p)
         verified_paths.add(rel_p)
 
-    # Apply 0o444 to all verified sealed artifacts
+    # Apply 0o444 ONLY after all verifications have succeeded
     updated_count = 0
     for rel_p in sorted(verified_paths):
         abs_p = os.path.join(workspace_root, rel_p)
@@ -193,13 +277,10 @@ def main() -> int:
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
     regenerate = "--regenerate-manifests" in sys.argv
     if regenerate:
-        sys.path.insert(0, BASE_DIR)
         from campaign2.manifest import generate_campaign2_manifest
         from campaign2.archival import generate_campaign_archive, MANIFEST_REL_PATH, ANCHOR_REL_PATH, CLAIM_REL_PATH
 
-        # First ensure existing archive inventory files have 0o444 before regenerating archive manifest
         generate_campaign2_manifest(BASE_DIR)
-        # Ensure all 32 inventory files have 0o444 so st_mode in campaign_archive_manifest.json is 0o444 (292)
         from campaign2.archival import FROZEN_CAMPAIGN_ARCHIVE_INVENTORY
         for rel_p in FROZEN_CAMPAIGN_ARCHIVE_INVENTORY:
             abs_p = _check_regular_nonsymlink(BASE_DIR, rel_p)
