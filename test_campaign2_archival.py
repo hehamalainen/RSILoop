@@ -358,6 +358,7 @@ class TestCampaignArchival(unittest.TestCase):
     def test_a2_10_live_workspace_archive_matches_historical_f42a895_commit(self):
         """R3 regression: verify live workspace archive authenticates directly against historical commit f42a895a99fc5f3e7ccbfbfd9669ae4ce6ea0d3a while release_preflight_hashes.json has a separate identity."""
         from campaign2.manifest import (
+            EXPECTED_UPDATED_RELEASE_MANIFEST_ENTRIES,
             HISTORICAL_CAMPAIGN2_PREFLIGHT_SHA256,
             verify_release_manifest_relationship,
         )
@@ -378,6 +379,12 @@ class TestCampaignArchival(unittest.TestCase):
             rel_info["release_manifest_sha256"],
         )
         self.assertEqual(rel_info["total_entries"], 145)
+        self.assertEqual(rel_info["identical_entries"], 134)
+        self.assertEqual(
+            rel_info["updated_runtime_or_doc_entries"],
+            list(EXPECTED_UPDATED_RELEASE_MANIFEST_ENTRIES),
+        )
+        self.assertEqual(len(rel_info["updated_runtime_or_doc_entries"]), 11)
         for k in rel_info["updated_runtime_or_doc_entries"]:
             self.assertFalse(k.startswith("benchmarks/"))
 

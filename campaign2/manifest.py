@@ -19,6 +19,19 @@ RELEASE_PREFLIGHT_MANIFEST_PATH = os.path.join(BASE_DIR, RELEASE_PREFLIGHT_MANIF
 HISTORICAL_CAMPAIGN2_PREFLIGHT_SHA256 = (
     "6a2b3de1d33a474a082216ac8bfb8f49e099e792e6212cc7c16524523e4146b1"
 )
+EXPECTED_UPDATED_RELEASE_MANIFEST_ENTRIES = (
+    "README.md",
+    "campaign2/attempt_identity.py",
+    "campaign2/attempt_lifecycle.py",
+    "campaign2/envelope.py",
+    "campaign2/manifest.py",
+    "campaign2/model_provider.py",
+    "campaign2/orchestrator.py",
+    "campaign2/preflight_registry.py",
+    "campaign2/proxy.py",
+    "rsi_loop.py",
+    "run_tests.py",
+)
 EVIDENCE_MANIFEST_PATH = os.path.join(BASE_DIR, "campaign2_evidence_hashes.json")
 PARITY_MATRIX_PATH = os.path.join(BASE_DIR, "campaign2_parity_matrix.json")
 

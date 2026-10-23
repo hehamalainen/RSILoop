@@ -30,39 +30,40 @@ flowchart TD
 ---
 
 ## 📂 Codebase Navigation
-- **[rsi_loop.py](rsi_loop.py)**: Main bi-level optimization driver (JSONL parser + Greedy Policy, RunContext).
-- **[evaluator.py](evaluator.py)**: Sandbox execution evaluator with dynamic class/instance caching and unified clean exit.
-- **[candidate_runner.py](candidate_runner.py)**: Host-contained runner enforcing irreversible resource limits and RPC envelope codec.
-- **[test_evaluator.py](test_evaluator.py)**: Containment, IPC, and reference solution regression tests.
-- **[test_rsi_loop.py](test_rsi_loop.py)**: Orchestrator, preflight verification, and E2E state tests.
-- **[run_tests.py](run_tests.py)**: Strict test runner enforcing zero skips and zero ResourceWarnings.
+- **[rsi_loop.py](rsi_loop.py)**: Main bi-level optimization driver (JSONL parser + Greedy Policy, RunContext, and Campaign 2 entrypoint).
+- **[evaluator.py](evaluator.py)** & **[candidate_runner.py](candidate_runner.py)**: Campaign 1 sandbox execution evaluator and host-contained RPC runner.
+- **[campaign2/](campaign2/)**: Campaign 2 containment proxy (`proxy.py`), preflight/evidence/archive verifiers (`manifest.py`, `archival.py`), checkpoint durability (`durability.py`), 3-record invocation ledger (`attempt_lifecycle.py`), strict retry policy (`model_provider.py`), and orchestrator (`orchestrator.py`).
+- **[campaign3/](campaign3/)**: Campaign 3 preregistration verifiers (`verifier.py`, `p1_verifier.py`), closed-form cost algebra (`cost_model.py`), and Monte Carlo simulation & calibration engine (`campaign3/sim/`).
+- **[discovery_probe/](discovery_probe/)**: Dependency-free active rule-discovery sidecar benchmark (`DiscoverySession`, CLI, and commitment verifier).
+- **[scripts/](scripts/)**: Content-verifying read-only mode restoration (`reseal_readonly_artifacts.py`) and release hygiene verifier (`check_release_hygiene.py`).
+- **[run_tests.py](run_tests.py)**: Strict test runner enforcing zero skips, zero warnings, and zero unraisable exceptions across all Campaign 1, Campaign 2, Campaign 3, Discovery Probe, and release hygiene test suites.
 - **[prompt_templates/](prompt_templates/)**:
   - `inner_agent_baseline.txt`: Initial prompt for the generator.
   - `meta_optimizer.txt`: System prompt guiding the prompt mutation logic.
   - `best_prompt.txt`: Convenience copy of the best performing prompt.
-- **[benchmarks/](benchmarks/)**: target problems and verification files.
+- **[benchmarks/](benchmarks/)**: Campaign 1 target problems and Campaign 2 30-task (`suite_c` / `suite_p`) benchmark population with 90 calibrated defect rungs.
 - **[docs/walkthrough.md](docs/walkthrough.md)**: Details structural design, results, and long-term directions.
 
 ---
 
 ## 🛠️ Getting Started for Agents
-1. **Verify Environment**: Run the environmental diagnostic check.
+1. **Verify Environment (Offline Mode)**: Run the offline environmental and sealed-artifact diagnostic check (requires no `~/.env` or API keys):
    ```bash
-   .venv/bin/python verify_env.py
+   .venv/bin/python verify_env.py --offline
    ```
 2. **Run All Regression Tests**: Run the strict test launcher:
    ```bash
    python3 run_tests.py
    ```
-3. **Run Optimization Loop**: Spin up the automated prompt-mutation iteration.
+3. **Run Release Hygiene Verification**:
    ```bash
-   python3 rsi_loop.py
+   python3 scripts/check_release_hygiene.py
    ```
 
 ---
 
 ## 📈 Current Project State
-- Reference implementations and harness regressions pass under the host-contained sandbox framework.
-- Active verification suite contains 47 regression and behavioral resource limit tests.
-- No experiment has run under the current frozen protocol, but a legacy experiment artifact exists.
-- The pipeline supports promotion to `best_manifest.json` once a real experiment run is executed under the approved protocol.
+- Reference implementations, containment cages, archival verifiers, and simulation models pass under the host-contained sandbox framework.
+- Active verification suite (`run_tests.py`) runs 394 regression, containment, archival, simulation, sidecar, and release-hygiene tests with zero skips.
+- Campaign 2's non-mock Suite P pilot (`history/run_1786134848_cfb514d2/campaign2_pilot_report.json`) is sealed under `campaign_archive_manifest.json` and `campaign_claim_record.json` (terminated at the prespecified `no_headroom` stop rule).
+- Campaign 3's statistical design, P0/P1 governance records, cost model, and two-stage Monte Carlo calibration artifacts are sealed under `campaign3/`.

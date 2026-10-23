@@ -56,7 +56,7 @@ Python environment via `pyproject.toml` or `requirements.txt`.
 When optional provider SDKs are installed for `verify_env.py` diagnostics:
 
 - **`openai`**: Licensed under `Apache-2.0` (https://github.com/openai/openai-python)
-- **`anthropic`**: Licensed under `MIT` / `Apache-2.0` (https://github.com/anthropics/anthropic-sdk-python)
+- **`anthropic`**: Licensed under `Apache-2.0` (https://github.com/anthropics/anthropic-sdk-python)
 - **`google-genai`**: Licensed under `Apache-2.0` (https://github.com/googleapis/python-genai)
 - **`python-dotenv`**: Licensed under `BSD-3-Clause` (https://github.com/theskumar/python-dotenv)
 
