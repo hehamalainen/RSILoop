@@ -69,7 +69,7 @@ TRACEABILITY_MATRIX = [
     {
         "clause": "W3 - R2 and R3 files are preserved read-only as historical evidence without mutation across entire work order",
         "file": os.path.join(BASE_DIR, "test_campaign3_p0.py"),
-        "line": 339,
+        "line": 384,
         "symbol": "def test_r2_r3_files_mode_and_byte_identical_before_and_after",
         "test": "test_r2_r3_files_mode_and_byte_identical_before_and_after"
     },
@@ -90,7 +90,7 @@ TRACEABILITY_MATRIX = [
     {
         "clause": "W6 - Every recorded SHA is exactly 40 hex characters",
         "file": os.path.join(BASE_DIR, "test_campaign3_p0.py"),
-        "line": 370,
+        "line": 474,
         "symbol": "def test_every_recorded_sha_is_exactly_40_hex_characters",
         "test": "test_every_recorded_sha_is_exactly_40_hex_characters"
     }
@@ -106,17 +106,62 @@ def _snapshot_root(root_path: str) -> Dict[str, Tuple[str, str]]:
             p = os.path.join(dirpath, f)
             rel = os.path.relpath(p, root_path)
             try:
-                st = os.stat(p)
-                mode = oct(stat.S_IMODE(st.st_mode))
-                if os.path.isfile(p) and not os.path.islink(p):
+                if os.path.islink(p):
+                    st = os.lstat(p)
+                    mode = oct(stat.S_IMODE(st.st_mode))
+                    h = "symlink"
+                else:
+                    st = os.stat(p)
+                    mode = oct(stat.S_IMODE(st.st_mode))
                     with open(p, "rb") as open_f:
                         h = hashlib.sha256(open_f.read()).hexdigest()
-                else:
-                    h = "symlink"
                 snap[rel] = (mode, h)
             except Exception as e:
                 snap[rel] = (str(e),)
     return snap
+
+
+def _verify_snapshot_against_recorded(
+    root_path: str,
+    recorded_snapshot: Dict[str, Dict[str, str]],
+    label: str,
+) -> None:
+    now_snap = _snapshot_root(root_path)
+    if set(now_snap.keys()) != set(recorded_snapshot.keys()):
+        raise AssertionError(f"{label} file set mismatch (deletions or additions)!")
+    for rel, item in now_snap.items():
+        init_item = recorded_snapshot[rel]
+        if item[0] != init_item.get("mode"):
+            raise AssertionError(f"{label} mode altered for {rel}: expected {init_item.get('mode')}, got {item[0]}")
+        if item[1] != init_item.get("hash"):
+            raise AssertionError(f"{label} hash altered for {rel}: expected {init_item.get('hash')}, got {item[1]}")
+
+
+def check_optional_maintainer_historical_roots(
+    r2_path: str,
+    r3_path: str,
+    snap_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Optional integration check against maintainer-local historical roots R2 and R3.
+    Explicitly reports `status='not_performed'` when those local directories are absent.
+    """
+    if not (r2_path and r3_path and os.path.isdir(r2_path) and os.path.isdir(r3_path)):
+        return {
+            "status": "not_performed",
+            "reason": "maintainer historical root directories are absent on this host",
+            "r2_checked": False,
+            "r3_checked": False,
+        }
+    _verify_snapshot_against_recorded(r2_path, snap_data["R2_snapshot"], "R2")
+    _verify_snapshot_against_recorded(r3_path, snap_data["R3_snapshot"], "R3")
+    return {
+        "status": "performed",
+        "r2_checked": True,
+        "r3_checked": True,
+        "r2_files": len(snap_data["R2_snapshot"]),
+        "r3_files": len(snap_data["R3_snapshot"]),
+    }
 
 
 class TestCampaign3P0(unittest.TestCase):
@@ -337,7 +382,11 @@ class TestCampaign3P0(unittest.TestCase):
             verify_campaign3_p0(BASE_DIR, trusted_commit_sha="invalid_short_sha")
 
     def test_r2_r3_files_mode_and_byte_identical_before_and_after(self):
-        """Authenticates live R2 and R3 against persisted initial pre-work-order snapshot with set-exact key equality."""
+        """
+        Verifies R2/R3 snapshot comparison using self-contained temporary fixtures (positive +
+        negative byte, mode, and file-set checks) and verifies explicit 'not_performed' reporting
+        when optional maintainer-local directories are absent (R5 fix).
+        """
         snap_path = os.path.join(BASE_DIR, "campaign3", "historical_roots_initial_snapshot.json")
         self.assertTrue(os.path.exists(snap_path), "Missing historical_roots_initial_snapshot.json")
 
@@ -348,24 +397,79 @@ class TestCampaign3P0(unittest.TestCase):
         r3_init = snap_data.get("R3_snapshot", {})
         self.assertGreater(len(r2_init), 0)
         self.assertGreater(len(r3_init), 0)
-        if not (os.path.isdir(self.r2_path) and os.path.isdir(self.r3_path)):
-            return
 
-        r2_now = _snapshot_root(self.r2_path)
-        r3_now = _snapshot_root(self.r3_path)
+        # 1. Self-contained fixture verification for R2 and R3 snapshot comparison
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            r2_fix = os.path.join(tmp_dir, "r2_fixture")
+            r3_fix = os.path.join(tmp_dir, "r3_fixture")
+            os.makedirs(os.path.join(r2_fix, "sub"), exist_ok=True)
+            os.makedirs(os.path.join(r3_fix, "sub"), exist_ok=True)
 
-        self.assertEqual(set(r2_now.keys()), set(r2_init.keys()), "R2 file set mismatch (deletions or additions)!")
-        self.assertEqual(set(r3_now.keys()), set(r3_init.keys()), "R3 file set mismatch (deletions or additions)!")
+            r2_a = os.path.join(r2_fix, "README.md")
+            r2_b = os.path.join(r2_fix, "sub", "artifact.json")
+            with open(r2_a, "wb") as f:
+                f.write(b"# R2 fixture readme\n")
+            os.chmod(r2_a, 0o644)
+            with open(r2_b, "wb") as f:
+                f.write(b'{"sealed": true}\n')
+            os.chmod(r2_b, 0o444)
 
-        for rel, item in r2_now.items():
-            init_item = r2_init[rel]
-            self.assertEqual(item[0], init_item.get("mode"), f"R2 mode altered for {rel}")
-            self.assertEqual(item[1], init_item.get("hash"), f"R2 hash altered for {rel}")
+            r3_a = os.path.join(r3_fix, "README.md")
+            with open(r3_a, "wb") as f:
+                f.write(b"# R3 fixture readme\n")
+            os.chmod(r3_a, 0o644)
 
-        for rel, item in r3_now.items():
-            init_item = r3_init[rel]
-            self.assertEqual(item[0], init_item.get("mode"), f"R3 mode altered for {rel}")
-            self.assertEqual(item[1], init_item.get("hash"), f"R3 hash altered for {rel}")
+            r2_recorded = {
+                rel: {"mode": mode, "hash": digest}
+                for rel, (mode, digest) in _snapshot_root(r2_fix).items()
+            }
+            r3_recorded = {
+                rel: {"mode": mode, "hash": digest}
+                for rel, (mode, digest) in _snapshot_root(r3_fix).items()
+            }
+
+            # Positive check on self-contained R2 and R3 fixtures
+            _verify_snapshot_against_recorded(r2_fix, r2_recorded, "R2")
+            _verify_snapshot_against_recorded(r3_fix, r3_recorded, "R3")
+
+            # Negative check 1: Mode mutation is rejected
+            os.chmod(r2_a, 0o444)
+            with self.assertRaises(AssertionError) as ctx_mode:
+                _verify_snapshot_against_recorded(r2_fix, r2_recorded, "R2")
+            self.assertIn("R2 mode altered", str(ctx_mode.exception))
+            os.chmod(r2_a, 0o644)
+
+            # Negative check 2: Byte/hash mutation is rejected
+            with open(r2_a, "ab") as f:
+                f.write(b"tamper\n")
+            with self.assertRaises(AssertionError) as ctx_hash:
+                _verify_snapshot_against_recorded(r2_fix, r2_recorded, "R2")
+            self.assertIn("R2 hash altered", str(ctx_hash.exception))
+            with open(r2_a, "wb") as f:
+                f.write(b"# R2 fixture readme\n")
+
+            # Negative check 3: Extra or deleted file is rejected
+            extra_p = os.path.join(r3_fix, "extra.txt")
+            with open(extra_p, "wb") as f:
+                f.write(b"extra")
+            with self.assertRaises(AssertionError) as ctx_set:
+                _verify_snapshot_against_recorded(r3_fix, r3_recorded, "R3")
+            self.assertIn("R3 file set mismatch", str(ctx_set.exception))
+            os.remove(extra_p)
+
+            # 2. Verify optional maintainer-root helper explicitly reports 'not_performed' when absent
+            absent_res = check_optional_maintainer_historical_roots(
+                os.path.join(tmp_dir, "nonexistent_r2"),
+                os.path.join(tmp_dir, "nonexistent_r3"),
+                snap_data,
+            )
+            self.assertEqual(absent_res["status"], "not_performed")
+            self.assertFalse(absent_res["r2_checked"])
+            self.assertFalse(absent_res["r3_checked"])
+
+        # 3. Optional live maintainer-root check (explicitly records status without silent early return)
+        live_res = check_optional_maintainer_historical_roots(self.r2_path, self.r3_path, snap_data)
+        self.assertIn(live_res["status"], ("performed", "not_performed"))
 
     def test_every_recorded_sha_is_exactly_40_hex_characters(self):
         disc_path = os.path.join(BASE_DIR, "campaign3", "root_discovery.json")
