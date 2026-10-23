@@ -15,7 +15,7 @@ This repository contains four distinct, self-contained components:
    - **Recorded Campaign 2 Pilot Outcome**: The non-mock Suite P pilot (`history/run_1786134848_cfb514d2/campaign2_pilot_report.json`, sealed under `campaign_archive_manifest.json` and `campaign_claim_record.json`) terminated at the prespecified **`no_headroom`** stop rule (baseline solved 100% of pilot tasks at $1.0$, yielding $\Delta = 0.0$ across optimizer and control arms) and did **not** advance to the confirmatory Suite C run.
 3. **Campaign 3 Statistical Design & Cost Algebra (`campaign3/`, `campaign3/sim/`)**:
    - Governance and preregistration drafting (`campaign3/governance.py`, `campaign3/verifier.py`, `campaign3/p1_verifier.py`), deterministic Monte Carlo simulation and two-stage moment calibration (`campaign3/sim/model_v2.py`, `campaign3/sim/calibrator_v2.py`, `campaign3/sim/quantizer.py`), and closed-form call/token cost algebra across all four protocol variants (`campaign3/cost_model.py`, `campaign3/cost_model_report.md`).
-   - **Note on Campaign 2 vs. Campaign 3 Conformance**: The `campaign2/` directory is retained as the historical Campaign 2 implementation and archive verifier. For Campaign 3 conformance, `parse_and_classify_jsonl_output(..., require_transport_evidence=True)` and `is_permitted_local_retry(..., require_transport_evidence=True)` reject post-spawn CLI retries lacking transport-level zero-bytes-sent proof, and `Campaign2Orchestrator(..., atomic_parent_feedback=True)` updates parent prompts, scores, and failure traces atomically only on accepted improvements.
+   - **Note on Campaign 2 vs. Campaign 3 Conformance**: The `campaign2/` directory retains the historical Campaign 2 archive verifier while defaulting new executions to Campaign 3 strict conformance: `parse_and_classify_jsonl_output(..., require_transport_evidence=True)`, `SolModelProvider(..., require_transport_evidence=True)`, and `is_permitted_local_retry(..., require_transport_evidence=True)` reject post-spawn CLI retries lacking transport-level zero-bytes-sent proof by default, and `Campaign2Orchestrator(..., atomic_parent_feedback=True, require_transport_evidence=True)` updates parent prompts, scores, and failure traces atomically only on accepted improvements (with `False` confined to explicit historical archive verification tests).
 4. **Discovery Probe Sidecar (`discovery_probe/`)**:
    - A dependency-free, text-only active rule-discovery benchmark inspired by [DiG-bench](https://arxiv.org/abs/2608.12593). Episodes commit to a hidden composition of string operations via SHA-256 before exploration and score only locked holdout challenge predictions. See [`discovery_probe/README.md`](discovery_probe/README.md).
 
@@ -27,11 +27,12 @@ This repository contains four distinct, self-contained components:
 - **Python**: Python `3.11+` (tested on Python 3.11–3.14)
 - **Runtime Dependencies**: `numpy>=1.26.0` (used by Campaign 3 simulation and calibration modules)
 
-Create a virtual environment and install dependencies:
+Create a virtual environment, install dependencies, and run the offline environment & artifact verifier:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+.venv/bin/python verify_env.py --offline
 ```
 
 ---
@@ -102,7 +103,7 @@ python3 scripts/check_release_hygiene.py
 ## Threat Model & Host Containment
 
 - **Process Isolation**: In Campaign 1 (`candidate_runner.py`), the candidate solution and runner RPC shim share a Python process; in Campaign 2 (`campaign2/proxy.py`), the host supervisor runs `test_harness.py` in the trusted host process and communicates over pipes with a deny-default sandboxed worker (`worker.py` + `candidate.py`).
-- **Filesystem Containment**: Candidate workers are restricted by macOS `sandbox-exec` (`candidate.sb.template` and `get_candidate_sandbox_profile()` in [`campaign2/proxy.py`](campaign2/proxy.py)). Candidate code may read/write only its isolated per-evaluation temporary directory (`cand_tmpdir`) and cannot read the repository or unrelated same-user temporary files under `/private/var/folders`.
+- **Filesystem Containment**: Candidate workers are restricted by macOS `sandbox-exec` (`candidate.sb.template` in Campaign 1 and `get_candidate_sandbox_profile()` in [`campaign2/proxy.py`](campaign2/proxy.py)). Candidate code may **write** only to its isolated per-evaluation temporary directory (`cand_tmpdir` / `temp_dir`) and `/dev/null`. **Read** access is permitted to that isolated temporary directory plus required macOS system and Python runtime paths (`/System`, `/usr`, `/Library`, `/opt/homebrew`, `/private/var/db`, `/private/var/select`, active Python prefixes, and in Campaign 1 `candidate_runner.py` and the task candidate directory); candidate workers cannot read the rest of the repository or sibling temporary directories under `/private/var/folders`.
 - **Resource Enforcement**: Workers install CPU (`RLIMIT_CPU`), file-descriptor (`RLIMIT_NOFILE`), file-size (`RLIMIT_FSIZE`), and core-dump (`RLIMIT_CORE`) limits before reporting `READY`.
 - **Residual Host-Availability Limitation**: macOS XNU does not enforce `RLIMIT_AS` via `setrlimit`. Memory-bound candidate code is bounded by wall-clock supervision (`CandidateTimeoutError`) rather than kernel address-space limits. Do not run untrusted adversarial workloads outside a dedicated VM or container.
 

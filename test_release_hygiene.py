@@ -145,6 +145,37 @@ class TestReleaseHygiene(unittest.TestCase):
             self.assertIn("not a valid Git work tree", str(ctx_nogit.exception))
             self.assertEqual(stat.S_IMODE(os.lstat(preflight_p).st_mode), 0o644)
 
+    def test_verify_env_offline_mode_succeeds_without_dotenv_or_api_keys(self):
+        """R6 regression test: verify_env.py --offline succeeds without ~/.env or optional SDKs."""
+        import sys
+        import verify_env
+
+        ok, details = verify_env.check_offline_environment(BASE_DIR)
+        self.assertTrue(ok, f"Offline environment check failed: {details}")
+        self.assertEqual(details["mode"], "offline")
+        self.assertTrue(details["python_ok"])
+        self.assertTrue(details["numpy_ok"])
+        self.assertTrue(details["sandbox_exec_ok"])
+        self.assertTrue(details["sealed_artifacts_ok"])
+        self.assertTrue(details["manifest_ok"])
+
+        with tempfile.TemporaryDirectory() as empty_home:
+            env = dict(os.environ)
+            env["HOME"] = empty_home
+            for k in ("OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+                env.pop(k, None)
+            proc = subprocess.run(
+                [sys.executable, os.path.join(BASE_DIR, "verify_env.py"), "--offline"],
+                cwd=BASE_DIR,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"verify_env.py --offline failed: {proc.stderr}\n{proc.stdout}")
+            self.assertIn("Offline Environment & Integrity Check", proc.stdout)
+            self.assertNotIn("~/.env", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
