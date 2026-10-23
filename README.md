@@ -25,7 +25,7 @@ This repository contains four distinct, self-contained components:
 
 - **Operating System**: macOS (requires `/usr/bin/sandbox-exec` for Seatbelt containment profiles)
 - **Python**: Python `3.11+` (tested on Python 3.11–3.14)
-- **Runtime Dependencies**: `numpy>=1.26.0` (used by Campaign 3 simulation and calibration modules)
+- **Runtime Dependencies**: `requirements.txt` pins `numpy==2.5.1` (the exact tested reproducibility constraint recorded in archived Campaign 3 evidence `campaign3/sim/moments_report.json`); broader NumPy versions (`numpy>=1.26.0` in `pyproject.toml`) are also supported with cross-version numerical verification in `test_campaign3_sim_model.py`.
 
 Create a virtual environment, install dependencies, and run the offline environment & artifact verifier:
 

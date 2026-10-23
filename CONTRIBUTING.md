@@ -7,7 +7,7 @@ Thank you for your interest in contributing to **RSILoop**. Because RSILoop is a
 ## 1. Environment Setup
 
 1. Clone the repository on **macOS** (required for `/usr/bin/sandbox-exec` containment tests).
-2. Create a Python 3.11+ virtual environment and install dependencies:
+2. Create a Python 3.11+ virtual environment and install the pinned reproducibility constraints (`requirements.txt` pins `numpy==2.5.1` to match archived Campaign 3 simulation evidence, while `test_campaign3_sim_model.py` also supports `numpy>=1.26.0` cross-version numerical verification):
    ```bash
    python3 -m venv .venv
    .venv/bin/pip install -r requirements.txt

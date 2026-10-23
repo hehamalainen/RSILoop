@@ -1,11 +1,15 @@
 import unittest
+from unittest import mock
 import json
 import os
 import tempfile
 import hashlib
+import numpy as np
 from campaign3.sim.model import SimulationModel, LineageEvent
 from campaign3.sim.report import run_fixture, generate_report
 from campaign3.sim.rational import RationalScore, accept_candidate
+
+ARCHIVED_PRNG_VERSION = "numpy=2.5.1"
 
 class TestCampaign3SimModel(unittest.TestCase):
     @classmethod
@@ -90,7 +94,16 @@ class TestCampaign3SimModel(unittest.TestCase):
         self.assertEqual(serialize_block(D1, A1, lin1), serialize_block(D2, A2, lin2))
 
     def test_se1_5_report(self):
-        """Generate temporary report and verify byte-exact match with checked-in evidence."""
+        """
+        Generate temporary report and verify against checked-in evidence:
+        - When running under the pinned reproducibility environment (numpy==2.5.1),
+          enforce byte-exact equality with campaign3/sim/moments_report.json.
+        - Across broader supported NumPy versions (numpy>=1.26.0), distinguish
+          historical environment identity (prng_version == 'numpy=2.5.1' in the
+          archived report vs f'numpy={np.__version__}' in the live environment)
+          from cross-version numerical verification (all moments, offsets,
+          targets, and spec hashes must match identically).
+        """
         if not self.report:
             self.fail("No checked-in moments_report.json found.")
 
@@ -102,14 +115,44 @@ class TestCampaign3SimModel(unittest.TestCase):
                 iterations=1000
             )
 
-            with open(temp_report_path, 'r') as f:
+            with open(temp_report_path, 'r', encoding='utf-8') as f:
                 temp_content = f.read()
-            with open(self.report_path, 'r') as f:
+            with open(self.report_path, 'r', encoding='utf-8') as f:
                 checked_in_content = f.read()
 
-            self.assertEqual(temp_content, checked_in_content, "Temporary report differs from checked-in report.")
-
             report_json = json.loads(temp_content)
+            checked_in_json = json.loads(checked_in_content)
+            live_prng_version = f"numpy={np.__version__}"
+
+            for fixture_name, archived_rep in checked_in_json.items():
+                self.assertEqual(
+                    archived_rep["prng_version"],
+                    ARCHIVED_PRNG_VERSION,
+                    f"Archived moments_report.json must preserve historical prng_version for {fixture_name}",
+                )
+                self.assertEqual(
+                    report_json[fixture_name]["prng_version"],
+                    live_prng_version,
+                    f"Generated report must record live runtime prng_version for {fixture_name}",
+                )
+
+            if live_prng_version == ARCHIVED_PRNG_VERSION:
+                self.assertEqual(
+                    temp_content,
+                    checked_in_content,
+                    "Temporary report differs from checked-in report under pinned numpy==2.5.1.",
+                )
+            else:
+                normalized_json = json.loads(temp_content)
+                for fixture_rep in normalized_json.values():
+                    fixture_rep["prng_version"] = ARCHIVED_PRNG_VERSION
+                normalized_content = json.dumps(normalized_json, indent=2)
+                self.assertEqual(
+                    normalized_content,
+                    checked_in_content,
+                    "Cross-version numerical report differs from checked-in report beyond prng_version.",
+                )
+
             # Ensure selection_bias_offset only present in null fixture
             self.assertIn("selection_bias_offset", report_json["fixture_two_point_null"])
             self.assertNotIn("selection_bias_offset", report_json["fixture_zero_transition"])
@@ -126,6 +169,39 @@ class TestCampaign3SimModel(unittest.TestCase):
             for fixture_name, rep in report_json.items():
                 self.assertEqual(rep["spec_manifest"], manifest_str)
                 self.assertEqual(rep["spec_hash"], expected_spec_hash)
+
+    def test_se1_7_cross_version_numpy_environment_identity_separation(self):
+        """
+        Regression test for Round 2 Finding 2:
+        Verify that under a newer NumPy version (e.g. numpy=2.5.4), generate_report()
+        records the live environment identity while producing identical numerical moments
+        and spec hashes to the archived numpy=2.5.1 report.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_report_path = os.path.join(tmpdir, "temp_moments_254.json")
+            with mock.patch("campaign3.sim.report.np.__version__", "2.5.4"):
+                generate_report(
+                    "campaign3/sim/non_normative_fixtures.json",
+                    temp_report_path,
+                    iterations=1000,
+                )
+            with open(temp_report_path, "r", encoding="utf-8") as f:
+                gen_254 = json.load(f)
+            with open(self.report_path, "r", encoding="utf-8") as f:
+                checked_in_content = f.read()
+
+            for fixture_name, rep in gen_254.items():
+                self.assertEqual(rep["prng_version"], "numpy=2.5.4")
+                rep["prng_version"] = ARCHIVED_PRNG_VERSION
+
+            normalized_content = json.dumps(gen_254, indent=2)
+            self.assertEqual(normalized_content, checked_in_content)
+
+            # Also verify test_se1_5_report passes directly when np.__version__ is 2.5.4
+            with mock.patch("campaign3.sim.report.np.__version__", "2.5.4"), mock.patch(
+                "test_campaign3_sim_model.np.__version__", "2.5.4"
+            ):
+                self.test_se1_5_report()
 
     def test_se1_6_conformance(self):
         """MC moments must converge and pass targets independently."""

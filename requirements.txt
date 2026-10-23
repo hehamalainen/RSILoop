@@ -1,7 +1,11 @@
-# Core runtime & Campaign 3 simulation dependencies (Python 3.11+)
-numpy>=1.26.0
+# Tested reproducibility constraints (Python 3.11+)
+# Pinned to numpy==2.5.1 to match the exact environment identity recorded in
+# archived Campaign 3 simulation evidence (campaign3/sim/moments_report.json).
+# Broader versions (numpy>=1.26.0 in pyproject.toml) are supported via
+# cross-version numerical verification in test_campaign3_sim_model.py.
+numpy==2.5.1
 
-# Optional provider SDKs used only by verify_env.py environment diagnostics:
+# Optional provider SDKs used only by verify_env.py live environment diagnostics:
 # openai>=1.0.0
 # anthropic>=0.20.0
 # google-genai>=0.3.0
