@@ -27,6 +27,7 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+CAMPAIGN2_ARCHIVAL_ANCHOR_COMMIT = "f42a895a99fc5f3e7ccbfbfd9669ae4ce6ea0d3a"
 CAMPAIGN3_P0_ANCHOR_COMMIT = "96e344e1c7f6c2fcb1242d159aea481e2b1defcf"
 CAMPAIGN3_P1_ANCHOR_COMMIT = "8cdd4021aa9287a52b6f0eef8b21c375921a6d89"
 
@@ -166,17 +167,28 @@ def _verify_claim_record(
 def ensure_readonly_artifact_modes(workspace_root: str = BASE_DIR, verbose: bool = False) -> Tuple[int, int]:
     """
     Verify SHA-256 content hashes, claim record invariants, and Git commit anchors across all
-    sealed artifacts BEFORE restoring mode 0o444 on any file.
+    sealed artifacts BEFORE restoring required file modes (`0o444` for sealed artifacts and
+    exact recorded `st_mode` values for the 32 frozen Campaign 2 archive inventory artifacts).
 
     Returns (verified_count, chmod_updated_count).
     """
     _require_git_worktree(workspace_root)
-    verified_paths: Set[str] = set()
+    desired_modes: Dict[str, int] = {}
 
-    # 1. Verify campaign2_preflight_hashes.json entries (145 files)
-    preflight_rel = "campaign2_preflight_hashes.json"
-    preflight_abs = _check_regular_nonsymlink(workspace_root, preflight_rel)
-    with open(preflight_abs, "r", encoding="utf-8") as f:
+    # 1. Verify release_preflight_hashes.json (145 live Category 1 files) and historical campaign2_preflight_hashes.json
+    release_preflight_rel = "release_preflight_hashes.json"
+    hist_preflight_rel = "campaign2_preflight_hashes.json"
+    release_preflight_abs = _check_regular_nonsymlink(workspace_root, release_preflight_rel)
+    hist_preflight_abs = _check_regular_nonsymlink(workspace_root, hist_preflight_rel)
+
+    _verify_git_blob_match(
+        workspace_root,
+        CAMPAIGN2_ARCHIVAL_ANCHOR_COMMIT,
+        hist_preflight_rel,
+        hist_preflight_abs,
+    )
+
+    with open(release_preflight_abs, "r", encoding="utf-8") as f:
         preflight_map: Dict[str, str] = json.load(f)
 
     for rel_path, expected_sha in sorted(preflight_map.items()):
@@ -184,11 +196,12 @@ def ensure_readonly_artifact_modes(workspace_root: str = BASE_DIR, verbose: bool
         actual_sha = _compute_sha256(abs_p)
         if actual_sha != expected_sha:
             raise ResealVerificationError(
-                f"Preflight manifest SHA-256 mismatch for {rel_path}: expected {expected_sha}, got {actual_sha}"
+                f"Release preflight manifest SHA-256 mismatch for {rel_path}: expected {expected_sha}, got {actual_sha}"
             )
         if rel_path != "README.md":
-            verified_paths.add(rel_path)
-    verified_paths.add(preflight_rel)
+            desired_modes[rel_path] = 0o444
+    desired_modes[release_preflight_rel] = 0o444
+    desired_modes[hist_preflight_rel] = 0o444
 
     # 2. Verify campaign2_evidence_hashes.json entries (4 files)
     evidence_rel = "campaign2_evidence_hashes.json"
@@ -203,10 +216,10 @@ def ensure_readonly_artifact_modes(workspace_root: str = BASE_DIR, verbose: bool
             raise ResealVerificationError(
                 f"Evidence manifest SHA-256 mismatch for {rel_path}: expected {expected_sha}, got {actual_sha}"
             )
-        verified_paths.add(rel_path)
-    verified_paths.add(evidence_rel)
+        desired_modes[rel_path] = 0o444
+    desired_modes[evidence_rel] = 0o444
 
-    # 3. Verify campaign_archive_manifest.json entries (32 files), anchor, and claim record
+    # 3. Verify historical campaign_archive_manifest.json entries (32 files), anchor, and claim record
     archive_manifest_rel = "campaign_archive_manifest.json"
     archive_anchor_rel = "campaign_archive_anchor.hash"
     claim_record_rel = "campaign_claim_record.json"
@@ -232,18 +245,39 @@ def ensure_readonly_artifact_modes(workspace_root: str = BASE_DIR, verbose: bool
         expected_report_sha=archive_data.get("canonical_report_sha256", ""),
     )
 
+    for rel_meta, abs_meta in (
+        (archive_manifest_rel, archive_manifest_abs),
+        (archive_anchor_rel, archive_anchor_abs),
+        (claim_record_rel, claim_record_abs),
+    ):
+        _verify_git_blob_match(
+            workspace_root,
+            CAMPAIGN2_ARCHIVAL_ANCHOR_COMMIT,
+            rel_meta,
+            abs_meta,
+        )
+
     for item in archive_data.get("artifacts", []):
         rel_p = item["relative_path"]
         expected_sha = item["sha256"]
+        expected_size = item["size_bytes"]
+        expected_mode = int(item["st_mode"])
         abs_p = _check_regular_nonsymlink(workspace_root, rel_p)
         actual_sha = _compute_sha256(abs_p)
         if actual_sha != expected_sha:
             raise ResealVerificationError(
                 f"Campaign archive SHA-256 mismatch for {rel_p}: expected {expected_sha}, got {actual_sha}"
             )
-        verified_paths.add(rel_p)
+        actual_size = os.lstat(abs_p).st_size
+        if actual_size != expected_size:
+            raise ResealVerificationError(
+                f"Campaign archive size mismatch for {rel_p}: expected {expected_size}, got {actual_size}"
+            )
+        desired_modes[rel_p] = expected_mode
 
-    verified_paths.update([archive_manifest_rel, archive_anchor_rel, claim_record_rel])
+    desired_modes[archive_manifest_rel] = 0o444
+    desired_modes[archive_anchor_rel] = 0o444
+    desired_modes[claim_record_rel] = 0o444
 
     # 4. Verify Campaign 3 P0 and P1 sealed governance artifacts against Git anchors (fail-closed)
     from campaign3.verifier import P0_ARTIFACTS
@@ -252,50 +286,40 @@ def ensure_readonly_artifact_modes(workspace_root: str = BASE_DIR, verbose: bool
     for rel_p in P0_ARTIFACTS:
         abs_p = _check_regular_nonsymlink(workspace_root, rel_p)
         _verify_git_blob_match(workspace_root, CAMPAIGN3_P0_ANCHOR_COMMIT, rel_p, abs_p)
-        verified_paths.add(rel_p)
+        desired_modes[rel_p] = 0o444
 
     for rel_p in P1_ARTIFACTS:
         abs_p = _check_regular_nonsymlink(workspace_root, rel_p)
         _verify_git_blob_match(workspace_root, CAMPAIGN3_P1_ANCHOR_COMMIT, rel_p, abs_p)
-        verified_paths.add(rel_p)
+        desired_modes[rel_p] = 0o444
 
-    # Apply 0o444 ONLY after all verifications have succeeded
+    # Apply target modes ONLY after all verifications have succeeded
     updated_count = 0
-    for rel_p in sorted(verified_paths):
+    for rel_p, target_mode in sorted(desired_modes.items()):
         abs_p = os.path.join(workspace_root, rel_p)
         current_mode = stat.S_IMODE(os.lstat(abs_p).st_mode)
-        if current_mode != 0o444:
-            os.chmod(abs_p, 0o444)
+        if current_mode != target_mode:
+            os.chmod(abs_p, target_mode)
             updated_count += 1
             if verbose:
-                sys.stdout.write(f"Sealed mode 0o444: {rel_p} (was {oct(current_mode)})\n")
+                sys.stdout.write(f"Restored mode {oct(target_mode)}: {rel_p} (was {oct(current_mode)})\n")
 
-    return len(verified_paths), updated_count
+    return len(desired_modes), updated_count
 
 
 def main() -> int:
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
     regenerate = "--regenerate-manifests" in sys.argv
     if regenerate:
-        from campaign2.manifest import generate_campaign2_manifest
-        from campaign2.archival import generate_campaign_archive, MANIFEST_REL_PATH, ANCHOR_REL_PATH, CLAIM_REL_PATH
+        from campaign2.manifest import generate_release_manifest, verify_release_manifest_relationship
 
-        generate_campaign2_manifest(BASE_DIR)
-        from campaign2.archival import FROZEN_CAMPAIGN_ARCHIVE_INVENTORY
-        for rel_p in FROZEN_CAMPAIGN_ARCHIVE_INVENTORY:
-            abs_p = _check_regular_nonsymlink(BASE_DIR, rel_p)
-            if stat.S_IMODE(os.lstat(abs_p).st_mode) != 0o444:
-                os.chmod(abs_p, 0o444)
-
-        for meta_rel in (MANIFEST_REL_PATH, ANCHOR_REL_PATH, CLAIM_REL_PATH):
-            meta_abs = os.path.join(BASE_DIR, meta_rel)
-            if os.path.exists(meta_abs):
-                os.chmod(meta_abs, 0o644)
-                os.remove(meta_abs)
-
-        generate_campaign_archive(BASE_DIR)
+        generate_release_manifest(BASE_DIR)
+        verify_release_manifest_relationship(BASE_DIR)
         if verbose:
-            sys.stdout.write("Regenerated campaign2_preflight_hashes.json and campaign_archive_manifest.json.\n")
+            sys.stdout.write(
+                "Regenerated release_preflight_hashes.json (historical campaign2_preflight_hashes.json "
+                "and campaign_archive_manifest.json preserved untouched).\n"
+            )
 
     try:
         verified_count, updated_count = ensure_readonly_artifact_modes(BASE_DIR, verbose=verbose)

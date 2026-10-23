@@ -14,6 +14,11 @@ from typing import Dict, List, Tuple, Any
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PREFLIGHT_MANIFEST_PATH = os.path.join(BASE_DIR, "campaign2_preflight_hashes.json")
+RELEASE_PREFLIGHT_MANIFEST_REL_PATH = "release_preflight_hashes.json"
+RELEASE_PREFLIGHT_MANIFEST_PATH = os.path.join(BASE_DIR, RELEASE_PREFLIGHT_MANIFEST_REL_PATH)
+HISTORICAL_CAMPAIGN2_PREFLIGHT_SHA256 = (
+    "6a2b3de1d33a474a082216ac8bfb8f49e099e792e6212cc7c16524523e4146b1"
+)
 EVIDENCE_MANIFEST_PATH = os.path.join(BASE_DIR, "campaign2_evidence_hashes.json")
 PARITY_MATRIX_PATH = os.path.join(BASE_DIR, "campaign2_parity_matrix.json")
 
@@ -128,7 +133,7 @@ def get_expected_frozen_inventory(workspace_root: str = BASE_DIR) -> List[str]:
 
 
 def generate_campaign2_manifest(workspace_root: str = BASE_DIR) -> str:
-    """Generates and writes sealed campaign2_preflight_hashes.json with mode 0o444."""
+    """Generates and writes sealed campaign2_preflight_hashes.json with mode 0o444 (for isolated test fixtures)."""
     _verify_exact_task_directories(workspace_root)
     inventory = get_expected_frozen_inventory(workspace_root)
 
@@ -148,6 +153,94 @@ def generate_campaign2_manifest(workspace_root: str = BASE_DIR) -> str:
 
     os.chmod(out_path, 0o444)
     return out_path
+
+
+def generate_release_manifest(workspace_root: str = BASE_DIR) -> str:
+    """
+    Generates and writes sealed release_preflight_hashes.json with mode 0o444 for the
+    release's updated Category 1 source inventory, while preserving the historical
+    campaign2_preflight_hashes.json untouched.
+    """
+    _verify_exact_task_directories(workspace_root)
+    inventory = get_expected_frozen_inventory(workspace_root)
+
+    manifest_data = {}
+    for rel_path in inventory:
+        abs_path = os.path.join(workspace_root, rel_path)
+        if not os.path.exists(abs_path):
+            raise FileNotFoundError(f"Missing required Category 1 file for release manifest: {rel_path}")
+        manifest_data[rel_path] = compute_file_sha256(abs_path)
+
+    out_path = os.path.join(workspace_root, RELEASE_PREFLIGHT_MANIFEST_REL_PATH)
+    if os.path.exists(out_path):
+        os.chmod(out_path, 0o644)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(manifest_data, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+    os.chmod(out_path, 0o444)
+    return out_path
+
+
+def verify_release_manifest_relationship(workspace_root: str = BASE_DIR) -> Dict[str, Any]:
+    """
+    Verifies the relationship between the immutable historical Campaign 2 preflight manifest
+    (campaign2_preflight_hashes.json, anchored at f42a895a99fc5f3e7ccbfbfd9669ae4ce6ea0d3a)
+    and the release's updated Category 1 source manifest (release_preflight_hashes.json).
+    Ensures all 120 benchmark files, sealed registration/anchor files, and Seatbelt template
+    remain 100% byte-identical to the historical archive.
+    """
+    hist_path = os.path.join(workspace_root, "campaign2_preflight_hashes.json")
+    rel_path = os.path.join(workspace_root, RELEASE_PREFLIGHT_MANIFEST_REL_PATH)
+
+    for p in (hist_path, rel_path):
+        if not os.path.exists(p):
+            raise FileNotFoundError(f"Missing manifest file: {p}")
+        _check_no_symlink_components(workspace_root, p)
+        if not os.path.isfile(p):
+            raise ValueError(f"Manifest must be a regular file: {p}")
+        st_mode = stat.S_IMODE(os.stat(p).st_mode)
+        if st_mode != 0o444:
+            raise ValueError(f"Preflight manifest permission mode must be 0o444, got {oct(st_mode)} for {p}")
+
+    hist_sha = compute_file_sha256(hist_path)
+    if hist_sha != HISTORICAL_CAMPAIGN2_PREFLIGHT_SHA256:
+        raise ValueError(
+            f"Historical campaign2_preflight_hashes.json digest mismatch: expected "
+            f"{HISTORICAL_CAMPAIGN2_PREFLIGHT_SHA256}, got {hist_sha}"
+        )
+
+    with open(hist_path, "r", encoding="utf-8") as f:
+        hist_data = json.load(f)
+    with open(rel_path, "r", encoding="utf-8") as f:
+        rel_data = json.load(f)
+
+    expected_inventory = set(get_expected_frozen_inventory(workspace_root))
+    if set(hist_data.keys()) != expected_inventory or set(rel_data.keys()) != expected_inventory:
+        raise ValueError("Inventory key set mismatch between historical and release preflight manifests")
+
+    differing_keys = []
+    for k in sorted(expected_inventory):
+        if hist_data[k] != rel_data[k]:
+            if k.startswith("benchmarks/") or k in (
+                "campaign2_master_registration.json",
+                "campaign2_registration_anchor.hash",
+                "generator.sb.template",
+            ):
+                raise ValueError(
+                    f"Immutable benchmark or registration artifact '{k}' differs between historical "
+                    f"and release manifests"
+                )
+            differing_keys.append(k)
+
+    return {
+        "historical_manifest_sha256": hist_sha,
+        "release_manifest_sha256": compute_file_sha256(rel_path),
+        "total_entries": len(expected_inventory),
+        "identical_entries": len(expected_inventory) - len(differing_keys),
+        "updated_runtime_or_doc_entries": differing_keys,
+    }
 
 
 def _check_no_symlink_components(workspace_root: str, target_path: str) -> None:
@@ -177,12 +270,22 @@ def _check_no_symlink_components(workspace_root: str, target_path: str) -> None:
 def verify_campaign2_manifest(workspace_root: str = BASE_DIR) -> Tuple[bool, int]:
     """
     STRICTLY READ-ONLY Verification of Preflight Manifest.
-    Verifies that campaign2_preflight_hashes.json exists, is a regular file with mode 0o444,
-    no path component is a symlink, contains all 142 Category 1 files, and every file SHA256 matches.
+    When release_preflight_hashes.json is present in workspace_root, verifies the live
+    145-file Category 1 inventory against release_preflight_hashes.json AND verifies that
+    campaign2_preflight_hashes.json remains locked to its immutable historical digest
+    (HISTORICAL_CAMPAIGN2_PREFLIGHT_SHA256) with mode 0o444.
+    In isolated temporary test workspaces without release_preflight_hashes.json, verifies
+    campaign2_preflight_hashes.json directly.
     """
     _verify_exact_task_directories(workspace_root)
 
-    manifest_path = os.path.join(workspace_root, "campaign2_preflight_hashes.json")
+    release_manifest_path = os.path.join(workspace_root, RELEASE_PREFLIGHT_MANIFEST_REL_PATH)
+    hist_manifest_path = os.path.join(workspace_root, "campaign2_preflight_hashes.json")
+    if os.path.exists(release_manifest_path):
+        manifest_path = release_manifest_path
+        verify_release_manifest_relationship(workspace_root)
+    else:
+        manifest_path = hist_manifest_path
     if not os.path.exists(manifest_path):
         raise FileNotFoundError(f"Missing preflight manifest: {manifest_path}")
 

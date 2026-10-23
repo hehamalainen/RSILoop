@@ -40,9 +40,10 @@ For fast iteration on specific modules:
 ## 3. Working with Sealed Artifacts and Manifests
 
 - **Do not modify frozen historical evidence** under `history/`, `campaign2_archive/`, `campaign3/*.json`, or `benchmarks/campaign2/`. These files are anchored to historical Git commits and SHA-256 manifests (`campaign2_evidence_hashes.json`, `campaign2_parity_matrix.json`, `campaign3/verifier.py`, `campaign3/p1_verifier.py`).
-- **Category 1 Source Inventory (`campaign2_preflight_hashes.json`)**:
-  - `campaign2/manifest.py` authenticates 145 Category 1 files (including `README.md`, `rsi_loop.py`, `run_tests.py`, `docs/walkthrough.md`, and `campaign2/*.py`).
-  - If your change legitimately modifies a Category 1 file, regenerate the preflight and archive manifests before running the test suite:
+- **Historical Archive vs. Release Source Inventory (`campaign2_preflight_hashes.json` vs. `release_preflight_hashes.json`)**:
+  - `campaign_archive_manifest.json`, `campaign_archive_anchor.hash`, `campaign_claim_record.json`, and `campaign2_preflight_hashes.json` are preserved as immutable historical artifacts anchored to commit `f42a895a99fc5f3e7ccbfbfd9669ae4ce6ea0d3a` and must never be regenerated or overwritten.
+  - `release_preflight_hashes.json` gives the release's updated 145-file Category 1 source inventory a separate identity while `verify_release_manifest_relationship()` verifies that all 120 benchmark files, sealed registration/anchor files, and `generator.sb.template` remain 100% byte-identical to the historical archive.
+  - If your change legitimately modifies a Category 1 runtime or documentation file, regenerate only `release_preflight_hashes.json` before running the test suite:
     ```bash
     .venv/bin/python scripts/reseal_readonly_artifacts.py --regenerate-manifests
     ```

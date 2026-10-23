@@ -355,6 +355,32 @@ class TestCampaignArchival(unittest.TestCase):
             m_mode_after = stat.S_IMODE(os.stat(m1).st_mode)
             self.assertEqual(m_mode_before, m_mode_after)
 
+    def test_a2_10_live_workspace_archive_matches_historical_f42a895_commit(self):
+        """R3 regression: verify live workspace archive authenticates directly against historical commit f42a895a99fc5f3e7ccbfbfd9669ae4ce6ea0d3a while release_preflight_hashes.json has a separate identity."""
+        from campaign2.manifest import (
+            HISTORICAL_CAMPAIGN2_PREFLIGHT_SHA256,
+            verify_release_manifest_relationship,
+        )
+
+        hist_commit = "f42a895a99fc5f3e7ccbfbfd9669ae4ce6ea0d3a"
+        ver = verify_campaign_archive(BASE_DIR, trusted_commit_sha=hist_commit)
+        self.assertEqual(ver["schema_version"], "3")
+        self.assertEqual(ver["canonical_report_sha256"], CANONICAL_REPORT_SHA256)
+        self.assertEqual(len(ver["artifacts"]), len(FROZEN_CAMPAIGN_ARCHIVE_INVENTORY))
+
+        rel_info = verify_release_manifest_relationship(BASE_DIR)
+        self.assertEqual(
+            rel_info["historical_manifest_sha256"],
+            HISTORICAL_CAMPAIGN2_PREFLIGHT_SHA256,
+        )
+        self.assertNotEqual(
+            rel_info["historical_manifest_sha256"],
+            rel_info["release_manifest_sha256"],
+        )
+        self.assertEqual(rel_info["total_entries"], 145)
+        for k in rel_info["updated_runtime_or_doc_entries"]:
+            self.assertFalse(k.startswith("benchmarks/"))
+
 
 if __name__ == "__main__":
     unittest.main()
