@@ -87,41 +87,103 @@ class TestReleaseHygiene(unittest.TestCase):
 
     def test_superseded_merge_base_verification_exact_and_public_clone_unavailable_reporting(self):
         """
-        Regression test for Round 2 Finding 3:
-        1. When historical objects are present locally, verify_superseded_merge_bases compares
-           actual git merge-base mechanically and rejects wrong merge bases (e.g. 5d5af00...).
-        2. In a single-branch public clone where unreferenced historical objects are absent,
-           verify_superseded_merge_bases and check_release_hygiene.py explicitly report
-           not_performed_historical_object_unavailable.
+        Regression test for Round 2 Finding 3 & Round 3 Finding 1:
+        1. Using a self-contained temporary Git repository with diverging sibling commits,
+           verify_superseded_merge_bases mechanically verifies exact merge bases, rejects an
+           ancestor commit that is not the actual merge base, and rejects linear ancestors
+           listed as non-ancestors.
+        2. Separately verify unavailable-object reporting (not_performed_historical_object_unavailable)
+           when historical sibling commit objects are absent (e.g. in a public single-branch clone).
         """
         import sys
 
+        def _git(cwd: str, *args: str) -> str:
+            return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
+
+        def _commit_file(cwd: str, filename: str, content: str, msg: str) -> str:
+            with open(os.path.join(cwd, filename), "w", encoding="utf-8") as f:
+                f.write(content)
+            _git(cwd, "add", filename)
+            _git(cwd, "commit", "-q", "-m", msg)
+            return _git(cwd, "rev-parse", "HEAD")
+
+        # 1. Self-contained temporary Git repository with sibling branches and distinct merge bases
+        with tempfile.TemporaryDirectory() as tmp_git:
+            _git(tmp_git, "init", "-q")
+            _git(tmp_git, "config", "user.name", "Test User")
+            _git(tmp_git, "config", "user.email", "test@example.com")
+            _git(tmp_git, "checkout", "-q", "-b", "release/public-prototype-rc1")
+
+            c_init = _commit_file(tmp_git, "base.txt", "init\n", "Initial commit")
+
+            # Sibling branch 1 diverges from c_init
+            _git(tmp_git, "checkout", "-q", "-b", "sibling-branch-1", c_init)
+            c_sib1 = _commit_file(tmp_git, "sib1.txt", "sib1\n", "Sibling 1 commit")
+
+            # Advance release branch to c_mid
+            _git(tmp_git, "checkout", "-q", "release/public-prototype-rc1")
+            c_mid = _commit_file(tmp_git, "mid.txt", "mid\n", "Mid ancestor commit")
+
+            # Sibling branch 2 diverges from c_mid
+            _git(tmp_git, "checkout", "-q", "-b", "sibling-branch-2", c_mid)
+            c_sib2 = _commit_file(tmp_git, "sib2.txt", "sib2\n", "Sibling 2 commit")
+
+            # Advance release branch to HEAD (c_head)
+            _git(tmp_git, "checkout", "-q", "release/public-prototype-rc1")
+            c_head = _commit_file(tmp_git, "head.txt", "head\n", "Candidate HEAD commit")
+            self.assertNotEqual(c_head, c_mid)
+
+            # Positive case: exact merge bases (c_init for c_sib1, c_mid for c_sib2)
+            valid_superseded = [
+                {
+                    "checkout": "sibling_1_worktree",
+                    "commit_sha": c_sib1,
+                    "merge_base_with_candidate": c_init,
+                },
+                {
+                    "checkout": "sibling_2_worktree",
+                    "commit_sha": c_sib2,
+                    "merge_base_with_candidate": c_mid,
+                },
+            ]
+            errs, statuses = verify_superseded_merge_bases(tmp_git, valid_superseded)
+            self.assertEqual(errs, [])
+            self.assertEqual(len(statuses), 2)
+            self.assertEqual(statuses[0]["verification_status"], "verified_exact_merge_base")
+            self.assertEqual(statuses[0]["actual_merge_base"], c_init)
+            self.assertEqual(statuses[1]["verification_status"], "verified_exact_merge_base")
+            self.assertEqual(statuses[1]["actual_merge_base"], c_mid)
+
+            # Negative case A: wrong merge base that is still an ancestor of HEAD (c_mid instead of c_init for c_sib1)
+            wrong_mb_superseded = [
+                {
+                    "checkout": "sibling_1_worktree",
+                    "commit_sha": c_sib1,
+                    "merge_base_with_candidate": c_mid,
+                }
+            ]
+            wrong_errs, _ = verify_superseded_merge_bases(tmp_git, wrong_mb_superseded)
+            self.assertEqual(len(wrong_errs), 1)
+            self.assertIn(f"expected {c_init}, got {c_mid}", wrong_errs[0])
+
+            # Negative case B: linear ancestor (c_mid) falsely listed as non-ancestor
+            ancestor_superseded = [
+                {
+                    "checkout": "linear_ancestor_worktree",
+                    "commit_sha": c_mid,
+                    "merge_base_with_candidate": c_mid,
+                }
+            ]
+            anc_errs, _ = verify_superseded_merge_bases(tmp_git, ancestor_superseded)
+            self.assertEqual(len(anc_errs), 1)
+            self.assertIn("listed as non-ancestor but is an ancestor of HEAD", anc_errs[0])
+
+        # 2. Separate test for unavailable historical objects in a single-branch public clone
         allowlist_path = os.path.join(BASE_DIR, "RELEASE_ALLOWLIST.json")
         with open(allowlist_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         superseded = data["source_repository_lineage"]["superseded_non_ancestor_checkouts"]
 
-        # 1. Exact verification in canonical repo where historical objects exist
-        errs, statuses = verify_superseded_merge_bases(BASE_DIR, superseded)
-        self.assertEqual(errs, [])
-        self.assertEqual(len(statuses), 2)
-        for st in statuses:
-            self.assertEqual(st["verification_status"], "verified_exact_merge_base")
-            self.assertEqual(st["actual_merge_base"], st["recorded_merge_base"])
-
-        # Wrong merge base (still an ancestor of HEAD, like 5d5af00...) must be rejected
-        wrong_superseded = [
-            {
-                "checkout": "campaign2_fix_worktree",
-                "commit_sha": "b54d6a61715ef5dd22bb054fa5783aaa4cffdac8",
-                "merge_base_with_candidate": "5d5af00c564c600efde9394c94e9c39499257699",
-            }
-        ]
-        wrong_errs, _ = verify_superseded_merge_bases(BASE_DIR, wrong_superseded)
-        self.assertEqual(len(wrong_errs), 1)
-        self.assertIn("expected 96e04c94ef44b974301bbe9e4fedd2ba4281022d", wrong_errs[0])
-
-        # 2. Single-branch clone where unreferenced historical commits are absent
         with tempfile.TemporaryDirectory() as tmp:
             clone_dir = os.path.join(tmp, "public_clone")
             subprocess.run(
@@ -147,6 +209,7 @@ class TestReleaseHygiene(unittest.TestCase):
             )
             clone_errs, clone_statuses = verify_superseded_merge_bases(clone_dir, superseded)
             self.assertEqual(clone_errs, [])
+            self.assertEqual(len(clone_statuses), 2)
             for st in clone_statuses:
                 self.assertEqual(
                     st["verification_status"],
