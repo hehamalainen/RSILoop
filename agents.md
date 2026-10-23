@@ -64,6 +64,6 @@ flowchart TD
 
 ## 📈 Current Project State
 - Reference implementations, containment cages, archival verifiers, and simulation models pass under the host-contained sandbox framework.
-- Active verification suite (`run_tests.py`) runs 394 regression, containment, archival, simulation, sidecar, and release-hygiene tests with zero skips.
+- Active verification suite (`run_tests.py`) runs 395 regression, containment, archival, simulation, sidecar, and release-hygiene tests across 14 test modules with zero skips.
 - Campaign 2's non-mock Suite P pilot (`history/run_1786134848_cfb514d2/campaign2_pilot_report.json`) is sealed under `campaign_archive_manifest.json` and `campaign_claim_record.json` (terminated at the prespecified `no_headroom` stop rule).
 - Campaign 3's statistical design, P0/P1 governance records, cost model, and two-stage Monte Carlo calibration artifacts are sealed under `campaign3/`.
