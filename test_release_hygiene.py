@@ -46,6 +46,29 @@ class TestReleaseHygiene(unittest.TestCase):
         self.assertEqual(data["base_commit_sha"], "e6d5630adfdb91085a70e13ddf627757edbfaa98")
         self.assertIn("discovery_probe", data["allowed_top_level_directories"])
         self.assertIn("test_discovery_probe.py", data["allowed_root_files"])
+        self.assertIn("release_preflight_hashes.json", data["allowed_root_files"])
+
+        lineage = data["source_repository_lineage"]
+        direct_shas = [a["commit_sha"] for a in lineage["direct_git_ancestors"]]
+        self.assertEqual(
+            direct_shas,
+            [
+                "5d5af00c564c600efde9394c94e9c39499257699",
+                "f42a895a99fc5f3e7ccbfbfd9669ae4ce6ea0d3a",
+            ],
+        )
+        non_ancestor_shas = [a["commit_sha"] for a in lineage["superseded_non_ancestor_checkouts"]]
+        self.assertEqual(
+            non_ancestor_shas,
+            [
+                "b54d6a61715ef5dd22bb054fa5783aaa4cffdac8",
+                "0297eac73a82383d1146d834aab52a2a56cdcd06",
+            ],
+        )
+        self.assertEqual(data["allowed_publication_refs"], ["refs/heads/release/public-prototype-rc1"])
+        self.assertNotIn("refs/heads/main", data["allowed_publication_refs"])
+        self.assertIn("builder_worktree", lineage["dirty_working_tree_dispositions"])
+        self.assertIn("round7_fix_worktree", lineage["dirty_working_tree_dispositions"])
 
     def test_reseal_restores_0444_on_fresh_clone_and_rejects_tampered_claim_or_gitfile_governance(self):
         """

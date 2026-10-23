@@ -4,13 +4,75 @@
   "release_candidate_branch": "release/public-prototype-rc1",
   "base_commit_sha": "e6d5630adfdb91085a70e13ddf627757edbfaa98",
   "source_repository_lineage": {
-    "canonical_source": "campaign3_fresh_checkout (e6d5630adfdb91085a70e13ddf627757edbfaa98)",
-    "ancestry_supersets": [
-      "builder_worktree (5d5af00c564c600efde9394c94e9c39499257699)",
-      "campaign2_fix_worktree (b54d6a61715ef5dd22bb054fa5783aaa4cffdac8)",
-      "round7_fix_worktree (0297eac73a82383d1146d834aab52a2a56cdcd06)",
-      "rsi_loop (f42a895a99fc5f3e7ccbfbfd9669ae4ce6ea0d3a)"
+    "canonical_source": {
+      "checkout": "campaign3_fresh_checkout",
+      "commit_sha": "e6d5630adfdb91085a70e13ddf627757edbfaa98",
+      "relationship": "direct_base_commit"
+    },
+    "direct_git_ancestors": [
+      {
+        "checkout": "builder_worktree",
+        "commit_sha": "5d5af00c564c600efde9394c94e9c39499257699"
+      },
+      {
+        "checkout": "rsi_loop",
+        "commit_sha": "f42a895a99fc5f3e7ccbfbfd9669ae4ce6ea0d3a"
+      }
     ],
+    "superseded_non_ancestor_checkouts": [
+      {
+        "checkout": "campaign2_fix_worktree",
+        "commit_sha": "b54d6a61715ef5dd22bb054fa5783aaa4cffdac8",
+        "merge_base_with_candidate": "5d5af00c564c600efde9394c94e9c39499257699",
+        "relationship": "non_ancestor_sibling_branch_incorporated_via_work_order_a_rebuild"
+      },
+      {
+        "checkout": "round7_fix_worktree",
+        "commit_sha": "0297eac73a82383d1146d834aab52a2a56cdcd06",
+        "merge_base_with_candidate": "5d5af00c564c600efde9394c94e9c39499257699",
+        "relationship": "non_ancestor_sibling_branch_incorporated_via_work_order_a_rebuild"
+      }
+    ],
+    "dirty_working_tree_dispositions": {
+      "builder_worktree": {
+        "base_commit_sha": "5d5af00c564c600efde9394c94e9c39499257699",
+        "included_via_port": [
+          "discovery_probe/README.md",
+          "discovery_probe/__init__.py",
+          "discovery_probe/__main__.py",
+          "discovery_probe/engine.py",
+          "test_discovery_probe.py"
+        ],
+        "superseded_and_excluded": [
+          "README.md",
+          "rsi_loop.py",
+          "run_tests.py",
+          "test_rsi_loop.py"
+        ]
+      },
+      "round7_fix_worktree": {
+        "base_commit_sha": "0297eac73a82383d1146d834aab52a2a56cdcd06",
+        "incorporated_via_f42a895_and_excluded_as_raw_worktree": [
+          "README.md",
+          "docs/walkthrough.md",
+          "rsi_loop.py",
+          "run_tests.py",
+          "test_campaign2.py",
+          "test_campaign2_orchestration.py",
+          "campaign2_master_registration.json",
+          "campaign2_preflight_hashes.json",
+          "campaign2_registration_anchor.hash",
+          "campaign2/attempt_lifecycle.py",
+          "campaign2/durability.py",
+          "campaign2/manifest.py",
+          "campaign2/orchestrator.py",
+          "campaign2/proxy.py",
+          "campaign2/registration.py",
+          "campaign2/reporting.py",
+          "campaign2/attempt_identity.py"
+        ]
+      }
+    },
     "ported_sidecars": [
       "discovery_probe/",
       "test_discovery_probe.py"
@@ -26,8 +88,19 @@
     ]
   },
   "allowed_publication_refs": [
-    "refs/heads/release/public-prototype-rc1",
-    "refs/heads/main"
+    "refs/heads/release/public-prototype-rc1"
+  ],
+  "publication_ref_bindings": {
+    "refs/heads/release/public-prototype-rc1": {
+      "required_base_ancestor_sha": "e6d5630adfdb91085a70e13ddf627757edbfaa98",
+      "must_match_head": true
+    }
+  },
+  "excluded_local_branches": [
+    "refs/heads/campaign3-se2-clean",
+    "refs/heads/campaign2-work-order-a-rebuild",
+    "refs/heads/builder-canary-parity",
+    "refs/heads/diagnostic-run-1"
   ],
   "allowed_root_files": [
     ".gitignore",
@@ -57,6 +130,7 @@
     "generator.sb.template",
     "preflight_hashes.json",
     "pyproject.toml",
+    "release_preflight_hashes.json",
     "requirements.txt",
     "rsi_loop.py",
     "run_tests.py",

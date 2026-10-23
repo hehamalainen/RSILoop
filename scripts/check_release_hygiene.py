@@ -86,6 +86,123 @@ def run_hygiene_checks(workspace_root: str = BASE_DIR) -> Tuple[bool, List[str]]
         if os.path.lexists(os.path.join(workspace_root, cleaned)):
             errors.append(f"Excluded outer-workspace artifact present in release checkout: {excl}")
 
+    # 2b. Verify declared Git ancestry and publication ref bindings
+    lineage = allowlist_data.get("source_repository_lineage", {})
+    base_sha = allowlist_data.get("base_commit_sha", "")
+    direct_ancestors = lineage.get("direct_git_ancestors", [])
+    superseded_non_ancestors = lineage.get("superseded_non_ancestor_checkouts", [])
+    dirty_dispositions = lineage.get("dirty_working_tree_dispositions", {})
+
+    if not base_sha:
+        errors.append("Missing base_commit_sha in RELEASE_ALLOWLIST.json")
+    else:
+        res_base = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", base_sha, "HEAD"],
+            cwd=workspace_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if res_base.returncode != 0:
+            errors.append(f"Declared base_commit_sha {base_sha} is not a Git ancestor of HEAD")
+
+    for anc in direct_ancestors:
+        sha = anc.get("commit_sha", "")
+        name = anc.get("checkout", "")
+        res_anc = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
+            cwd=workspace_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if res_anc.returncode != 0:
+            errors.append(
+                f"Declared direct_git_ancestor {name} ({sha}) is not a Git ancestor of HEAD"
+            )
+
+    for non_anc in superseded_non_ancestors:
+        sha = non_anc.get("commit_sha", "")
+        name = non_anc.get("checkout", "")
+        mb_sha = non_anc.get("merge_base_with_candidate", "")
+        if not sha or not mb_sha:
+            errors.append(f"Incomplete superseded_non_ancestor_checkouts entry for {name}")
+            continue
+        res_mb = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", mb_sha, "HEAD"],
+            cwd=workspace_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if res_mb.returncode != 0:
+            errors.append(
+                f"Merge-base {mb_sha} for superseded checkout {name} is not an ancestor of HEAD"
+            )
+        # If object exists locally, confirm it is NOT a linear ancestor of HEAD
+        cat_res = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=workspace_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if cat_res.returncode == 0:
+            is_anc = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
+                cwd=workspace_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if is_anc.returncode == 0:
+                errors.append(
+                    f"Checkout {name} ({sha}) is listed as non-ancestor but is an ancestor of HEAD"
+                )
+
+    if "builder_worktree" not in dirty_dispositions or "round7_fix_worktree" not in dirty_dispositions:
+        errors.append(
+            "RELEASE_ALLOWLIST.json must record dirty_working_tree_dispositions for builder_worktree and round7_fix_worktree"
+        )
+
+    allowed_pub_refs = allowlist_data.get("allowed_publication_refs", [])
+    pub_bindings = allowlist_data.get("publication_ref_bindings", {})
+    head_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=workspace_root, text=True
+    ).strip()
+
+    if not allowed_pub_refs:
+        errors.append("RELEASE_ALLOWLIST.json allowed_publication_refs must not be empty")
+
+    for ref_name in allowed_pub_refs:
+        ref_res = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", ref_name],
+            cwd=workspace_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if ref_res.returncode != 0:
+            errors.append(f"Allowed publication ref does not exist in checkout: {ref_name}")
+            continue
+        ref_sha = subprocess.check_output(
+            ["git", "rev-parse", ref_name], cwd=workspace_root, text=True
+        ).strip()
+        binding = pub_bindings.get(ref_name)
+        if not isinstance(binding, dict):
+            errors.append(f"Missing publication_ref_bindings entry for {ref_name}")
+            continue
+        req_anc = binding.get("required_base_ancestor_sha", "")
+        if req_anc:
+            anc_res = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", req_anc, ref_sha],
+                cwd=workspace_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if anc_res.returncode != 0:
+                errors.append(
+                    f"Publication ref {ref_name} ({ref_sha}) does not descend from {req_anc}"
+                )
+        if binding.get("must_match_head") and ref_sha != head_sha:
+            errors.append(
+                f"Publication ref {ref_name} ({ref_sha}) does not match HEAD ({head_sha})"
+            )
+
     # 3. Inspect Git-tracked files against allowlist
     tracked_out = subprocess.check_output(
         ["git", "ls-files"], cwd=workspace_root, text=True
