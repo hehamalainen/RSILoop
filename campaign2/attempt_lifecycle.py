@@ -50,17 +50,17 @@ def is_permitted_local_retry(
     comp: Dict[str, Any],
     has_process_started: bool,
     *,
-    require_transport_evidence: bool = False,
+    require_transport_evidence: bool = True,
 ) -> bool:
     """
     Shared strict retry-eligibility predicate for both live execution and recovery.
 
-    When `require_transport_evidence=True` (Campaign 3 strict conformance), ONLY pre-exec
+    By default (`require_transport_evidence=True`, Campaign 3 strict conformance), ONLY pre-exec
     `spawn_failure` (`has_process_started is False`, `usage_known is True`, `tokens == 0`)
     is retryable; any post-spawn exit (`has_process_started is True`, `usage_known is False`)
     lacks transport-level proof that no request was transmitted and is rejected (`False`).
 
-    In legacy Campaign 2 archive mode (`require_transport_evidence=False`), a completion
+    In explicit legacy Campaign 2 archive mode (`require_transport_evidence=False`), a completion
     record is a permitted local retry IF AND ONLY IF it matches one of:
     1. spawn_failure:
        - has_process_started is False
@@ -469,8 +469,9 @@ def is_sealed_invalidated(run_dir: str, stage: str, attempt_id: str) -> bool:
 class AttemptLedger:
     """Append-only audit ledger tracking attempt lifecycle, call intents, and completions."""
 
-    def __init__(self, ledger_path: str):
+    def __init__(self, ledger_path: str, *, require_transport_evidence: bool = True):
         self.ledger_path = ledger_path
+        self.require_transport_evidence = bool(require_transport_evidence)
         self._max_call_counter = 0
         self.cumulative_calls = 0
         self.cumulative_tokens = 0
@@ -748,7 +749,11 @@ class AttemptLedger:
 
         return True
 
-    def verify_resume_admission(self) -> bool:
+    def verify_resume_admission(
+        self,
+        *,
+        require_transport_evidence: Optional[bool] = None,
+    ) -> bool:
         for entry in self.get_entries():
             if entry.get("record_type") == "terminal_classification":
                 raise AttemptLifecycleError(
@@ -795,4 +800,39 @@ class AttemptLedger:
                     raise AttemptLifecycleError(f"Credential residue found during resume admission scan: {auth_p}")
 
         self.verify_all_intents_completed()
-        return self.verify_three_record_protocol()
+        self.verify_three_record_protocol()
+        strict_transport = (
+            self.require_transport_evidence
+            if require_transport_evidence is None
+            else bool(require_transport_evidence)
+        )
+        entries = self.get_entries()
+        completes_by_call: Dict[str, List[Tuple[int, dict, bool]]] = {}
+        started_keys = {
+            (e.get("logical_call_id"), e.get("invocation_ordinal"))
+            for e in entries
+            if e.get("record_type") == "process_started"
+        }
+        for entry in entries:
+            if entry.get("record_type") == "invocation_completion":
+                cid = entry.get("logical_call_id")
+                ord_num = entry.get("invocation_ordinal")
+                if cid and isinstance(ord_num, int):
+                    completes_by_call.setdefault(cid, []).append(
+                        (ord_num, entry, (cid, ord_num) in started_keys)
+                    )
+        for cid, call_records in completes_by_call.items():
+            ordered = sorted(call_records, key=lambda item: item[0])
+            for ord_num, comp_rec, has_started in ordered[:-1]:
+                if not is_permitted_local_retry(
+                    comp_rec,
+                    has_started,
+                    require_transport_evidence=strict_transport,
+                ):
+                    raise AttemptLifecycleError(
+                        f"Ledger call '{cid}' contains unauthorized intermediate retry attempt "
+                        f"at ordinal {ord_num} (classification={comp_rec.get('classification')!r}, "
+                        f"parse_state={comp_rec.get('parse_state')!r}, "
+                        f"require_transport_evidence={strict_transport})"
+                    )
+        return True

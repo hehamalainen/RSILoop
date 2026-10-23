@@ -268,9 +268,13 @@ class Campaign2Orchestrator:
         checkpoint_mgr: Optional[CheckpointManager] = None,
         workspace_root: str = BASE_DIR,
         atomic_parent_feedback: bool = True,
+        require_transport_evidence: bool = True,
     ):
         self.model = model_provider
         self.atomic_parent_feedback = atomic_parent_feedback
+        self.require_transport_evidence = bool(require_transport_evidence)
+        if self.model is not None and hasattr(self.model, "require_transport_evidence"):
+            self.model.require_transport_evidence = self.require_transport_evidence
         if task_evaluator is None:
             from campaign2.model_provider import ProductionTaskEvaluator
             task_evaluator = ProductionTaskEvaluator()
@@ -278,6 +282,8 @@ class Campaign2Orchestrator:
         if self.evaluator is None:
             raise OrchestratorError("self.evaluator must not be None")
         self.ledger = ledger
+        if self.ledger is not None and hasattr(self.ledger, "require_transport_evidence"):
+            self.ledger.require_transport_evidence = self.require_transport_evidence
         self.checkpoint_mgr = checkpoint_mgr
 
         if suite not in ("suite_c", "suite_p"):

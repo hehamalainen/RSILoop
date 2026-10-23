@@ -695,8 +695,15 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
         parsed2 = parse_and_classify_jsonl_output(partial_bytes, b"HTTP 429 Too Many Requests\n", return_code=1)
         self.assertEqual(parsed2["classification"], "invalidated")
 
-        # Probe 3: Zero raw stdout + HTTP 429 in stderr -> RETRYABLE
-        parsed3 = parse_and_classify_jsonl_output(b"", b"HTTP 429 Too Many Requests\n", return_code=1)
+        # Probe 3: Zero raw stdout + HTTP 429 in stderr -> invalidated under default strict mode, RETRYABLE only under legacy require_transport_evidence=False
+        parsed3_default = parse_and_classify_jsonl_output(b"", b"HTTP 429 Too Many Requests\n", return_code=1)
+        self.assertEqual(parsed3_default["classification"], "invalidated")
+        parsed3 = parse_and_classify_jsonl_output(
+            b"",
+            b"HTTP 429 Too Many Requests\n",
+            return_code=1,
+            require_transport_evidence=False,
+        )
         self.assertEqual(parsed3["classification"], "transient_infrastructure_error")
 
     def test_canary_reconciliation_semantic_authentication(self):
@@ -1493,8 +1500,13 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
             canary_prompt_hash = hashlib.sha256(CANARY_NEUTRAL_PROMPT.encode("utf-8")).hexdigest()
             canary_text_hash = hashlib.sha256(CANARY_EXPECTED_RESPONSE.encode("utf-8")).hexdigest()
 
-            # Ordinal 1: Real parser-produced transient error (HTTP 429)
-            parsed1 = parse_and_classify_jsonl_output(stdout_bytes=b"", stderr_bytes=b"HTTP 429 Too Many Requests\n", return_code=1)
+            # Ordinal 1: Real parser-produced transient error (HTTP 429) in legacy Campaign 2 mode
+            parsed1 = parse_and_classify_jsonl_output(
+                stdout_bytes=b"",
+                stderr_bytes=b"HTTP 429 Too Many Requests\n",
+                return_code=1,
+                require_transport_evidence=False,
+            )
             self.assertEqual(parsed1["parse_state"], "nonzero_exit")
             self.assertEqual(parsed1["classification"], "transient_infrastructure_error")
             self.assertFalse(parsed1["usage_known"])
@@ -1545,7 +1557,10 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
                 "timestamp": time.time(),
             }
 
-            self.assertTrue(is_permitted_local_retry(comp1, has_process_started=True))
+            self.assertFalse(is_permitted_local_retry(comp1, has_process_started=True))
+            self.assertTrue(
+                is_permitted_local_retry(comp1, has_process_started=True, require_transport_evidence=False)
+            )
 
             # Ordinal 2: valid pass
             intent2 = {
@@ -1599,7 +1614,14 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
 
             model = mock.MagicMock()
-            data = run_pilot_canary("pilot", "att_r31_001", model, workspace_root=tmp_dir, ledger=ledger)
+            data = run_pilot_canary(
+                "pilot",
+                "att_r31_001",
+                model,
+                workspace_root=tmp_dir,
+                ledger=ledger,
+                require_transport_evidence=False,
+            )
             self.assertTrue(data["canary_passed"])
 
             reg = PreflightRegistry(stage="pilot", workspace_root=tmp_dir)
@@ -1631,7 +1653,13 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_master_registration.json"), os.path.join(tmp_dir, "campaign2_master_registration.json"))
             shutil.copy2(os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"), os.path.join(tmp_dir, "campaign2_registration_anchor.hash"))
 
-            provider = SolModelProvider(workspace_root=tmp_dir, ledger=ledger, mock_subprocess=False, attempt_id="att_r31_loop")
+            provider = SolModelProvider(
+                workspace_root=tmp_dir,
+                ledger=ledger,
+                mock_subprocess=False,
+                attempt_id="att_r31_loop",
+                require_transport_evidence=False,
+            )
 
             call_count = [0]
             def mock_popen(*args, **kwargs):
@@ -1679,7 +1707,10 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
             "raw_stdout_digest": hashlib.sha256(b"").hexdigest(),
             "raw_stderr_digest": "c" * 64,
         }
-        self.assertTrue(is_permitted_local_retry(valid_transient, has_process_started=True))
+        self.assertFalse(is_permitted_local_retry(valid_transient, has_process_started=True))
+        self.assertTrue(
+            is_permitted_local_retry(valid_transient, has_process_started=True, require_transport_evidence=False)
+        )
 
         valid_spawn = {
             "record_type": "invocation_completion",
@@ -1723,7 +1754,11 @@ class TestC1_14_Round24Invariants(unittest.TestCase):
         ]
 
         for label, mut_record, started_flag in mutations:
-            res = is_permitted_local_retry(mut_record, has_process_started=started_flag)
+            res = is_permitted_local_retry(
+                mut_record,
+                has_process_started=started_flag,
+                require_transport_evidence=False,
+            )
             self.assertFalse(res, f"Mutation '{label}' must be rejected by is_permitted_local_retry but returned True")
 
     def test_round31_record_usage_validates_inputs(self):
@@ -1861,11 +1896,16 @@ class TestC1a_LaunchPreflightHardening(unittest.TestCase):
             "raw_stdout_digest": empty_sha256,
             "raw_stderr_digest": valid_stderr_sha256,
         }
-        self.assertFalse(is_permitted_local_retry(synthetic_record, has_process_started=True))
+        self.assertFalse(
+            is_permitted_local_retry(synthetic_record, has_process_started=True, require_transport_evidence=False)
+        )
 
         real_record = dict(synthetic_record)
         real_record["parse_state"] = "nonzero_exit"
-        self.assertTrue(is_permitted_local_retry(real_record, has_process_started=True))
+        self.assertFalse(is_permitted_local_retry(real_record, has_process_started=True))
+        self.assertTrue(
+            is_permitted_local_retry(real_record, has_process_started=True, require_transport_evidence=False)
+        )
 
     def test_h3_digest_shape_validation_and_sentinel_matrix(self):
         """Verify missing/deleted required hashes fail closed, and empty task_file_hash is restricted to canary."""

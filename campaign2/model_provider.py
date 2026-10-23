@@ -320,7 +320,7 @@ def parse_and_classify_jsonl_output(
     stderr_bytes: bytes,
     return_code: int = 0,
     *,
-    require_transport_evidence: bool = False,
+    require_transport_evidence: bool = True,
 ) -> Dict[str, Any]:
     """
     Parses CLI JSONL output and classifies response strictly (C1-11, P0-3, P0-4).
@@ -329,12 +329,12 @@ def parse_and_classify_jsonl_output(
     classification is invalidated and retries are strictly forbidden.
     Requires exactly one turn.completed event as final line and non-empty final agent message.
 
-    Note on Campaign 2 vs Campaign 3 retry conformance (Finding 7):
-    When `require_transport_evidence=True` (Campaign 3 strict conformance), any non-zero CLI
-    exit lacks transport-level proof that zero request bytes were transmitted or processed
+    Note on Campaign 2 vs Campaign 3 retry conformance (Finding 7, R2):
+    By default (`require_transport_evidence=True`), any non-zero CLI exit lacks
+    transport-level proof that zero request bytes were transmitted or processed
     (`usage_known=False`), and is therefore classified as `"invalidated"` (non-retryable)
-    regardless of stderr keywords such as HTTP 429/503. The default (`False`) preserves
-    historical Campaign 2 archive replay compatibility only.
+    regardless of stderr keywords such as HTTP 429/503. Passing `require_transport_evidence=False`
+    is explicitly confined to historical Campaign 2 archive verification tests.
     """
     stdout_hash = hashlib.sha256(stdout_bytes).hexdigest()
     stderr_hash = hashlib.sha256(stderr_bytes).hexdigest()
@@ -522,7 +522,7 @@ class SolModelProvider(ModelProvider):
         ledger: Optional[Any] = None,
         mock_subprocess: bool = False,
         attempt_id: Optional[str] = None,
-        require_transport_evidence: bool = False,
+        require_transport_evidence: bool = True,
     ):
         self.model_name = model_name
         self.workspace_root = workspace_root

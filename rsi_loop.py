@@ -3375,7 +3375,8 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
     with open(os.path.join(ws_root, "campaign2_master_registration.json"), "rb") as reg_file:
         registration_sha256 = hashlib.sha256(reg_file.read()).hexdigest()
 
-    # 2. Bind all resume state to one explicit, sealed attempt identity.
+    # 2. Bind all resume state to one explicit, sealed attempt identity (including strict transport-evidence retry policy).
+    require_transport_evidence = True
     is_resume = getattr(args, "resume", False)
     if is_resume:
         identity = verify_attempt_identity(
@@ -3384,10 +3385,17 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
             expected_stage=stage,
             expected_mock=args.mock,
             expected_registration_sha256=registration_sha256,
+            expected_require_transport_evidence=require_transport_evidence,
         )
     else:
         identity = create_attempt_identity(
-            ctx.run_dir, ctx.run_id, stage, suite, args.mock, registration_sha256
+            ctx.run_dir,
+            ctx.run_id,
+            stage,
+            suite,
+            args.mock,
+            registration_sha256,
+            require_transport_evidence=require_transport_evidence,
         )
 
     if is_sealed_invalidated(ctx.run_dir, stage, identity["attempt_id"]):
@@ -3398,7 +3406,7 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
     # 3. Construct ledger and wrap all admission, recovery, provider init, and execution in terminal try block.
     ledger_path = os.path.join(ctx.run_dir, identity["ledger_file"])
     try:
-        ledger = AttemptLedger(ledger_path)
+        ledger = AttemptLedger(ledger_path, require_transport_evidence=require_transport_evidence)
     except AttemptLifecycleError as e:
         publish_sealed_invalidation(ctx.run_dir, stage, identity["attempt_id"], str(e))
         raise
@@ -3417,7 +3425,11 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
             if e.get("record_type") == "attempt_start" and e.get("attempt_id") == identity["attempt_id"]
         ]
         if not existing_starts:
-            ledger.record_attempt_start(identity["attempt_id"], stage)
+            ledger.record_attempt_start(
+                identity["attempt_id"],
+                stage,
+                metadata={"require_transport_evidence": require_transport_evidence},
+            )
 
         ledger.verify_resume_admission()
         ckpt_path = os.path.join(ctx.run_dir, identity["checkpoint_file"])
@@ -3438,9 +3450,23 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
             verify_codex_cli_version("codex")
             PreflightRegistry(stage=stage, workspace_root=mock_ws_root)
             cpu_record = run_prescientific_cpu_gate(mock_ws_root, is_mock=True)
-            model = SolModelProvider(model_name="gpt-5.6-sol", artifact_root=BASE_DIR, state_root=mock_ws_root, ledger=ledger, mock_subprocess=True)
+            model = SolModelProvider(
+                model_name="gpt-5.6-sol",
+                artifact_root=BASE_DIR,
+                state_root=mock_ws_root,
+                ledger=ledger,
+                mock_subprocess=True,
+                require_transport_evidence=require_transport_evidence,
+            )
             evaluator = ProductionTaskEvaluator()
-            run_pilot_canary(stage, identity["attempt_id"], model, mock_ws_root, ledger=ledger)
+            run_pilot_canary(
+                stage,
+                identity["attempt_id"],
+                model,
+                mock_ws_root,
+                ledger=ledger,
+                require_transport_evidence=require_transport_evidence,
+            )
             if is_resume:
                 verify_stage_scientific_start(stage, identity["attempt_id"], mock_ws_root)
             else:
@@ -3449,9 +3475,23 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
             verify_codex_cli_version("codex")
             PreflightRegistry(stage=stage, workspace_root=BASE_DIR)
             cpu_record = run_prescientific_cpu_gate(BASE_DIR, is_mock=False)
-            model = SolModelProvider(model_name="gpt-5.6-sol", artifact_root=BASE_DIR, state_root=BASE_DIR, ledger=ledger, mock_subprocess=False)
+            model = SolModelProvider(
+                model_name="gpt-5.6-sol",
+                artifact_root=BASE_DIR,
+                state_root=BASE_DIR,
+                ledger=ledger,
+                mock_subprocess=False,
+                require_transport_evidence=require_transport_evidence,
+            )
             evaluator = ProductionTaskEvaluator()
-            run_pilot_canary(stage, identity["attempt_id"], model, BASE_DIR, ledger=ledger)
+            run_pilot_canary(
+                stage,
+                identity["attempt_id"],
+                model,
+                BASE_DIR,
+                ledger=ledger,
+                require_transport_evidence=require_transport_evidence,
+            )
             if is_resume:
                 verify_stage_scientific_start(stage, identity["attempt_id"], BASE_DIR)
             else:
@@ -3467,6 +3507,7 @@ def _run_campaign2(args: argparse.Namespace, ctx: RunContext) -> None:
             ledger=ledger,
             checkpoint_mgr=ckpt_mgr,
             workspace_root=mock_ws_root if args.mock else BASE_DIR,
+            require_transport_evidence=require_transport_evidence,
         )
 
         results = orch.run_all_trials()

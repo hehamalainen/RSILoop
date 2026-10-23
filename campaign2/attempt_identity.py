@@ -54,6 +54,8 @@ def create_attempt_identity(
     suite: str,
     is_mock: bool,
     registration_sha256: str,
+    *,
+    require_transport_evidence: bool = True,
 ) -> dict:
     run_dir = os.path.realpath(run_dir)
     if not ATTEMPT_ID_RE.fullmatch(run_id) or os.path.basename(run_dir) != run_id:
@@ -66,6 +68,7 @@ def create_attempt_identity(
         "is_mock": bool(is_mock),
         "canonical_run_dir": run_dir,
         "registration_sha256": registration_sha256,
+        "require_transport_evidence": bool(require_transport_evidence),
         "checkpoint_file": f"campaign2_{stage}_checkpoint.json",
         "ledger_file": f"campaign2_{stage}_ledger.jsonl",
     }
@@ -84,6 +87,8 @@ def verify_attempt_identity(
     expected_stage: Optional[str] = None,
     expected_mock: Optional[bool] = None,
     expected_registration_sha256: Optional[str] = None,
+    *,
+    expected_require_transport_evidence: Optional[bool] = None,
 ) -> dict:
     run_dir = os.path.realpath(run_dir)
     content = _read_sealed(os.path.join(run_dir, IDENTITY_FILE))
@@ -101,11 +106,14 @@ def verify_attempt_identity(
         raise AttemptIdentityError("Attempt identity contains an invalid attempt_id")
     if data.get("canonical_run_dir") != run_dir or os.path.basename(run_dir) != attempt_id:
         raise AttemptIdentityError("Attempt identity is not bound to this canonical run directory")
+    if "require_transport_evidence" in data and type(data["require_transport_evidence"]) is not bool:
+        raise AttemptIdentityError("Attempt identity require_transport_evidence must be a boolean")
     checks = (
         ("attempt_id", expected_attempt_id),
         ("stage", expected_stage),
         ("is_mock", expected_mock),
         ("registration_sha256", expected_registration_sha256),
+        ("require_transport_evidence", expected_require_transport_evidence),
     )
     for field, expected in checks:
         if expected is not None and data.get(field) != expected:
@@ -120,6 +128,8 @@ def resolve_resume_attempt(
     attempt_id: str,
     stage: str,
     is_mock: bool,
+    *,
+    expected_require_transport_evidence: Optional[bool] = True,
 ) -> tuple[str, dict]:
     """Resolve exactly one named attempt.  No mtime or latest-run fallback exists."""
     if not ATTEMPT_ID_RE.fullmatch(attempt_id or ""):
@@ -133,5 +143,6 @@ def resolve_resume_attempt(
         expected_attempt_id=attempt_id,
         expected_stage=stage,
         expected_mock=is_mock,
+        expected_require_transport_evidence=expected_require_transport_evidence,
     )
     return run_dir, data

@@ -414,11 +414,22 @@ def run_pilot_canary(
     model_provider: Any,
     workspace_root: str = BASE_DIR,
     ledger: Optional[Any] = None,
+    *,
+    require_transport_evidence: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Executes or reconciles preflight pilot canary call (0o444 sealed, fsynced).
     """
     from campaign2.attempt_lifecycle import publish_scientific_start, AttemptLedger
+
+    if require_transport_evidence is None:
+        raw_model_attr = getattr(model_provider, "require_transport_evidence", None)
+        if type(raw_model_attr) is bool:
+            require_transport_evidence = raw_model_attr
+        elif ledger is not None and type(getattr(ledger, "require_transport_evidence", None)) is bool:
+            require_transport_evidence = ledger.require_transport_evidence
+        else:
+            require_transport_evidence = True
 
     registry = PreflightRegistry(stage=stage, workspace_root=workspace_root)
 
@@ -514,7 +525,11 @@ def run_pilot_canary(
                             and e.get("invocation_ordinal") == ord_num
                             for e in entries
                         )
-                        if not is_permitted_local_retry(prec_comp, has_started):
+                        if not is_permitted_local_retry(
+                            prec_comp,
+                            has_started,
+                            require_transport_evidence=require_transport_evidence,
+                        ):
                             reason = (
                                 f"Preflight canary call '{cid}' contains unauthorized intermediate retry attempt "
                                 f"(ordinal {ord_num}, classification='{prec_comp.get('classification')}', parse_state='{prec_comp.get('parse_state')}', usage_known={prec_comp.get('usage_known')})"

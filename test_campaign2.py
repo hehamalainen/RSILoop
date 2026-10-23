@@ -903,20 +903,37 @@ def parse_log_stream(s):
                 os.remove(sentinel_path)
 
     def test_37_strict_transport_evidence_blocks_unverified_stderr_retry(self):
-        """Finding 7 regression: verify require_transport_evidence=True invalidates post-spawn HTTP 429/503 stderr exits with usage_known=False."""
+        """Finding 7 & R2 regression: verify strict transport-evidence retry policy is default across parser, provider invocation, orchestrator, attempt identity, and resume admission."""
         import hashlib
-        from campaign2.model_provider import parse_and_classify_jsonl_output
-        from campaign2.attempt_lifecycle import is_permitted_local_retry
+        from unittest import mock
+        from campaign2.model_provider import (
+            ExecutableBoundaryError,
+            SolModelProvider,
+            parse_and_classify_jsonl_output,
+        )
+        from campaign2.attempt_lifecycle import (
+            AttemptLedger,
+            AttemptLifecycleError,
+            is_permitted_local_retry,
+        )
+        from campaign2.attempt_identity import (
+            AttemptIdentityError,
+            create_attempt_identity,
+            verify_attempt_identity,
+        )
+        from campaign2.orchestrator import Campaign2Orchestrator
+        from campaign2.registration import verify_master_registration
+        from campaign2.tier_assignment import generate_family_blocked_assignment
 
         for stderr_payload in (b"Error: HTTP 429 Too Many Requests\n", b"Error: 503 Service Unavailable\n"):
-            strict_parsed = parse_and_classify_jsonl_output(
+            # 1. Default call (no explicit keyword) enforces strict transport evidence
+            default_parsed = parse_and_classify_jsonl_output(
                 b"",
                 stderr_payload,
                 return_code=1,
-                require_transport_evidence=True,
             )
-            self.assertEqual(strict_parsed["classification"], "invalidated")
-            self.assertFalse(strict_parsed["usage_known"])
+            self.assertEqual(default_parsed["classification"], "invalidated")
+            self.assertFalse(default_parsed["usage_known"])
 
             legacy_parsed = parse_and_classify_jsonl_output(
                 b"",
@@ -938,14 +955,15 @@ def parse_log_stream(s):
                 "raw_stdout_digest": legacy_parsed["stdout_hash"],
                 "raw_stderr_digest": legacy_parsed["stderr_hash"],
             }
+            # Default predicate rejects post-spawn stderr retry
             self.assertFalse(
-                is_permitted_local_retry(comp_record, has_process_started=True, require_transport_evidence=True)
+                is_permitted_local_retry(comp_record, has_process_started=True)
             )
             self.assertTrue(
                 is_permitted_local_retry(comp_record, has_process_started=True, require_transport_evidence=False)
             )
 
-        # Pre-spawn OS failure (has_process_started=False, usage_known=True) remains retryable under strict mode
+        # 2. Pre-spawn OS failure (has_process_started=False, usage_known=True) remains retryable under strict mode
         spawn_fail_record = {
             "classification": "spawn_failure",
             "parse_state": "spawn_failure",
@@ -956,11 +974,144 @@ def parse_log_stream(s):
             "started_record_hash": "",
             "text_hash": "",
             "raw_stdout_digest": hashlib.sha256(b"").hexdigest(),
-            "raw_stderr_digest": hashlib.sha256(b"").hexdigest(),
+            "raw_stderr_digest": hashlib.sha256(b"spawn error").hexdigest(),
         }
         self.assertTrue(
-            is_permitted_local_retry(spawn_fail_record, has_process_started=False, require_transport_evidence=True)
+            is_permitted_local_retry(spawn_fail_record, has_process_started=False)
         )
+
+        # 3. Live provider invocation & orchestrator binding: post-spawn HTTP 429 fails closed on ordinal 1 without retrying
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            shutil.copy2(
+                os.path.join(BASE_DIR, "campaign2_master_registration.json"),
+                os.path.join(tmp_dir, "campaign2_master_registration.json"),
+            )
+            shutil.copy2(
+                os.path.join(BASE_DIR, "campaign2_registration_anchor.hash"),
+                os.path.join(tmp_dir, "campaign2_registration_anchor.hash"),
+            )
+            run_dir = os.path.join(tmp_dir, "run_strict_provider")
+            os.makedirs(run_dir, exist_ok=True)
+            ledger = AttemptLedger(os.path.join(run_dir, "campaign2_pilot_ledger.jsonl"))
+            provider = SolModelProvider(
+                workspace_root=tmp_dir,
+                ledger=ledger,
+                mock_subprocess=False,
+                attempt_id="run_strict_provider",
+            )
+            self.assertTrue(provider.require_transport_evidence)
+
+            reg_data = verify_master_registration(BASE_DIR)
+            ta_data = generate_family_blocked_assignment(BASE_DIR)
+            orch = Campaign2Orchestrator(
+                model_provider=provider,
+                task_evaluator=mock.MagicMock(),
+                tier_assignment=ta_data,
+                registration=reg_data,
+                suite="suite_p",
+                ledger=ledger,
+                workspace_root=tmp_dir,
+            )
+            self.assertTrue(orch.require_transport_evidence)
+            self.assertTrue(provider.require_transport_evidence)
+
+            call_count = [0]
+
+            def mock_popen(*args, **kwargs):
+                call_count[0] += 1
+                proc = mock.MagicMock()
+                proc.pid = 88000 + call_count[0]
+                proc.poll.return_value = 1
+                proc.wait.return_value = 1
+                proc.returncode = 1
+                proc.communicate.return_value = (b"", b"HTTP 429 Too Many Requests\n")
+                return proc
+
+            with mock.patch("campaign2.model_provider.setup_credential_home"), mock.patch(
+                "subprocess.Popen", side_effect=mock_popen
+            ):
+                with self.assertRaises(ExecutableBoundaryError):
+                    provider._execute_cli_call("strict_call_01", b"prompt", task_id="canary")
+            self.assertEqual(call_count[0], 1, "Default strict provider must not retry post-spawn HTTP 429")
+
+            # 4. Attempt identity binding and recovery rejection
+            ident = create_attempt_identity(
+                run_dir, "run_strict_provider", "pilot", "suite_p", True, "a" * 64
+            )
+            self.assertTrue(ident["require_transport_evidence"])
+            verified = verify_attempt_identity(
+                run_dir,
+                expected_attempt_id="run_strict_provider",
+                expected_require_transport_evidence=True,
+            )
+            self.assertTrue(verified["require_transport_evidence"])
+            with self.assertRaises(AttemptIdentityError):
+                verify_attempt_identity(
+                    run_dir,
+                    expected_attempt_id="run_strict_provider",
+                    expected_require_transport_evidence=False,
+                )
+
+            # 5. Resume admission rejects intermediate transient_infrastructure_error under default strict policy
+            bad_ledger = AttemptLedger(os.path.join(run_dir, "bad_resume_ledger.jsonl"))
+            i1 = {
+                "record_type": "invocation_intent",
+                "logical_call_id": "canary_pilot_strict_01",
+                "invocation_ordinal": 1,
+                "prompt_hash": "a" * 64,
+                "task_file_hash": "",
+                "argv_hash": "a" * 64,
+                "env_hash": "a" * 64,
+                "cwd_hash": "a" * 64,
+                "sandbox_profile_hash": "a" * 64,
+                "input_hash": "a" * 64,
+            }
+            i1_hash = hashlib.sha256((json.dumps(i1, sort_keys=True) + "\n").encode("utf-8")).hexdigest()
+            s1 = {
+                "record_type": "process_started",
+                "logical_call_id": "canary_pilot_strict_01",
+                "invocation_ordinal": 1,
+                "intent_record_hash": i1_hash,
+            }
+            s1_hash = hashlib.sha256((json.dumps(s1, sort_keys=True) + "\n").encode("utf-8")).hexdigest()
+            c1 = {
+                "record_type": "invocation_completion",
+                "logical_call_id": "canary_pilot_strict_01",
+                "invocation_ordinal": 1,
+                "intent_record_hash": i1_hash,
+                "started_record_hash": s1_hash,
+                "parse_state": "nonzero_exit",
+                "classification": "transient_infrastructure_error",
+                "usage_known": False,
+                "tokens": 0,
+                "return_code": 1,
+                "duration": 0.2,
+                "text_hash": "",
+                "raw_stdout_digest": hashlib.sha256(b"").hexdigest(),
+                "raw_stderr_digest": hashlib.sha256(b"HTTP 429\n").hexdigest(),
+            }
+            i2 = dict(i1, invocation_ordinal=2)
+            i2_hash = hashlib.sha256((json.dumps(i2, sort_keys=True) + "\n").encode("utf-8")).hexdigest()
+            s2 = dict(s1, invocation_ordinal=2, intent_record_hash=i2_hash)
+            s2_hash = hashlib.sha256((json.dumps(s2, sort_keys=True) + "\n").encode("utf-8")).hexdigest()
+            c2 = dict(
+                c1,
+                invocation_ordinal=2,
+                intent_record_hash=i2_hash,
+                started_record_hash=s2_hash,
+                parse_state="valid",
+                classification="valid",
+                usage_known=True,
+                tokens=10,
+                return_code=0,
+                text_hash="b" * 64,
+                raw_stdout_digest="c" * 64,
+            )
+            for rec in (i1, s1, c1, i2, s2, c2):
+                bad_ledger._append(rec)
+            with self.assertRaises(AttemptLifecycleError):
+                bad_ledger.verify_resume_admission()
+            self.assertTrue(bad_ledger.verify_resume_admission(require_transport_evidence=False))
 
 
 if __name__ == "__main__":
