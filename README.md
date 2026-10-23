@@ -24,10 +24,10 @@ This repository contains four distinct, self-contained components:
 ## Requirements & Installation
 
 - **Operating System**: macOS (requires `/usr/bin/sandbox-exec` for Seatbelt containment profiles)
-- **Python**: Python `3.11+` (tested on Python 3.11–3.14)
-- **Runtime Dependencies**: `requirements.txt` pins `numpy==2.5.1` (the exact tested reproducibility constraint recorded in archived Campaign 3 evidence `campaign3/sim/moments_report.json`); broader NumPy versions (`numpy>=1.26.0` in `pyproject.toml`) are also supported with cross-version numerical verification in `test_campaign3_sim_model.py`.
+- **Pinned Reproduction Environment (`requirements.txt`)**: **Python `3.12+`** (tested on Python 3.12–3.14) with `numpy==2.5.1` (upstream `numpy==2.5.1` requires `Python >=3.12`), matching the exact environment identity recorded in archived Campaign 3 evidence (`campaign3/sim/moments_report.json`) and verified by `verify_env.py --offline`.
+- **Broader Package Compatibility (`pyproject.toml`)**: Supports `Python >=3.11` with `numpy>=1.26.0` (via `.venv/bin/pip install -e .`), separating historical environment identity from cross-version numerical verification in `test_campaign3_sim_model.py`.
 
-Create a virtual environment, install dependencies, and run the offline environment & artifact verifier:
+Create a **Python 3.12+** virtual environment, install the pinned reproduction dependencies, and run the offline environment & artifact verifier:
 
 ```bash
 python3 -m venv .venv

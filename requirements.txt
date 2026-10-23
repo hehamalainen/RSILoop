@@ -1,8 +1,10 @@
-# Tested reproducibility constraints (Python 3.11+)
-# Pinned to numpy==2.5.1 to match the exact environment identity recorded in
-# archived Campaign 3 simulation evidence (campaign3/sim/moments_report.json).
-# Broader versions (numpy>=1.26.0 in pyproject.toml) are supported via
-# cross-version numerical verification in test_campaign3_sim_model.py.
+# Pinned reproduction environment constraints (requires Python >=3.12)
+# Pinned to numpy==2.5.1 (upstream requires-python >=3.12) to match the exact
+# environment identity recorded in archived Campaign 3 simulation evidence
+# (campaign3/sim/moments_report.json).
+# For broader package compatibility (Python >=3.11 with numpy>=1.26.0), install
+# via pyproject.toml (`pip install -e .`); test_campaign3_sim_model.py separates
+# historical environment identity from cross-version numerical verification.
 numpy==2.5.1
 
 # Optional provider SDKs used only by verify_env.py live environment diagnostics:

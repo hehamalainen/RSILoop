@@ -386,8 +386,14 @@ class TestReleaseHygiene(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(os.lstat(claim_p).st_mode), 0o444)
 
     def test_verify_env_offline_mode_succeeds_without_dotenv_or_api_keys(self):
-        """R6 regression test: verify_env.py --offline succeeds without ~/.env or optional SDKs."""
+        """
+        R6 & Round 3 Finding 2 regression test:
+        1. verify_env.py --offline succeeds without ~/.env or optional SDKs on Python >= 3.12.
+        2. verify_env.check_offline_environment rejects Python < 3.12 for the pinned
+           numpy==2.5.1 reproduction environment.
+        """
         import sys
+        from unittest import mock
         import verify_env
 
         ok, details = verify_env.check_offline_environment(BASE_DIR)
@@ -398,6 +404,21 @@ class TestReleaseHygiene(unittest.TestCase):
         self.assertTrue(details["sandbox_exec_ok"])
         self.assertTrue(details["sealed_artifacts_ok"])
         self.assertTrue(details["manifest_ok"])
+
+        class _MockVersionInfo(tuple):
+            major = 3
+            minor = 11
+            micro = 9
+
+        with mock.patch.object(
+            verify_env.sys, "version_info", _MockVersionInfo((3, 11, 9, "final", 0))
+        ):
+            ok_311, details_311 = verify_env.check_offline_environment(BASE_DIR)
+            self.assertFalse(ok_311)
+            self.assertFalse(details_311["python_ok"])
+            self.assertTrue(
+                any("Python 3.12+ required" in e for e in details_311["errors"])
+            )
 
         with tempfile.TemporaryDirectory() as empty_home:
             env = dict(os.environ)
@@ -414,6 +435,7 @@ class TestReleaseHygiene(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, f"verify_env.py --offline failed: {proc.stderr}\n{proc.stdout}")
             self.assertIn("Offline Environment & Integrity Check", proc.stdout)
+            self.assertIn(">= 3.12 reproduction environment", proc.stdout)
             self.assertNotIn("~/.env", proc.stdout)
 
 

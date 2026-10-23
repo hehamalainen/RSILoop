@@ -4,8 +4,9 @@ Environment verification utility for RSILoop.
 
 Supports two modes:
 - `python3 verify_env.py --offline`: Verifies offline research-prototype requirements
-  (Python >= 3.11, `numpy`, macOS `/usr/bin/sandbox-exec`, and sealed artifact/manifest
-  integrity) without reading `~/.env`, requiring API keys, or importing optional provider SDKs.
+  for the pinned reproduction environment (Python >= 3.12, `numpy`, macOS
+  `/usr/bin/sandbox-exec`, and sealed artifact/manifest integrity) without reading
+  `~/.env`, requiring API keys, or importing optional provider SDKs.
 - `python3 verify_env.py`: Performs the offline checks plus optional live-provider checks
   (`~/.env` API keys, CLI tools, and optional provider SDK packages).
 """
@@ -46,11 +47,14 @@ def check_offline_environment(workspace_root: str = BASE_DIR) -> Tuple[bool, Dic
         "errors": errors,
     }
 
-    if sys.version_info >= (3, 11):
+    if sys.version_info >= (3, 12):
         details["python_ok"] = True
-        print(f"[+] Python version {details['python_version']} (>= 3.11)")
+        print(f"[+] Python version {details['python_version']} (>= 3.12 reproduction environment)")
     else:
-        msg = f"Python 3.11+ required, found {details['python_version']}"
+        msg = (
+            f"Python 3.12+ required for pinned reproduction environment (numpy==2.5.1), "
+            f"found {details['python_version']}"
+        )
         errors.append(msg)
         print(f"[-] {msg}")
 
@@ -59,7 +63,15 @@ def check_offline_environment(workspace_root: str = BASE_DIR) -> Tuple[bool, Dic
 
         details["numpy_ok"] = True
         details["numpy_version"] = getattr(np, "__version__", "unknown")
-        print(f"[+] Required package 'numpy' is installed (version {details['numpy_version']})")
+        details["pinned_reproduction_numpy"] = details["numpy_version"] == "2.5.1"
+        mode_note = (
+            "matches pinned reproduction constraint numpy==2.5.1"
+            if details["pinned_reproduction_numpy"]
+            else "cross-version compatible (numpy>=1.26.0)"
+        )
+        print(
+            f"[+] Required package 'numpy' is installed (version {details['numpy_version']}; {mode_note})"
+        )
     except ImportError as exc:
         msg = f"Required package 'numpy' is NOT installed: {exc}"
         errors.append(msg)
@@ -171,7 +183,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--offline",
         action="store_true",
-        help="Verify offline requirements (Python >= 3.11, numpy, sandbox-exec, sealed artifacts) without checking ~/.env or optional LLM SDKs.",
+        help="Verify offline requirements (Python >= 3.12, numpy, sandbox-exec, sealed artifacts) without checking ~/.env or optional LLM SDKs.",
     )
     args = parser.parse_args(argv)
 
