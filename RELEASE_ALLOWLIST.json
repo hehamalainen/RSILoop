@@ -23,13 +23,13 @@
       {
         "checkout": "campaign2_fix_worktree",
         "commit_sha": "b54d6a61715ef5dd22bb054fa5783aaa4cffdac8",
-        "merge_base_with_candidate": "5d5af00c564c600efde9394c94e9c39499257699",
+        "merge_base_with_candidate": "96e04c94ef44b974301bbe9e4fedd2ba4281022d",
         "relationship": "non_ancestor_sibling_branch_incorporated_via_work_order_a_rebuild"
       },
       {
         "checkout": "round7_fix_worktree",
         "commit_sha": "0297eac73a82383d1146d834aab52a2a56cdcd06",
-        "merge_base_with_candidate": "5d5af00c564c600efde9394c94e9c39499257699",
+        "merge_base_with_candidate": "dbe1f8f0d2198573e45822c8af8c0c7e77e1f4f0",
         "relationship": "non_ancestor_sibling_branch_incorporated_via_work_order_a_rebuild"
       }
     ],

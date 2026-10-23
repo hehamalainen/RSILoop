@@ -8,7 +8,11 @@ import subprocess
 import tempfile
 import unittest
 
-from scripts.check_release_hygiene import BASE_DIR, run_hygiene_checks
+from scripts.check_release_hygiene import (
+    BASE_DIR,
+    run_hygiene_checks,
+    verify_superseded_merge_bases,
+)
 from scripts.reseal_readonly_artifacts import (
     ResealVerificationError,
     ensure_readonly_artifact_modes,
@@ -65,10 +69,99 @@ class TestReleaseHygiene(unittest.TestCase):
                 "0297eac73a82383d1146d834aab52a2a56cdcd06",
             ],
         )
+        non_ancestor_mbs = {
+            a["commit_sha"]: a["merge_base_with_candidate"]
+            for a in lineage["superseded_non_ancestor_checkouts"]
+        }
+        self.assertEqual(
+            non_ancestor_mbs,
+            {
+                "b54d6a61715ef5dd22bb054fa5783aaa4cffdac8": "96e04c94ef44b974301bbe9e4fedd2ba4281022d",
+                "0297eac73a82383d1146d834aab52a2a56cdcd06": "dbe1f8f0d2198573e45822c8af8c0c7e77e1f4f0",
+            },
+        )
         self.assertEqual(data["allowed_publication_refs"], ["refs/heads/release/public-prototype-rc1"])
         self.assertNotIn("refs/heads/main", data["allowed_publication_refs"])
         self.assertIn("builder_worktree", lineage["dirty_working_tree_dispositions"])
         self.assertIn("round7_fix_worktree", lineage["dirty_working_tree_dispositions"])
+
+    def test_superseded_merge_base_verification_exact_and_public_clone_unavailable_reporting(self):
+        """
+        Regression test for Round 2 Finding 3:
+        1. When historical objects are present locally, verify_superseded_merge_bases compares
+           actual git merge-base mechanically and rejects wrong merge bases (e.g. 5d5af00...).
+        2. In a single-branch public clone where unreferenced historical objects are absent,
+           verify_superseded_merge_bases and check_release_hygiene.py explicitly report
+           not_performed_historical_object_unavailable.
+        """
+        import sys
+
+        allowlist_path = os.path.join(BASE_DIR, "RELEASE_ALLOWLIST.json")
+        with open(allowlist_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        superseded = data["source_repository_lineage"]["superseded_non_ancestor_checkouts"]
+
+        # 1. Exact verification in canonical repo where historical objects exist
+        errs, statuses = verify_superseded_merge_bases(BASE_DIR, superseded)
+        self.assertEqual(errs, [])
+        self.assertEqual(len(statuses), 2)
+        for st in statuses:
+            self.assertEqual(st["verification_status"], "verified_exact_merge_base")
+            self.assertEqual(st["actual_merge_base"], st["recorded_merge_base"])
+
+        # Wrong merge base (still an ancestor of HEAD, like 5d5af00...) must be rejected
+        wrong_superseded = [
+            {
+                "checkout": "campaign2_fix_worktree",
+                "commit_sha": "b54d6a61715ef5dd22bb054fa5783aaa4cffdac8",
+                "merge_base_with_candidate": "5d5af00c564c600efde9394c94e9c39499257699",
+            }
+        ]
+        wrong_errs, _ = verify_superseded_merge_bases(BASE_DIR, wrong_superseded)
+        self.assertEqual(len(wrong_errs), 1)
+        self.assertIn("expected 96e04c94ef44b974301bbe9e4fedd2ba4281022d", wrong_errs[0])
+
+        # 2. Single-branch clone where unreferenced historical commits are absent
+        with tempfile.TemporaryDirectory() as tmp:
+            clone_dir = os.path.join(tmp, "public_clone")
+            subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--quiet",
+                    "--single-branch",
+                    "--branch",
+                    "release/public-prototype-rc1",
+                    f"file://{BASE_DIR}",
+                    clone_dir,
+                ],
+                check=True,
+            )
+            shutil.copy2(
+                os.path.join(BASE_DIR, "RELEASE_ALLOWLIST.json"),
+                os.path.join(clone_dir, "RELEASE_ALLOWLIST.json"),
+            )
+            shutil.copy2(
+                os.path.join(BASE_DIR, "scripts", "check_release_hygiene.py"),
+                os.path.join(clone_dir, "scripts", "check_release_hygiene.py"),
+            )
+            clone_errs, clone_statuses = verify_superseded_merge_bases(clone_dir, superseded)
+            self.assertEqual(clone_errs, [])
+            for st in clone_statuses:
+                self.assertEqual(
+                    st["verification_status"],
+                    "not_performed_historical_object_unavailable",
+                )
+
+            proc = subprocess.run(
+                [sys.executable, os.path.join(clone_dir, "scripts", "check_release_hygiene.py")],
+                cwd=clone_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("not_performed_historical_object_unavailable", proc.stdout)
 
     def test_reseal_restores_0444_on_fresh_clone_and_rejects_tampered_claim_or_gitfile_governance(self):
         """

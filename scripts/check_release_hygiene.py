@@ -51,6 +51,99 @@ LIVE_SECRET_PATTERNS: List[Tuple[str, re.Pattern[str]]] = [
 ]
 
 
+def verify_superseded_merge_bases(
+    workspace_root: str, superseded_non_ancestors: List[Dict[str, str]]
+) -> Tuple[List[str], List[Dict[str, str]]]:
+    """
+    Verify recorded merge bases for superseded non-ancestor checkouts.
+    - Always verifies that `merge_base_with_candidate` is an ancestor of HEAD.
+    - When the historical commit object (`commit_sha`) is present in the local Git
+      object store, mechanically computes `git merge-base <commit_sha> HEAD`, verifies
+      it equals `merge_base_with_candidate`, and verifies `<commit_sha>` is not an
+      ancestor of HEAD.
+    - When the historical commit object is absent (e.g., in a public single-branch clone),
+      explicitly reports `not_performed_historical_object_unavailable`.
+    """
+    errors: List[str] = []
+    statuses: List[Dict[str, str]] = []
+
+    for non_anc in superseded_non_ancestors:
+        sha = non_anc.get("commit_sha", "")
+        name = non_anc.get("checkout", "")
+        mb_sha = non_anc.get("merge_base_with_candidate", "")
+        if not sha or not mb_sha:
+            errors.append(f"Incomplete superseded_non_ancestor_checkouts entry for {name}")
+            continue
+
+        res_mb = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", mb_sha, "HEAD"],
+            cwd=workspace_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if res_mb.returncode != 0:
+            errors.append(
+                f"Merge-base {mb_sha} for superseded checkout {name} is not an ancestor of HEAD"
+            )
+
+        cat_res = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=workspace_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if cat_res.returncode == 0:
+            is_anc = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
+                cwd=workspace_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if is_anc.returncode == 0:
+                errors.append(
+                    f"Checkout {name} ({sha}) is listed as non-ancestor but is an ancestor of HEAD"
+                )
+            mb_calc = subprocess.run(
+                ["git", "merge-base", sha, "HEAD"],
+                cwd=workspace_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if mb_calc.returncode != 0:
+                errors.append(
+                    f"Failed to compute git merge-base between {name} ({sha}) and HEAD"
+                )
+            else:
+                actual_mb = mb_calc.stdout.strip()
+                if actual_mb != mb_sha:
+                    errors.append(
+                        f"Recorded merge_base_with_candidate for {name} ({sha}) is incorrect: "
+                        f"expected {actual_mb}, got {mb_sha}"
+                    )
+                statuses.append(
+                    {
+                        "checkout": name,
+                        "commit_sha": sha,
+                        "recorded_merge_base": mb_sha,
+                        "actual_merge_base": actual_mb,
+                        "verification_status": "verified_exact_merge_base",
+                    }
+                )
+        else:
+            statuses.append(
+                {
+                    "checkout": name,
+                    "commit_sha": sha,
+                    "recorded_merge_base": mb_sha,
+                    "actual_merge_base": "",
+                    "verification_status": "not_performed_historical_object_unavailable",
+                }
+            )
+
+    return errors, statuses
+
+
 def run_hygiene_checks(workspace_root: str = BASE_DIR) -> Tuple[bool, List[str]]:
     errors: List[str] = []
 
@@ -119,41 +212,8 @@ def run_hygiene_checks(workspace_root: str = BASE_DIR) -> Tuple[bool, List[str]]
                 f"Declared direct_git_ancestor {name} ({sha}) is not a Git ancestor of HEAD"
             )
 
-    for non_anc in superseded_non_ancestors:
-        sha = non_anc.get("commit_sha", "")
-        name = non_anc.get("checkout", "")
-        mb_sha = non_anc.get("merge_base_with_candidate", "")
-        if not sha or not mb_sha:
-            errors.append(f"Incomplete superseded_non_ancestor_checkouts entry for {name}")
-            continue
-        res_mb = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", mb_sha, "HEAD"],
-            cwd=workspace_root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if res_mb.returncode != 0:
-            errors.append(
-                f"Merge-base {mb_sha} for superseded checkout {name} is not an ancestor of HEAD"
-            )
-        # If object exists locally, confirm it is NOT a linear ancestor of HEAD
-        cat_res = subprocess.run(
-            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
-            cwd=workspace_root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if cat_res.returncode == 0:
-            is_anc = subprocess.run(
-                ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
-                cwd=workspace_root,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            if is_anc.returncode == 0:
-                errors.append(
-                    f"Checkout {name} ({sha}) is listed as non-ancestor but is an ancestor of HEAD"
-                )
+    mb_errors, _ = verify_superseded_merge_bases(workspace_root, superseded_non_ancestors)
+    errors.extend(mb_errors)
 
     if "builder_worktree" not in dirty_dispositions or "round7_fix_worktree" not in dirty_dispositions:
         errors.append(
@@ -245,6 +305,30 @@ def run_hygiene_checks(workspace_root: str = BASE_DIR) -> Tuple[bool, List[str]]
 
 def main() -> int:
     ok, errors = run_hygiene_checks(BASE_DIR)
+    allowlist_path = os.path.join(BASE_DIR, "RELEASE_ALLOWLIST.json")
+    statuses: List[Dict[str, str]] = []
+    if os.path.isfile(allowlist_path):
+        with open(allowlist_path, "r", encoding="utf-8") as f:
+            allowlist_data = json.load(f)
+        superseded = allowlist_data.get("source_repository_lineage", {}).get(
+            "superseded_non_ancestor_checkouts", []
+        )
+        _, statuses = verify_superseded_merge_bases(BASE_DIR, superseded)
+
+    for st in statuses:
+        if st["verification_status"] == "verified_exact_merge_base":
+            sys.stdout.write(
+                f"Superseded checkout {st['checkout']} ({st['commit_sha']}): "
+                f"verified exact merge-base {st['actual_merge_base']}\n"
+            )
+        else:
+            sys.stdout.write(
+                f"Superseded checkout {st['checkout']} ({st['commit_sha']}): "
+                f"historical commit object unavailable in clone; verified recorded merge-base "
+                f"{st['recorded_merge_base']} is ancestor of HEAD "
+                f"(exact merge-base comparison: {st['verification_status']})\n"
+            )
+
     if not ok:
         sys.stderr.write("FATAL: Release hygiene verification failed:\n")
         for err in errors:
