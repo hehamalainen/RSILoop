@@ -145,6 +145,90 @@ class TestReleaseHygiene(unittest.TestCase):
             self.assertIn("not a valid Git work tree", str(ctx_nogit.exception))
             self.assertEqual(stat.S_IMODE(os.lstat(preflight_p).st_mode), 0o644)
 
+    def test_reseal_rejects_absolute_paths_and_unexpected_inventory_without_changing_permissions(self):
+        """
+        Regression test for Round 2 Finding 1 (out-of-checkout permission change):
+        1. Adding an absolute path key to release_preflight_hashes.json (or campaign2_evidence_hashes.json)
+           along with a matching stripped-path file inside the checkout must raise ResealVerificationError
+           and leave both the external sentinel (0o600) and all internal checkout files (0o644) untouched.
+        2. Adding an unexpected relative path key to release_preflight_hashes.json or campaign2_evidence_hashes.json
+           must raise ResealVerificationError before any permission change.
+        """
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as tmp:
+            clone_dir = os.path.join(tmp, "clone")
+            ext_dir = os.path.join(tmp, "external_secret")
+            os.makedirs(ext_dir, exist_ok=True)
+            ext_sentinel = os.path.join(ext_dir, "sentinel.txt")
+            sentinel_bytes = b"external-private-sentinel\n"
+            sentinel_sha = hashlib.sha256(sentinel_bytes).hexdigest()
+            with open(ext_sentinel, "wb") as f:
+                f.write(sentinel_bytes)
+            os.chmod(ext_sentinel, 0o600)
+
+            subprocess.run(["git", "clone", "--quiet", BASE_DIR, clone_dir], check=True)
+
+            # Matching stripped path inside the checkout (reproducing the exact reviewer exploit)
+            internal_mirror = os.path.join(clone_dir, ext_sentinel.lstrip(os.sep))
+            os.makedirs(os.path.dirname(internal_mirror), exist_ok=True)
+            with open(internal_mirror, "wb") as f:
+                f.write(sentinel_bytes)
+            os.chmod(internal_mirror, 0o644)
+
+            release_preflight_p = os.path.join(clone_dir, "release_preflight_hashes.json")
+            claim_p = os.path.join(clone_dir, "campaign_claim_record.json")
+            hist_preflight_p = os.path.join(clone_dir, "campaign2_preflight_hashes.json")
+
+            with open(release_preflight_p, "r", encoding="utf-8") as f:
+                orig_preflight = json.load(f)
+
+            # Subcase A: Absolute path key injected into release_preflight_hashes.json
+            malformed_abs = dict(orig_preflight)
+            malformed_abs[ext_sentinel] = sentinel_sha
+            with open(release_preflight_p, "w", encoding="utf-8") as f:
+                json.dump(malformed_abs, f, indent=2, sort_keys=True)
+
+            with self.assertRaises(ResealVerificationError) as ctx_abs:
+                ensure_readonly_artifact_modes(clone_dir)
+            self.assertIn("Absolute", str(ctx_abs.exception))
+            self.assertEqual(stat.S_IMODE(os.lstat(ext_sentinel).st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(os.lstat(internal_mirror).st_mode), 0o644)
+            self.assertEqual(stat.S_IMODE(os.lstat(claim_p).st_mode), 0o644)
+            self.assertEqual(stat.S_IMODE(os.lstat(hist_preflight_p).st_mode), 0o644)
+
+            # Subcase B: Unexpected in-checkout relative path key injected into release_preflight_hashes.json
+            unexpected_rel = "unexpected_extra_artifact.txt"
+            unexpected_abs = os.path.join(clone_dir, unexpected_rel)
+            with open(unexpected_abs, "wb") as f:
+                f.write(sentinel_bytes)
+            os.chmod(unexpected_abs, 0o644)
+
+            malformed_rel = dict(orig_preflight)
+            malformed_rel[unexpected_rel] = sentinel_sha
+            with open(release_preflight_p, "w", encoding="utf-8") as f:
+                json.dump(malformed_rel, f, indent=2, sort_keys=True)
+
+            with self.assertRaises(ResealVerificationError) as ctx_rel:
+                ensure_readonly_artifact_modes(clone_dir)
+            self.assertIn("Inventory mismatch", str(ctx_rel.exception))
+            self.assertEqual(stat.S_IMODE(os.lstat(ext_sentinel).st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(os.lstat(unexpected_abs).st_mode), 0o644)
+            self.assertEqual(stat.S_IMODE(os.lstat(claim_p).st_mode), 0o644)
+            self.assertEqual(stat.S_IMODE(os.lstat(hist_preflight_p).st_mode), 0o644)
+
+            # Restore clean manifest and remove temporary injected files; verify resealing then succeeds
+            with open(release_preflight_p, "w", encoding="utf-8") as f:
+                json.dump(orig_preflight, f, indent=2, sort_keys=True)
+                f.write("\n")
+            os.remove(unexpected_abs)
+            shutil.rmtree(os.path.join(clone_dir, ext_sentinel.lstrip(os.sep).split(os.sep)[0]))
+
+            verified_count, _ = ensure_readonly_artifact_modes(clone_dir)
+            self.assertEqual(verified_count, 194)
+            self.assertEqual(stat.S_IMODE(os.lstat(ext_sentinel).st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(os.lstat(claim_p).st_mode), 0o444)
+
     def test_verify_env_offline_mode_succeeds_without_dotenv_or_api_keys(self):
         """R6 regression test: verify_env.py --offline succeeds without ~/.env or optional SDKs."""
         import sys
