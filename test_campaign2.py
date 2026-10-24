@@ -511,7 +511,8 @@ def parse_log_stream(stream, cb=None):
         bad_import_cand = "import non_existent_package_xyz_999\ndef parse_log_stream(s):\n    return []"
         earned, max_s, is_valid, err_trace = evaluate_candidate_code_sandboxed(task_id, bad_import_cand)
         self.assertEqual((earned, max_s, is_valid), (0, 10, False))
-        self.assertIn("non_existent_package_xyz_999", err_trace)
+        self.assertIn("CandidateImportError", err_trace)
+        self.assertNotIn("non_existent_package_xyz_999", err_trace)
 
     def test_25_no_hidden_ast_policy_and_waits_invalidate_attempt(self):
         """Candidate semantics are unbiased; unattributed residual waits are campaign-fatal."""
@@ -820,6 +821,8 @@ def parse_log_stream(stream, cb=None):
         earned, max_s, is_valid, err_trace = evaluate_candidate_code_sandboxed(task_id, bad_import_cand, timeout_seconds=5)
         self.assertEqual((earned, max_s, is_valid), (0, 10, False))
         self.assertIn("CandidateImportError", err_trace)
+        self.assertIn("RuntimeError", err_trace)
+        self.assertNotIn("Top-level import failure", err_trace)
 
         # 2. Runtime exception on first call then success -> valid (1, 10, True, CandidateException)
         early_runtime_cand = """
@@ -834,14 +837,16 @@ def parse_log_stream(s):
         earned_e, max_e, is_valid_e, err_trace_e = evaluate_candidate_code_sandboxed(task_id, early_runtime_cand, timeout_seconds=5)
         self.assertEqual((earned_e, max_e, is_valid_e), (2, 10, True))
         self.assertIn("CandidateException", err_trace_e)
-        self.assertIn("Early runtime error", err_trace_e)
+        self.assertIn("ValueError", err_trace_e)
+        self.assertNotIn("Early runtime error", err_trace_e)
 
         # 3. Runtime exception on all calls -> valid (0, 10, True, CandidateException)
         runtime_always_cand = "def parse_log_stream(s):\n    raise KeyError('Runtime error always')"
         earned_a, max_a, is_valid_a, err_trace_a = evaluate_candidate_code_sandboxed(task_id, runtime_always_cand, timeout_seconds=5)
         self.assertEqual((earned_a, max_a, is_valid_a), (0, 10, True))
         self.assertIn("CandidateException", err_trace_a)
-        self.assertIn("Runtime error always", err_trace_a)
+        self.assertIn("KeyError", err_trace_a)
+        self.assertNotIn("Runtime error always", err_trace_a)
 
     def test_35_envelope_import_and_annotation_compatibility(self):
         """Finding 4 regression: verify campaign2.envelope imports and evaluates type annotations cleanly on Python 3.11+."""

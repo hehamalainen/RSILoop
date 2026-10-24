@@ -131,15 +131,110 @@ class TestC1_1_EvaluatorNeverNone(unittest.TestCase):
 
 class TestC1_2_ExecutableBoundary(unittest.TestCase):
     def test_shared_command_builder(self):
-        from campaign2.model_provider import _get_codex_bin_path
+        from campaign2.model_provider import _get_codex_bin_path, DISABLED_CODEX_AGENT_FEATURES
         cmd = build_codex_cli_command("gpt-5.6-sol", "/tmp/scratch")
         expected = [
             _get_codex_bin_path(), "exec", "-s", "read-only", "--ephemeral", "--json",
+        ]
+        for feat in DISABLED_CODEX_AGENT_FEATURES:
+            expected.extend(["--disable", feat])
+        expected.extend([
             "--model", "gpt-5.6-sol", "--skip-git-repo-check",
             "--ignore-user-config", "--ignore-rules", "-C", "/tmp/scratch", "-"
-        ]
+        ])
         self.assertEqual(cmd, expected)
         self.assertEqual(cmd[-1], "-")
+
+        cmd_broker = build_codex_cli_command("gpt-5.6-sol", "/tmp/scratch", broker_url="http://127.0.0.1:54321/v1")
+        self.assertIn('model_provider="host_broker"', cmd_broker)
+        self.assertTrue(any("requires_openai_auth=false" in arg for arg in cmd_broker))
+        self.assertEqual(cmd_broker[-1], "-")
+
+    def test_host_auth_broker_and_zero_secret_scratch_home_and_tool_rejection(self):
+        """Regression test for host-controlled auth, zero-secret scratch home, tool-event rejection, and Seatbelt process-exec/network restrictions."""
+        from campaign2.model_provider import (
+            setup_credential_home,
+            enforce_text_only_api_payload,
+            parse_and_classify_jsonl_output,
+            render_seatbelt_profile,
+            ExecutableBoundaryError,
+        )
+        import subprocess
+        import sys
+
+        with tempfile.TemporaryDirectory() as tmp_home, tempfile.TemporaryDirectory() as tmp_scratch:
+            codex_dir = os.path.join(tmp_home, ".codex")
+            os.makedirs(codex_dir, exist_ok=True)
+            auth_p = os.path.join(codex_dir, "auth.json")
+            with open(auth_p, "w", encoding="utf-8") as f:
+                json.dump({"OPENAI_API_KEY": "sk-synthetic-secret-do-not-stage-in-scratch"}, f)
+            os.chmod(auth_p, 0o600)
+
+            with mock.patch("os.path.expanduser", side_effect=lambda p: p.replace("~", tmp_home)):
+                setup_credential_home(tmp_scratch, is_mock=False)
+
+            # Scratch home MUST NOT contain auth.json or any secret material
+            scratch_auth = os.path.join(tmp_scratch, ".codex", "auth.json")
+            self.assertFalse(os.path.exists(scratch_auth))
+            for root, _dirs, files in os.walk(tmp_scratch):
+                for fname in files:
+                    fpath = os.path.join(root, fname)
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        self.assertNotIn("sk-synthetic-secret-do-not-stage-in-scratch", f.read())
+
+            # Host broker payload enforcement rejects tool definitions and forces text-only response mode
+            clean_payload = enforce_text_only_api_payload(
+                json.dumps({"model": "gpt-5.6-sol", "input": "hello", "tools": None}).encode("utf-8")
+            )
+            parsed_clean = json.loads(clean_payload.decode("utf-8"))
+            self.assertEqual(parsed_clean["tools"], [])
+            self.assertEqual(parsed_clean["tool_choice"], "none")
+
+            with self.assertRaises(ExecutableBoundaryError):
+                enforce_text_only_api_payload(
+                    json.dumps({"model": "gpt-5.6-sol", "tools": [{"type": "function", "name": "shell"}]}).encode("utf-8")
+                )
+
+            # JSONL parser must invalidate any stream containing tool or command execution events
+            for forbidden_item_type in ("command_execution", "file_change", "mcp_tool_call", "web_search", "tool_call", "function_call"):
+                raw_stream = "\n".join([
+                    json.dumps({"type": "item.completed", "item": {"type": forbidden_item_type, "command": "cat ~/.codex/auth.json"}}),
+                    json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "def solve(): pass"}}),
+                    json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}),
+                ]).encode("utf-8")
+                res = parse_and_classify_jsonl_output(raw_stream, b"", 0)
+                self.assertEqual(res["parse_state"], "forbidden_tool_event")
+                self.assertEqual(res["classification"], "invalidated")
+
+            # Seatbelt kernel profile must block shell/utility execution and external outbound networking
+            sb_path = render_seatbelt_profile(tmp_scratch, BASE_DIR)
+            for blocked_cmd in (
+                ["/bin/sh", "-c", "echo pwn"],
+                ["/bin/zsh", "-c", "echo pwn"],
+                ["/usr/bin/curl", "--version"],
+                ["/bin/cat", "/etc/hosts"],
+                ["/usr/bin/python3", "-c", "print(1)"],
+            ):
+                proc = subprocess.run(
+                    ["/usr/bin/sandbox-exec", "-f", sb_path] + blocked_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                self.assertNotEqual(proc.returncode, 0, f"Expected sandbox to block {blocked_cmd}")
+
+            # External outbound TCP connection must be denied by Seatbelt while localhost is allowed
+            ext_net = subprocess.run(
+                [
+                    "/usr/bin/sandbox-exec", "-f", sb_path,
+                    sys.executable, "-c",
+                    "import socket; s=socket.socket(); s.settimeout(1.0); s.connect(('1.1.1.1', 443))",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertNotEqual(ext_net.returncode, 0)
 
     def test_cli_version_pinning(self):
         def fake_run(cmd, **kwargs):

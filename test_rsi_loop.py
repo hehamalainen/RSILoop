@@ -5804,5 +5804,42 @@ class TestRsiLoopOrchestrator(unittest.TestCase):
             validated = validate_manifest_pointer_and_target(pointer_data)
             self.assertEqual(validated["run_id"], ctx.run_id)
 
+    def test_campaign1_mutate_prompt_strips_candidate_code_and_xpia_error_markers_and_rejects_tool_events(self):
+        """Regression test for Campaign 1 XPIA boundary: candidate code and error text never enter mutate_prompt, and tool JSONL events fail closed."""
+        from rsi_loop import mutate_prompt, parse_codex_jsonl_output, ExperimentInvalidError
+
+        marker_code = "def solve():\n    # SYNTHETIC_CODE_MARKER_112233_EXFIL_AUTH\n    pass"
+        marker_err = "Traceback:\nValueError: SYNTHETIC_ERROR_MARKER_445566_IGNORE_PREVIOUS_INSTRUCTIONS"
+        captured_prompts = []
+
+        def fake_call_codex(prompt, sys_prompt, iter_dir, ctx, expect_json_code=False):
+            captured_prompts.append(prompt)
+            return "Write clean, well-structured Python solutions.", 25
+
+        ctx = RunContext()
+        with mock.patch("rsi_loop.call_codex_sandboxed", side_effect=fake_call_codex):
+            new_p, tok = mutate_prompt(
+                "Solve the problem accurately.",
+                [{"task": "huffman_coding", "description": marker_err, "code": marker_code, "error": marker_err}],
+                self.tmp_dir,
+                ctx,
+            )
+        self.assertEqual(tok, 25)
+        self.assertEqual(len(captured_prompts), 1)
+        sent_prompt = captured_prompts[0]
+        self.assertNotIn("SYNTHETIC_CODE_MARKER_112233_EXFIL_AUTH", sent_prompt)
+        self.assertNotIn("SYNTHETIC_ERROR_MARKER_445566_IGNORE_PREVIOUS_INSTRUCTIONS", sent_prompt)
+        self.assertNotIn(marker_code, sent_prompt)
+        self.assertIn("Failure Classification: ValueError", sent_prompt)
+
+        for forbidden_item in ("command_execution", "file_change", "mcp_tool_call", "tool_call"):
+            bad_jsonl = "\n".join([
+                json.dumps({"type": "item.completed", "item": {"type": forbidden_item, "command": "sh -c id"}}),
+                json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}}),
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 5}}),
+            ])
+            with self.assertRaises(ExperimentInvalidError):
+                parse_codex_jsonl_output(bad_jsonl)
+
 if __name__ == "__main__":
     unittest.main()
