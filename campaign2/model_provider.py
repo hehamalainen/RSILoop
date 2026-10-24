@@ -186,6 +186,50 @@ def verify_codex_cli_version(binary: str = "codex") -> str:
     return "0.144.5"
 
 
+DISABLED_CODEX_AGENT_FEATURES = (
+    "shell_tool",
+    "unified_exec",
+    "shell_snapshot",
+    "multi_agent",
+    "apps",
+    "plugins",
+    "remote_plugin",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "computer_use",
+    "code_mode_host",
+    "hooks",
+    "image_generation",
+    "in_app_browser",
+    "skill_mcp_dependency_install",
+    "tool_call_mcp_elicitation",
+    "tool_suggest",
+)
+
+ALLOWED_JSONL_EVENT_TYPES = frozenset({
+    "thread.started",
+    "turn.started",
+    "item.started",
+    "item.completed",
+    "turn.completed",
+})
+
+ALLOWED_JSONL_ITEM_TYPES = frozenset({
+    "agent_message",
+    "reasoning",
+})
+
+FORBIDDEN_TOOL_EVENT_KEYS = frozenset({
+    "tool_calls",
+    "function_call",
+    "command_execution",
+    "mcp_tool_call",
+    "file_change",
+    "web_search",
+})
+
+
 def render_seatbelt_profile(scratch_dir: str, workspace_root: str = BASE_DIR) -> str:
     """Renders generator.sb.template into a rendered profile inside scratch_dir (C1-2)."""
     template_p = os.path.join(workspace_root, "generator.sb.template")
@@ -199,13 +243,29 @@ def render_seatbelt_profile(scratch_dir: str, workspace_root: str = BASE_DIR) ->
 
     codex_bin = _get_codex_bin_path()
     codex_prefix = os.path.dirname(os.path.dirname(codex_bin))
+    real_scratch = os.path.realpath(scratch_dir)
 
     sb_content = tmpl.format(
         codex_base_dir=codex_prefix,
         codex_prefix=codex_prefix,
         user_home=os.path.expanduser("~"),
-        real_temp_home=os.path.realpath(scratch_dir),
-        real_candidate_input_dir=os.path.realpath(scratch_dir),
+        real_temp_home=real_scratch,
+        real_candidate_input_dir=real_scratch,
+    )
+    sb_content += (
+        "\n;; Enforced text-only / host-authenticated execution boundary\n"
+        f'(deny file-read* (subpath "{real_scratch}/.codex/auth.json"))\n'
+        "(deny process-exec\n"
+        '    (subpath "/bin")\n'
+        '    (subpath "/sbin")\n'
+        '    (subpath "/usr/sbin")\n'
+        f'    (subpath "{real_scratch}"))\n'
+        '(deny process-exec (subpath "/usr/bin"))\n'
+        '(allow process-exec (literal "/usr/bin/env"))\n'
+        "(deny process-exec\n"
+        '    (regex #"/(sh|bash|zsh|dash|ksh|csh|tcsh|python[0-9.]*|perl|ruby|php|lua|awk|sed|grep|egrep|fgrep|cat|head|tail|less|more|find|xargs|curl|wget|nc|ncat|netcat|ssh|scp|sftp|rsync|git|tar|zip|unzip|gzip|base64|xxd|od|hexdump|strings)$"))\n'
+        "(deny network-outbound)\n"
+        '(allow network-outbound (remote ip "localhost:*"))\n'
     )
 
     sb_path = os.path.join(scratch_dir, "generator.sb")
@@ -215,23 +275,52 @@ def render_seatbelt_profile(scratch_dir: str, workspace_root: str = BASE_DIR) ->
     return sb_path
 
 
-def build_codex_cli_command(model: str, scratch_dir: str, sb_path: Optional[str] = None) -> List[str]:
+def build_codex_cli_command(
+    model: str,
+    scratch_dir: str,
+    sb_path: Optional[str] = None,
+    broker_url: Optional[str] = None,
+) -> List[str]:
     """
     ONE shared command builder for canary, generation and mutation using sandbox-exec (C1-2 a).
+    Explicitly disables all model-accessible agent tools and binds to the host-controlled
+    authentication broker when provided.
     """
     codex_bin = _get_codex_bin_path()
-    base_cmd = [
-        codex_bin, "exec",
-        "-s", "read-only",
-        "--ephemeral",
-        "--json",
-        "--model", model,
-        "--skip-git-repo-check",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "-C", scratch_dir,
-        "-"
-    ]
+    disable_flags: List[str] = []
+    for feat in DISABLED_CODEX_AGENT_FEATURES:
+        disable_flags.extend(["--disable", feat])
+
+    broker_flags: List[str] = []
+    if broker_url:
+        provider_cfg = (
+            f'{{name="HostBroker", base_url="{broker_url}", '
+            f'requires_openai_auth=false, supports_websockets=false, '
+            f'stream_max_retries=0, request_max_retries=0}}'
+        )
+        broker_flags = [
+            "-c", 'model_provider="host_broker"',
+            "-c", f"model_providers.host_broker={provider_cfg}",
+        ]
+
+    base_cmd = (
+        [
+            codex_bin, "exec",
+            "-s", "read-only",
+            "--ephemeral",
+            "--json",
+        ]
+        + disable_flags
+        + broker_flags
+        + [
+            "--model", model,
+            "--skip-git-repo-check",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "-C", scratch_dir,
+            "-",
+        ]
+    )
     if sb_path:
         return ["sandbox-exec", "-f", sb_path] + base_cmd
     return base_cmd
@@ -251,15 +340,15 @@ def build_allowlisted_env(invocation_root: str) -> Dict[str, str]:
     return env
 
 
-def setup_credential_home(scratch_dir: str, is_mock: bool = False, auth_source_path: Optional[str] = None) -> str:
-    """Sets up scratch_dir/.codex/auth.json from verified source credential file (C1-7, P1-4)."""
-    codex_dir = os.path.join(scratch_dir, ".codex")
-    tmp_dir = os.path.join(scratch_dir, "tmp")
-    os.makedirs(codex_dir, mode=0o700, exist_ok=True)
-    os.makedirs(tmp_dir, mode=0o700, exist_ok=True)
-
+def load_host_credentials(
+    is_mock: bool = False,
+    auth_source_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Validates and loads authentication credentials in the trusted host process without
+    staging secret material into the child invocation scratch directory.
+    """
     src_p = auth_source_path or os.environ.get("CODEX_AUTH_PATH") or os.path.expanduser("~/.codex/auth.json")
-    dest_auth = os.path.join(codex_dir, "auth.json")
 
     if src_p and os.path.exists(src_p):
         if os.path.islink(src_p):
@@ -268,22 +357,190 @@ def setup_credential_home(scratch_dir: str, is_mock: bool = False, auth_source_p
             st = os.stat(src_p)
             if st.st_uid != os.getuid():
                 raise ExecutableBoundaryError(f"Auth source file owned by unexpected UID: {st.st_uid}")
-            shutil.copy2(src_p, dest_auth)
-            os.chmod(dest_auth, 0o600)
-            return dest_auth
+            with open(src_p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ExecutableBoundaryError("Auth source file must contain a JSON object")
+            return data
+        except ExecutableBoundaryError:
+            raise
         except Exception as exc:
             if not is_mock:
-                raise ExecutableBoundaryError(f"Failed to copy production auth.json from {src_p}: {exc}") from exc
+                raise ExecutableBoundaryError(f"Failed to load production auth.json from {src_p}: {exc}") from exc
 
     if not is_mock:
         raise ExecutableBoundaryError(f"Production authentication requires valid auth.json at {src_p}")
 
-    # Fallback to dummy auth.json ONLY for mock/test environments (is_mock=True)
-    with open(dest_auth, "w", encoding="utf-8") as f:
-        f.write('{"auth_mode": "test_credentials"}\n')
-    os.chmod(dest_auth, 0o600)
+    return {"auth_mode": "test_credentials"}
 
-    return dest_auth
+
+def enforce_text_only_api_payload(body_bytes: bytes) -> bytes:
+    """
+    Enforces at the host authentication boundary that outbound model API requests
+    register zero tools (`tools=[]`, `tool_choice="none"`).
+    """
+    try:
+        payload = json.loads(body_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise ExecutableBoundaryError(f"Invalid JSON model request payload on host boundary: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise ExecutableBoundaryError("Model request payload must be a JSON object")
+
+    existing_tools = payload.get("tools")
+    if existing_tools:
+        raise ExecutableBoundaryError(
+            f"Forbidden tool registration on text-only model boundary: {existing_tools!r}"
+        )
+
+    payload["tools"] = []
+    payload["tool_choice"] = "none"
+    return json.dumps(payload).encode("utf-8")
+
+
+class HostAuthBroker:
+    """
+    Host-controlled local loopback authentication gateway (`127.0.0.1:<port>/v1`).
+    Keeps credentials exclusively in the parent host process, enforces text-only
+    payloads (`tools=[]`, `tool_choice="none"`), and attaches `Authorization` headers
+    only when forwarding from the host to the upstream API.
+    """
+
+    def __init__(
+        self,
+        credentials: Optional[Dict[str, Any]] = None,
+        upstream_url: str = "https://api.openai.com/v1/responses",
+    ):
+        self.credentials = credentials or {"auth_mode": "test_credentials"}
+        self.upstream_url = upstream_url
+        self._server = None
+        self._thread = None
+        self.port = 0
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def start(self) -> "HostAuthBroker":
+        import http.server
+        import socketserver
+        import threading
+        import urllib.error
+        import urllib.request
+
+        broker = self
+
+        class _BrokerHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                if not self.path.rstrip("/").endswith("/responses"):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                length = int(self.headers.get("Content-Length", "0"))
+                raw_body = self.rfile.read(length) if length > 0 else b"{}"
+                try:
+                    sanitized_body = enforce_text_only_api_payload(raw_body)
+                except ExecutableBoundaryError as exc:
+                    err_bytes = json.dumps({"error": {"message": str(exc), "code": "forbidden_tools"}}).encode("utf-8")
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(err_bytes)))
+                    self.end_headers()
+                    self.wfile.write(err_bytes)
+                    return
+
+                api_key = (
+                    broker.credentials.get("OPENAI_API_KEY")
+                    or broker.credentials.get("api_key")
+                    or broker.credentials.get("access_token")
+                    or ""
+                )
+                req_headers = {
+                    "Content-Type": "application/json",
+                    "Accept": self.headers.get("Accept", "text/event-stream"),
+                }
+                if api_key:
+                    req_headers["Authorization"] = f"Bearer {api_key}"
+
+                req = urllib.request.Request(
+                    broker.upstream_url,
+                    data=sanitized_body,
+                    headers=req_headers,
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=CALL_WALL_LIMIT_SECONDS) as resp:
+                        self.send_response(resp.status)
+                        ct = resp.headers.get("Content-Type", "application/json")
+                        self.send_header("Content-Type", ct)
+                        self.end_headers()
+                        while True:
+                            chunk = resp.read(16384)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                except urllib.error.HTTPError as http_err:
+                    err_body = http_err.read() if hasattr(http_err, "read") else b""
+                    self.send_response(http_err.code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(err_body)))
+                    self.end_headers()
+                    self.wfile.write(err_body)
+                except Exception as net_err:
+                    err_bytes = json.dumps({"error": {"message": str(net_err)}}).encode("utf-8")
+                    self.send_response(502)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(err_bytes)))
+                    self.end_headers()
+                    self.wfile.write(err_bytes)
+
+            def log_message(self, *args):
+                pass
+
+        class _ReusableTCPServer(socketserver.TCPServer):
+            allow_reuse_address = True
+
+        self._server = _ReusableTCPServer(("127.0.0.1", 0), _BrokerHandler)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def close(self) -> None:
+        if self._server is not None:
+            try:
+                self._server.shutdown()
+            except Exception:
+                pass
+            try:
+                self._server.server_close()
+            except Exception:
+                pass
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+
+def setup_credential_home(scratch_dir: str, is_mock: bool = False, auth_source_path: Optional[str] = None) -> str:
+    """
+    Validates host credentials fail-closed and initializes isolated `.codex` and `tmp`
+    directories inside `scratch_dir` WITHOUT staging secret `auth.json` files into the
+    child's readable scratch home.
+    """
+    codex_dir = os.path.join(scratch_dir, ".codex")
+    tmp_dir = os.path.join(scratch_dir, "tmp")
+    os.makedirs(codex_dir, mode=0o700, exist_ok=True)
+    os.makedirs(tmp_dir, mode=0o700, exist_ok=True)
+
+    load_host_credentials(is_mock=is_mock, auth_source_path=auth_source_path)
+
+    dest_auth = os.path.join(codex_dir, "auth.json")
+    if os.path.lexists(dest_auth):
+        os.unlink(dest_auth)
+
+    return codex_dir
 
 
 def create_fresh_invocation_scratch_dir(workspace_root: str = BASE_DIR, is_mock: bool = False, attempt_id: str = "") -> str:
@@ -435,13 +692,54 @@ def parse_and_classify_jsonl_output(
                 "events_parsed": events_parsed,
                 "error": "Duplicate turn.completed event before final event",
             }
-        if ev_type == "item.completed":
-            item = ev.get("item", {})
-            if isinstance(item, dict) and item.get("type") == "agent_message":
+        if ev_type not in ALLOWED_JSONL_EVENT_TYPES or (set(ev.keys()) & FORBIDDEN_TOOL_EVENT_KEYS):
+            return {
+                "parse_state": "forbidden_tool_event",
+                "classification": "invalidated",
+                "usage_known": False,
+                "tokens": 0,
+                "text": "",
+                "stdout_hash": stdout_hash,
+                "stderr_hash": stderr_hash,
+                "events_parsed": events_parsed,
+                "error": f"Forbidden non-text or tool event in JSONL stream: {ev_type!r}",
+            }
+        if ev_type in ("item.started", "item.completed"):
+            item = ev.get("item")
+            item_type = item.get("type", "") if isinstance(item, dict) else ""
+            if (
+                not isinstance(item, dict)
+                or item_type not in ALLOWED_JSONL_ITEM_TYPES
+                or (set(item.keys()) & FORBIDDEN_TOOL_EVENT_KEYS)
+            ):
+                return {
+                    "parse_state": "forbidden_tool_event",
+                    "classification": "invalidated",
+                    "usage_known": False,
+                    "tokens": 0,
+                    "text": "",
+                    "stdout_hash": stdout_hash,
+                    "stderr_hash": stderr_hash,
+                    "events_parsed": events_parsed,
+                    "error": f"Forbidden tool or non-text item in JSONL stream: {item_type!r}",
+                }
+            if ev_type == "item.completed" and item_type == "agent_message":
                 text_content = item.get("text", "") or item.get("content", "")
                 agent_messages.append(text_content)
 
     turn_ev = events[-1]
+    if set(turn_ev.keys()) & FORBIDDEN_TOOL_EVENT_KEYS:
+        return {
+            "parse_state": "forbidden_tool_event",
+            "classification": "invalidated",
+            "usage_known": False,
+            "tokens": 0,
+            "text": "",
+            "stdout_hash": stdout_hash,
+            "stderr_hash": stderr_hash,
+            "events_parsed": events_parsed,
+            "error": "Forbidden tool keys on turn.completed event",
+        }
     usage = turn_ev.get("usage")
     if not isinstance(usage, dict) or "output_tokens" not in usage:
         return {
@@ -575,6 +873,7 @@ class SolModelProvider(ModelProvider):
         for invocation_ordinal in range(1, max_attempts + 1):
             scratch_dir = None
             proc = None
+            broker = None
             t0 = time.monotonic()
             t0_wall = time.time()
 
@@ -587,7 +886,13 @@ class SolModelProvider(ModelProvider):
                     rendered_sb_bytes = f.read()
                 sandbox_profile_hash = hashlib.sha256(rendered_sb_bytes).hexdigest()
 
-                cmd = build_codex_cli_command(self.model_name, scratch_dir, sb_path)
+                broker_url = None
+                if not self.mock_subprocess:
+                    host_creds = load_host_credentials(is_mock=True)
+                    broker = HostAuthBroker(credentials=host_creds).start()
+                    broker_url = broker.base_url
+
+                cmd = build_codex_cli_command(self.model_name, scratch_dir, sb_path, broker_url=broker_url)
                 env = build_allowlisted_env(scratch_dir)
 
                 argv_hash = hashlib.sha256(json.dumps(cmd).encode("utf-8")).hexdigest()
@@ -762,6 +1067,8 @@ class SolModelProvider(ModelProvider):
                         return_code = -8
 
             finally:
+                if broker is not None:
+                    broker.close()
                 if proc:
                     if proc.poll() is None:
                         try:

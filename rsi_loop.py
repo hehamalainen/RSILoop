@@ -168,6 +168,29 @@ def check_parent_symlinks(path: str):
 
 # ── JSONL parsing ─────────────────────────────────────────────────────────────
 
+_ALLOWED_CODEX_JSONL_EVENT_TYPES = frozenset({
+    "thread.started",
+    "turn.started",
+    "item.started",
+    "item.completed",
+    "turn.completed",
+})
+
+_ALLOWED_CODEX_JSONL_ITEM_TYPES = frozenset({
+    "agent_message",
+    "reasoning",
+})
+
+_FORBIDDEN_CODEX_TOOL_KEYS = frozenset({
+    "tool_calls",
+    "function_call",
+    "command_execution",
+    "mcp_tool_call",
+    "file_change",
+    "web_search",
+})
+
+
 def parse_codex_jsonl_output(
     stdout_lines: list,
 ) -> tuple:
@@ -188,9 +211,22 @@ def parse_codex_jsonl_output(
             raise ExperimentInvalidError("Codex JSONL event must be an object")
 
         etype = event.get("type")
-        if etype == "item.completed":
-            item = event.get("item", {})
-            if item.get("type") == "agent_message":
+        if etype not in _ALLOWED_CODEX_JSONL_EVENT_TYPES or (set(event.keys()) & _FORBIDDEN_CODEX_TOOL_KEYS):
+            raise ExperimentInvalidError(
+                f"Forbidden non-text or tool event in Codex JSONL stream: {etype!r} — fail closed"
+            )
+        if etype in ("item.started", "item.completed"):
+            item = event.get("item")
+            item_type = item.get("type") if isinstance(item, dict) else None
+            if (
+                not isinstance(item, dict)
+                or item_type not in _ALLOWED_CODEX_JSONL_ITEM_TYPES
+                or (set(item.keys()) & _FORBIDDEN_CODEX_TOOL_KEYS)
+            ):
+                raise ExperimentInvalidError(
+                    f"Forbidden tool or non-text item in Codex JSONL stream: {item_type!r} — fail closed"
+                )
+            if etype == "item.completed" and item_type == "agent_message":
                 code = item.get("text", "").strip()
         elif etype == "turn.completed":
             turn_completed_count += 1
@@ -535,6 +571,19 @@ def _build_generator_sb(real_temp_home: str, real_candidate_input_dir: str) -> s
         codex_prefix=codex_prefix,
         codex_base_dir=codex_base_dir,
     )
+    sb_content += (
+        "\n;; Enforced tool-free execution boundary: deny spawning shells or external tool binaries\n"
+        "(deny process-exec\n"
+        '    (subpath "/bin")\n'
+        '    (subpath "/sbin")\n'
+        '    (subpath "/usr/sbin")\n'
+        f'    (subpath "{real_temp_home}")\n'
+        f'    (subpath "{real_candidate_input_dir}"))\n'
+        '(deny process-exec (subpath "/usr/bin"))\n'
+        '(allow process-exec (literal "/usr/bin/env"))\n'
+        "(deny process-exec\n"
+        '    (regex #"/(sh|bash|zsh|dash|ksh|csh|tcsh|python[0-9.]*|perl|ruby|php|lua|awk|sed|grep|egrep|fgrep|cat|head|tail|less|more|find|xargs|curl|wget|nc|ncat|netcat|ssh|scp|sftp|rsync|git|tar|zip|unzip|gzip|base64|xxd|od|hexdump|strings)$"))\n'
+    )
     sb_path = os.path.join(real_temp_home, "generator.sb")
     with open(sb_path, "w") as f:
         f.write(sb_content)
@@ -558,20 +607,53 @@ def _codex_environment(codex_home: str) -> dict:
     }
 
 
+_DISABLED_CODEX_AGENT_FEATURES = (
+    "shell_tool",
+    "unified_exec",
+    "shell_snapshot",
+    "multi_agent",
+    "apps",
+    "plugins",
+    "remote_plugin",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "computer_use",
+    "code_mode_host",
+    "hooks",
+    "image_generation",
+    "in_app_browser",
+    "skill_mcp_dependency_install",
+    "tool_call_mcp_elicitation",
+    "tool_suggest",
+)
+
+
 def _build_codex_command(
     sb_path: str,
     model: str,
     candidate_dir: str,
 ) -> list[str]:
-    return [
-        "sandbox-exec", "-f", sb_path,
-        _get_codex_bin_path(), "exec", "-",
-        "-s", "read-only",
-        "--ephemeral",
-        "--json",
-        "--model", model,
-        "-C", candidate_dir,
-    ]
+    disable_flags: list[str] = []
+    for feat in _DISABLED_CODEX_AGENT_FEATURES:
+        disable_flags.extend(["--disable", feat])
+    return (
+        [
+            "sandbox-exec", "-f", sb_path,
+            _get_codex_bin_path(), "exec", "-",
+            "-s", "read-only",
+            "--ephemeral",
+            "--json",
+            "--skip-git-repo-check",
+            "--ignore-user-config",
+            "--ignore-rules",
+        ]
+        + disable_flags
+        + [
+            "--model", model,
+            "-C", candidate_dir,
+        ]
+    )
 
 
 def _validate_canary_dir(path: str, expected_parent: str, temp_home: str) -> None:
