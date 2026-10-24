@@ -16,13 +16,17 @@ import sys
 import json
 import stat
 import time
+import hmac
 import signal
+import socket
 import hashlib
+import secrets
 import shutil
 import tempfile
+import threading
 import subprocess
 from abc import ABC, abstractmethod
-from typing import Tuple, Dict, Any, List, Optional
+from typing import Tuple, Dict, Any, List, Optional, Set
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAX_STDOUT_BYTES = 16 * 1024 * 1024  # 16 MiB
@@ -275,11 +279,17 @@ def render_seatbelt_profile(scratch_dir: str, workspace_root: str = BASE_DIR) ->
     return sb_path
 
 
+_BROKER_REGISTRY_LOCK = threading.Lock()
+_ACTIVE_BROKERS_BY_URL: Dict[str, "HostAuthBroker"] = {}
+_SCRATCH_BROKER_TOKENS: Dict[str, str] = {}
+
+
 def build_codex_cli_command(
     model: str,
     scratch_dir: str,
     sb_path: Optional[str] = None,
     broker_url: Optional[str] = None,
+    broker_token: Optional[str] = None,
 ) -> List[str]:
     """
     ONE shared command builder for canary, generation and mutation using sandbox-exec (C1-2 a).
@@ -293,9 +303,18 @@ def build_codex_cli_command(
 
     broker_flags: List[str] = []
     if broker_url:
+        resolved_token = broker_token
+        with _BROKER_REGISTRY_LOCK:
+            active_broker = _ACTIVE_BROKERS_BY_URL.get(broker_url)
+            if resolved_token is None and active_broker is not None:
+                resolved_token = active_broker.capability_token
+            if resolved_token and scratch_dir:
+                _SCRATCH_BROKER_TOKENS[os.path.realpath(scratch_dir)] = resolved_token
+                _SCRATCH_BROKER_TOKENS[scratch_dir] = resolved_token
+
         provider_cfg = (
             f'{{name="HostBroker", base_url="{broker_url}", '
-            f'requires_openai_auth=false, supports_websockets=false, '
+            f'env_key="CODEX_BROKER_CAPABILITY", supports_websockets=false, '
             f'stream_max_retries=0, request_max_retries=0}}'
         )
         broker_flags = [
@@ -326,9 +345,14 @@ def build_codex_cli_command(
     return base_cmd
 
 
-def build_allowlisted_env(invocation_root: str) -> Dict[str, str]:
+def build_allowlisted_env(
+    invocation_root: str,
+    broker_token: Optional[str] = None,
+) -> Dict[str, str]:
     """
     Child environment, allowlisted, with NO inherited API keys or proxy credentials (C1-7).
+    When bound to a HostAuthBroker invocation, injects only the ephemeral per-invocation
+    loopback capability token (`CODEX_BROKER_CAPABILITY`), never the host API key.
     """
     codex_home = os.path.join(invocation_root, ".codex")
     env = {
@@ -337,6 +361,15 @@ def build_allowlisted_env(invocation_root: str) -> Dict[str, str]:
         "CODEX_HOME": codex_home,
         "TMPDIR": os.path.join(invocation_root, "tmp"),
     }
+    resolved_token = broker_token
+    if resolved_token is None and invocation_root:
+        with _BROKER_REGISTRY_LOCK:
+            resolved_token = (
+                _SCRATCH_BROKER_TOKENS.get(os.path.realpath(invocation_root))
+                or _SCRATCH_BROKER_TOKENS.get(invocation_root)
+            )
+    if resolved_token:
+        env["CODEX_BROKER_CAPABILITY"] = resolved_token
     return env
 
 
@@ -374,10 +407,13 @@ def load_host_credentials(
     return {"auth_mode": "test_credentials"}
 
 
-def enforce_text_only_api_payload(body_bytes: bytes) -> bytes:
+def enforce_text_only_api_payload(
+    body_bytes: bytes,
+    authorized_model: Optional[str] = None,
+) -> bytes:
     """
     Enforces at the host authentication boundary that outbound model API requests
-    register zero tools (`tools=[]`, `tool_choice="none"`).
+    match the authorized model and register zero tools (`tools=[]`, `tool_choice="none"`).
     """
     try:
         payload = json.loads(body_bytes.decode("utf-8"))
@@ -387,10 +423,24 @@ def enforce_text_only_api_payload(body_bytes: bytes) -> bytes:
     if not isinstance(payload, dict):
         raise ExecutableBoundaryError("Model request payload must be a JSON object")
 
+    if authorized_model is not None:
+        req_model = payload.get("model")
+        if not isinstance(req_model, str) or req_model != authorized_model:
+            raise ExecutableBoundaryError(
+                f"Unauthorized model requested on host boundary: expected {authorized_model!r}, got {req_model!r}"
+            )
+        payload["model"] = authorized_model
+
     existing_tools = payload.get("tools")
     if existing_tools:
         raise ExecutableBoundaryError(
             f"Forbidden tool registration on text-only model boundary: {existing_tools!r}"
+        )
+
+    existing_tool_choice = payload.get("tool_choice")
+    if existing_tool_choice not in (None, "none"):
+        raise ExecutableBoundaryError(
+            f"Forbidden tool_choice on text-only model boundary: {existing_tool_choice!r}"
         )
 
     payload["tools"] = []
@@ -401,18 +451,36 @@ def enforce_text_only_api_payload(body_bytes: bytes) -> bytes:
 class HostAuthBroker:
     """
     Host-controlled local loopback authentication gateway (`127.0.0.1:<port>/v1`).
-    Keeps credentials exclusively in the parent host process, enforces text-only
-    payloads (`tools=[]`, `tool_choice="none"`), and attaches `Authorization` headers
-    only when forwarding from the host to the upstream API.
+    Requires a per-invocation CSPRNG capability token before reading or forwarding any
+    request, binds accepted requests to `authorized_model` and `max_requests`, enforces
+    text-only payloads (`tools=[]`, `tool_choice="none"`), and attaches the host API key
+    exclusively when forwarding from the host to the upstream API.
     """
 
     def __init__(
         self,
         credentials: Optional[Dict[str, Any]] = None,
         upstream_url: str = "https://api.openai.com/v1/responses",
+        authorized_model: str = "gpt-5.6-sol",
+        capability_token: Optional[str] = None,
+        max_requests: int = 1,
     ):
+        if not isinstance(authorized_model, str) or not authorized_model.strip():
+            raise ExecutableBoundaryError("HostAuthBroker requires a non-empty authorized_model")
+        if not isinstance(max_requests, int) or max_requests < 1:
+            raise ExecutableBoundaryError("HostAuthBroker max_requests must be a positive integer")
         self.credentials = credentials or {"auth_mode": "test_credentials"}
         self.upstream_url = upstream_url
+        self.authorized_model = authorized_model.strip()
+        self.capability_token = capability_token or secrets.token_urlsafe(32)
+        if not isinstance(self.capability_token, str) or len(self.capability_token) < 16:
+            raise ExecutableBoundaryError("HostAuthBroker capability_token must be at least 16 characters")
+        self.max_requests = max_requests
+        self._lock = threading.Lock()
+        self._accepted_requests = 0
+        self.rejected_unauthorized_count = 0
+        self.rejected_limit_count = 0
+        self.rejected_model_count = 0
         self._server = None
         self._thread = None
         self.port = 0
@@ -424,29 +492,74 @@ class HostAuthBroker:
     def start(self) -> "HostAuthBroker":
         import http.server
         import socketserver
-        import threading
         import urllib.error
         import urllib.request
 
         broker = self
 
         class _BrokerHandler(http.server.BaseHTTPRequestHandler):
+            def _send_json_error(self, status_code: int, message: str, code: str) -> None:
+                err_bytes = json.dumps({"error": {"message": message, "code": code}}).encode("utf-8")
+                self.send_response(status_code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err_bytes)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(err_bytes)
+                self.close_connection = True
+
             def do_POST(self):
                 if not self.path.rstrip("/").endswith("/responses"):
                     self.send_response(404)
+                    self.send_header("Connection", "close")
                     self.end_headers()
+                    self.close_connection = True
                     return
+
+                # 1. Authenticate per-invocation capability BEFORE reading request body or forwarding
+                auth_header = self.headers.get("Authorization", "")
+                expected_header = f"Bearer {broker.capability_token}"
+                if not hmac.compare_digest(auth_header.encode("utf-8"), expected_header.encode("utf-8")):
+                    with broker._lock:
+                        broker.rejected_unauthorized_count += 1
+                    self._send_json_error(
+                        401,
+                        "Missing or invalid per-invocation broker capability token",
+                        "unauthorized_broker_caller",
+                    )
+                    return
+
+                # 2. Enforce per-invocation request count ceiling BEFORE reading request body
+                with broker._lock:
+                    if broker._accepted_requests >= broker.max_requests:
+                        broker.rejected_limit_count += 1
+                        limit_exceeded = True
+                    else:
+                        broker._accepted_requests += 1
+                        limit_exceeded = False
+                if limit_exceeded:
+                    self._send_json_error(
+                        429,
+                        f"Per-invocation broker request limit ({broker.max_requests}) exceeded",
+                        "invocation_request_limit_exceeded",
+                    )
+                    return
+
                 length = int(self.headers.get("Content-Length", "0"))
                 raw_body = self.rfile.read(length) if length > 0 else b"{}"
                 try:
-                    sanitized_body = enforce_text_only_api_payload(raw_body)
+                    sanitized_body = enforce_text_only_api_payload(
+                        raw_body,
+                        authorized_model=broker.authorized_model,
+                    )
                 except ExecutableBoundaryError as exc:
-                    err_bytes = json.dumps({"error": {"message": str(exc), "code": "forbidden_tools"}}).encode("utf-8")
-                    self.send_response(400)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(err_bytes)))
-                    self.end_headers()
-                    self.wfile.write(err_bytes)
+                    msg = str(exc)
+                    if "Unauthorized model" in msg:
+                        with broker._lock:
+                            broker.rejected_model_count += 1
+                        self._send_json_error(403, msg, "unauthorized_model")
+                    else:
+                        self._send_json_error(400, msg, "forbidden_tools")
                     return
 
                 api_key = (
@@ -488,12 +601,7 @@ class HostAuthBroker:
                     self.end_headers()
                     self.wfile.write(err_body)
                 except Exception as net_err:
-                    err_bytes = json.dumps({"error": {"message": str(net_err)}}).encode("utf-8")
-                    self.send_response(502)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(err_bytes)))
-                    self.end_headers()
-                    self.wfile.write(err_bytes)
+                    self._send_json_error(502, str(net_err), "upstream_error")
 
             def log_message(self, *args):
                 pass
@@ -503,11 +611,18 @@ class HostAuthBroker:
 
         self._server = _ReusableTCPServer(("127.0.0.1", 0), _BrokerHandler)
         self.port = self._server.server_address[1]
+        with _BROKER_REGISTRY_LOCK:
+            _ACTIVE_BROKERS_BY_URL[self.base_url] = self
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         return self
 
     def close(self) -> None:
+        with _BROKER_REGISTRY_LOCK:
+            _ACTIVE_BROKERS_BY_URL.pop(self.base_url, None)
+            stale_keys = [k for k, v in _SCRATCH_BROKER_TOKENS.items() if v == self.capability_token]
+            for k in stale_keys:
+                _SCRATCH_BROKER_TOKENS.pop(k, None)
         if self._server is not None:
             try:
                 self._server.shutdown()
@@ -887,13 +1002,25 @@ class SolModelProvider(ModelProvider):
                 sandbox_profile_hash = hashlib.sha256(rendered_sb_bytes).hexdigest()
 
                 broker_url = None
+                broker_token = None
                 if not self.mock_subprocess:
                     host_creds = load_host_credentials(is_mock=True)
-                    broker = HostAuthBroker(credentials=host_creds).start()
+                    broker = HostAuthBroker(
+                        credentials=host_creds,
+                        authorized_model=self.model_name,
+                        max_requests=1,
+                    ).start()
                     broker_url = broker.base_url
+                    broker_token = broker.capability_token
 
-                cmd = build_codex_cli_command(self.model_name, scratch_dir, sb_path, broker_url=broker_url)
-                env = build_allowlisted_env(scratch_dir)
+                cmd = build_codex_cli_command(
+                    self.model_name,
+                    scratch_dir,
+                    sb_path,
+                    broker_url=broker_url,
+                    broker_token=broker_token,
+                )
+                env = build_allowlisted_env(scratch_dir, broker_token=broker_token)
 
                 argv_hash = hashlib.sha256(json.dumps(cmd).encode("utf-8")).hexdigest()
                 env_hash = hashlib.sha256(json.dumps(env, sort_keys=True).encode("utf-8")).hexdigest()
