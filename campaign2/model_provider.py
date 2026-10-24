@@ -32,6 +32,8 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAX_STDOUT_BYTES = 16 * 1024 * 1024  # 16 MiB
 MAX_STDERR_BYTES = 1 * 1024 * 1024   # 1 MiB
 CALL_WALL_LIMIT_SECONDS = 120.0
+MAX_BROKER_REQUEST_BYTES = 512 * 1024  # 512 KiB
+BROKER_READ_TIMEOUT_SECONDS = 5.0
 
 
 class ExecutableBoundaryError(RuntimeError):
@@ -464,11 +466,18 @@ class HostAuthBroker:
         authorized_model: str = "gpt-5.6-sol",
         capability_token: Optional[str] = None,
         max_requests: int = 1,
+        max_request_bytes: int = MAX_BROKER_REQUEST_BYTES,
+        read_timeout: float = BROKER_READ_TIMEOUT_SECONDS,
+        forwarding_deadline: float = CALL_WALL_LIMIT_SECONDS,
     ):
         if not isinstance(authorized_model, str) or not authorized_model.strip():
             raise ExecutableBoundaryError("HostAuthBroker requires a non-empty authorized_model")
         if not isinstance(max_requests, int) or max_requests < 1:
             raise ExecutableBoundaryError("HostAuthBroker max_requests must be a positive integer")
+        if not isinstance(max_request_bytes, int) or max_request_bytes < 1:
+            raise ExecutableBoundaryError("HostAuthBroker max_request_bytes must be a positive integer")
+        if read_timeout <= 0 or forwarding_deadline <= 0:
+            raise ExecutableBoundaryError("HostAuthBroker timeouts must be positive")
         self.credentials = credentials or {"auth_mode": "test_credentials"}
         self.upstream_url = upstream_url
         self.authorized_model = authorized_model.strip()
@@ -476,7 +485,13 @@ class HostAuthBroker:
         if not isinstance(self.capability_token, str) or len(self.capability_token) < 16:
             raise ExecutableBoundaryError("HostAuthBroker capability_token must be at least 16 characters")
         self.max_requests = max_requests
+        self.max_request_bytes = max_request_bytes
+        self.read_timeout = float(read_timeout)
+        self.forwarding_deadline = float(forwarding_deadline)
         self._lock = threading.Lock()
+        self._closing = threading.Event()
+        self._active_sockets: Set[socket.socket] = set()
+        self._active_upstreams: Set[Any] = set()
         self._accepted_requests = 0
         self.rejected_unauthorized_count = 0
         self.rejected_limit_count = 0
@@ -498,17 +513,61 @@ class HostAuthBroker:
         broker = self
 
         class _BrokerHandler(http.server.BaseHTTPRequestHandler):
+            def setup(self):
+                try:
+                    self.request.settimeout(broker.read_timeout)
+                except Exception:
+                    pass
+                super().setup()
+
             def _send_json_error(self, status_code: int, message: str, code: str) -> None:
-                err_bytes = json.dumps({"error": {"message": message, "code": code}}).encode("utf-8")
-                self.send_response(status_code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(err_bytes)))
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.wfile.write(err_bytes)
+                try:
+                    err_bytes = json.dumps({"error": {"message": message, "code": code}}).encode("utf-8")
+                    self.send_response(status_code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(err_bytes)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(err_bytes)
+                    self.wfile.flush()
+                except Exception:
+                    pass
                 self.close_connection = True
 
+            def _read_bounded_body(self, length: int, read_deadline: float) -> Optional[bytes]:
+                chunks: List[bytes] = []
+                remaining = length
+                while remaining > 0:
+                    if broker._closing.is_set():
+                        return None
+                    now = time.monotonic()
+                    if now >= read_deadline:
+                        self._send_json_error(408, "Broker request body read timed out", "request_read_timeout")
+                        return None
+                    try:
+                        self.connection.settimeout(max(0.02, min(broker.read_timeout, read_deadline - now)))
+                        chunk = self.rfile.read(min(16384, remaining))
+                    except (socket.timeout, TimeoutError):
+                        self._send_json_error(408, "Broker request body read timed out", "request_read_timeout")
+                        return None
+                    except Exception:
+                        return None
+                    if not chunk:
+                        self._send_json_error(400, "Incomplete HTTP request body before EOF", "incomplete_request_body")
+                        return None
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                return b"".join(chunks)
+
             def do_POST(self):
+                req_start = time.monotonic()
+                read_deadline = req_start + broker.read_timeout
+                overall_deadline = req_start + broker.forwarding_deadline
+
+                if broker._closing.is_set():
+                    self.close_connection = True
+                    return
+
                 if not self.path.rstrip("/").endswith("/responses"):
                     self.send_response(404)
                     self.send_header("Connection", "close")
@@ -529,6 +588,26 @@ class HostAuthBroker:
                     )
                     return
 
+                if self.headers.get("Transfer-Encoding") is not None:
+                    self._send_json_error(400, "Transfer-Encoding is not supported on broker boundary", "chunked_transfer_unsupported")
+                    return
+
+                raw_len = self.headers.get("Content-Length")
+                try:
+                    length = int(raw_len) if raw_len is not None else -1
+                except ValueError:
+                    length = -1
+                if length <= 0:
+                    self._send_json_error(400, "Valid positive Content-Length header is required", "invalid_content_length")
+                    return
+                if length > broker.max_request_bytes:
+                    self._send_json_error(
+                        413,
+                        f"Request body length {length} exceeds limit {broker.max_request_bytes}",
+                        "request_too_large",
+                    )
+                    return
+
                 # 2. Enforce per-invocation request count ceiling BEFORE reading request body
                 with broker._lock:
                     if broker._accepted_requests >= broker.max_requests:
@@ -545,8 +624,9 @@ class HostAuthBroker:
                     )
                     return
 
-                length = int(self.headers.get("Content-Length", "0"))
-                raw_body = self.rfile.read(length) if length > 0 else b"{}"
+                raw_body = self._read_bounded_body(length, read_deadline)
+                if raw_body is None:
+                    return
                 try:
                     sanitized_body = enforce_text_only_api_payload(
                         raw_body,
@@ -575,6 +655,11 @@ class HostAuthBroker:
                 if api_key:
                     req_headers["Authorization"] = f"Bearer {api_key}"
 
+                remaining_forward = overall_deadline - time.monotonic()
+                if remaining_forward <= 0 or broker._closing.is_set():
+                    self._send_json_error(504, "Broker forwarding deadline exceeded before upstream dispatch", "forwarding_deadline_exceeded")
+                    return
+
                 req = urllib.request.Request(
                     broker.upstream_url,
                     data=sanitized_body,
@@ -582,17 +667,25 @@ class HostAuthBroker:
                     method="POST",
                 )
                 try:
-                    with urllib.request.urlopen(req, timeout=CALL_WALL_LIMIT_SECONDS) as resp:
-                        self.send_response(resp.status)
-                        ct = resp.headers.get("Content-Type", "application/json")
-                        self.send_header("Content-Type", ct)
-                        self.end_headers()
-                        while True:
-                            chunk = resp.read(16384)
-                            if not chunk:
-                                break
-                            self.wfile.write(chunk)
-                            self.wfile.flush()
+                    with urllib.request.urlopen(req, timeout=max(0.05, remaining_forward)) as resp:
+                        with broker._lock:
+                            broker._active_upstreams.add(resp)
+                        try:
+                            self.send_response(resp.status)
+                            ct = resp.headers.get("Content-Type", "application/json")
+                            self.send_header("Content-Type", ct)
+                            self.end_headers()
+                            while True:
+                                if broker._closing.is_set() or time.monotonic() >= overall_deadline:
+                                    break
+                                chunk = resp.read(16384)
+                                if not chunk:
+                                    break
+                                self.wfile.write(chunk)
+                                self.wfile.flush()
+                        finally:
+                            with broker._lock:
+                                broker._active_upstreams.discard(resp)
                 except urllib.error.HTTPError as http_err:
                     err_body = http_err.read() if hasattr(http_err, "read") else b""
                     self.send_response(http_err.code)
@@ -601,28 +694,65 @@ class HostAuthBroker:
                     self.end_headers()
                     self.wfile.write(err_body)
                 except Exception as net_err:
-                    self._send_json_error(502, str(net_err), "upstream_error")
+                    if not broker._closing.is_set():
+                        self._send_json_error(502, str(net_err), "upstream_error")
 
             def log_message(self, *args):
                 pass
 
-        class _ReusableTCPServer(socketserver.TCPServer):
+        class _ReusableThreadingTCPServer(socketserver.ThreadingTCPServer):
             allow_reuse_address = True
+            daemon_threads = True
 
-        self._server = _ReusableTCPServer(("127.0.0.1", 0), _BrokerHandler)
+            def get_request(self):
+                conn, addr = super().get_request()
+                try:
+                    conn.settimeout(broker.read_timeout)
+                except Exception:
+                    pass
+                with broker._lock:
+                    broker._active_sockets.add(conn)
+                return conn, addr
+
+            def close_request(self, request):
+                with broker._lock:
+                    broker._active_sockets.discard(request)
+                super().close_request(request)
+
+        self._server = _ReusableThreadingTCPServer(("127.0.0.1", 0), _BrokerHandler)
         self.port = self._server.server_address[1]
         with _BROKER_REGISTRY_LOCK:
             _ACTIVE_BROKERS_BY_URL[self.base_url] = self
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         self._thread.start()
         return self
 
     def close(self) -> None:
+        self._closing.set()
         with _BROKER_REGISTRY_LOCK:
             _ACTIVE_BROKERS_BY_URL.pop(self.base_url, None)
             stale_keys = [k for k, v in _SCRATCH_BROKER_TOKENS.items() if v == self.capability_token]
             for k in stale_keys:
                 _SCRATCH_BROKER_TOKENS.pop(k, None)
+        with self._lock:
+            active_socks = list(self._active_sockets)
+            self._active_sockets.clear()
+            active_upstreams = list(self._active_upstreams)
+            self._active_upstreams.clear()
+        for sock in active_socks:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                sock.close()
+            except Exception:
+                pass
+        for up in active_upstreams:
+            try:
+                up.close()
+            except Exception:
+                pass
         if self._server is not None:
             try:
                 self._server.shutdown()
@@ -634,7 +764,7 @@ class HostAuthBroker:
                 pass
             self._server = None
         if self._thread is not None:
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=1.0)
             self._thread = None
 
 
@@ -1194,8 +1324,6 @@ class SolModelProvider(ModelProvider):
                         return_code = -8
 
             finally:
-                if broker is not None:
-                    broker.close()
                 if proc:
                     if proc.poll() is None:
                         try:
@@ -1207,6 +1335,11 @@ class SolModelProvider(ModelProvider):
                                 pass
                     try:
                         proc.wait(timeout=2.0)
+                    except Exception:
+                        pass
+                if broker is not None:
+                    try:
+                        broker.close()
                     except Exception:
                         pass
                 t1 = time.monotonic()
