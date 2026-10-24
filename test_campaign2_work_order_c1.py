@@ -147,8 +147,301 @@ class TestC1_2_ExecutableBoundary(unittest.TestCase):
 
         cmd_broker = build_codex_cli_command("gpt-5.6-sol", "/tmp/scratch", broker_url="http://127.0.0.1:54321/v1")
         self.assertIn('model_provider="host_broker"', cmd_broker)
-        self.assertTrue(any("requires_openai_auth=false" in arg for arg in cmd_broker))
+        self.assertTrue(any('env_key="CODEX_BROKER_CAPABILITY"' in arg for arg in cmd_broker))
         self.assertEqual(cmd_broker[-1], "-")
+
+    def test_broker_capability_auth_model_binding_stalled_shutdown_and_oauth_rejection(self):
+        """
+        Regression test for the three HostAuthBroker boundaries:
+        1. Unauthenticated local callers (or wrong capability tokens) are rejected (401) before reading or forwarding;
+           caller-selected models (403) and excess per-invocation requests (429) never reach upstream.
+        2. Incomplete/stalled HTTP bodies do not block broker.close(), oversize Content-Length returns 413,
+           read timeouts return 408, and child process termination executes before broker cleanup.
+        3. ChatGPT/OAuth credentials (tokens.access_token / auth_mode='chatgpt') and missing API keys are
+           rejected fail-closed with ExecutableBoundaryError before launching or recording an invocation.
+        """
+        import http.server
+        import socket
+        import threading
+        import urllib.error
+        import urllib.request
+        from campaign2.model_provider import (
+            HostAuthBroker,
+            ExecutableBoundaryError,
+            load_host_credentials,
+            setup_credential_home,
+            validate_api_key_credentials,
+            render_seatbelt_profile,
+        )
+        from campaign2.attempt_lifecycle import AttemptLedger
+
+        captures = []
+
+        class _FakeUpstream(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body_len = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(body_len).decode("utf-8"))
+                captures.append({
+                    "auth": self.headers.get("Authorization"),
+                    "model": payload.get("model"),
+                    "tools": payload.get("tools"),
+                    "tool_choice": payload.get("tool_choice"),
+                })
+                if payload.get("stream"):
+                    message = {
+                        "id": "msg_test",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "SYNTHETIC_LOCAL_ONLY_RESPONSE", "annotations": []}],
+                    }
+                    response = {
+                        "id": "resp_test",
+                        "object": "response",
+                        "status": "completed",
+                        "output": [message],
+                        "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                    }
+                    events = [
+                        {"type": "response.created", "response": {**response, "status": "in_progress", "output": []}},
+                        {"type": "response.output_item.added", "output_index": 0, "item": {**message, "status": "in_progress", "content": []}},
+                        {"type": "response.output_text.delta", "item_id": "msg_test", "output_index": 0, "content_index": 0, "delta": "SYNTHETIC_LOCAL_ONLY_RESPONSE"},
+                        {"type": "response.output_item.done", "output_index": 0, "item": message},
+                        {"type": "response.completed", "response": response},
+                    ]
+                    out_bytes = "".join(f"event: {ev['type']}\ndata: {json.dumps(ev)}\n\n" for ev in events).encode("utf-8")
+                    ct = "text/event-stream"
+                else:
+                    out_bytes = b'{"id":"resp_test","output":[]}'
+                    ct = "application/json"
+                self.send_response(200)
+                self.send_header("Content-Type", ct)
+                self.send_header("Content-Length", str(len(out_bytes)))
+                self.end_headers()
+                self.wfile.write(out_bytes)
+
+            def log_message(self, *args):
+                pass
+
+        upstream_srv = http.server.HTTPServer(("127.0.0.1", 0), _FakeUpstream)
+        threading.Thread(target=upstream_srv.serve_forever, daemon=True).start()
+        upstream_url = f"http://127.0.0.1:{upstream_srv.server_port}/v1/responses"
+
+        try:
+            # --- Boundary 1: Capability authentication, authorized model binding, and request ceiling ---
+            broker = HostAuthBroker(
+                credentials={"OPENAI_API_KEY": "sk-synthetic-host-key-001"},
+                upstream_url=upstream_url,
+                authorized_model="gpt-5.6-sol",
+                max_requests=1,
+            ).start()
+            try:
+                # 1a. Unauthenticated caller (no Authorization header) -> 401, zero upstream hits
+                unauth_req = urllib.request.Request(
+                    broker.base_url + "/responses",
+                    data=json.dumps({"model": "gpt-5.6-sol", "input": "probe"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as unauth_ctx:
+                    urllib.request.urlopen(unauth_req, timeout=3)
+                self.assertEqual(unauth_ctx.exception.code, 401)
+                unauth_ctx.exception.close()
+                self.assertEqual(len(captures), 0)
+
+                # 1b. Wrong capability token -> 401, zero upstream hits
+                wrong_cap_req = urllib.request.Request(
+                    broker.base_url + "/responses",
+                    data=json.dumps({"model": "gpt-5.6-sol", "input": "probe"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "Authorization": "Bearer wrong-capability-token"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as wrong_ctx:
+                    urllib.request.urlopen(wrong_cap_req, timeout=3)
+                self.assertEqual(wrong_ctx.exception.code, 401)
+                wrong_ctx.exception.close()
+                self.assertEqual(len(captures), 0)
+
+                # 1c. Oversize Content-Length -> 413 before reading body, does not consume request slot
+                oversize_req = urllib.request.Request(
+                    broker.base_url + "/responses",
+                    data=b"{}",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {broker.capability_token}",
+                        "Content-Length": str(broker.max_request_bytes + 1024),
+                    },
+                )
+                with self.assertRaises(urllib.error.HTTPError) as over_ctx:
+                    urllib.request.urlopen(oversize_req, timeout=3)
+                self.assertEqual(over_ctx.exception.code, 413)
+                over_ctx.exception.close()
+                self.assertEqual(len(captures), 0)
+
+                # 1d. Caller-selected unauthorized model -> 403, zero upstream hits
+                bad_model_req = urllib.request.Request(
+                    broker.base_url + "/responses",
+                    data=json.dumps({"model": "arbitrary-review-model", "input": "probe"}).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {broker.capability_token}",
+                    },
+                )
+                with self.assertRaises(urllib.error.HTTPError) as model_ctx:
+                    urllib.request.urlopen(bad_model_req, timeout=3)
+                self.assertEqual(model_ctx.exception.code, 403)
+                model_ctx.exception.close()
+                self.assertEqual(len(captures), 0)
+
+                # 1e. Second request on a max_requests=1 broker -> 429, zero upstream hits
+                second_req = urllib.request.Request(
+                    broker.base_url + "/responses",
+                    data=json.dumps({"model": "gpt-5.6-sol", "input": "probe"}).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {broker.capability_token}",
+                    },
+                )
+                with self.assertRaises(urllib.error.HTTPError) as limit_ctx:
+                    urllib.request.urlopen(second_req, timeout=3)
+                self.assertEqual(limit_ctx.exception.code, 429)
+                limit_ctx.exception.close()
+                self.assertEqual(len(captures), 0)
+            finally:
+                broker.close()
+
+            # --- Boundary 2: Stalled partial HTTP body cannot block broker.close() or timeout ---
+            stalled_broker = HostAuthBroker(
+                credentials={"OPENAI_API_KEY": "sk-synthetic-host-key-002"},
+                upstream_url=upstream_url,
+                read_timeout=2.0,
+            ).start()
+            sock = socket.create_connection(("127.0.0.1", stalled_broker.port), timeout=2.0)
+            try:
+                sock.sendall(
+                    (
+                        f"POST /v1/responses HTTP/1.1\r\n"
+                        f"Host: localhost\r\n"
+                        f"Authorization: Bearer {stalled_broker.capability_token}\r\n"
+                        f"Content-Length: 100000\r\n\r\n{{"
+                    ).encode("utf-8")
+                )
+                time.sleep(0.1)
+                close_thread = threading.Thread(target=stalled_broker.close, daemon=True)
+                close_thread.start()
+                close_thread.join(0.6)
+                self.assertFalse(close_thread.is_alive(), "broker.close() must not block on a stalled partial HTTP body")
+            finally:
+                sock.close()
+
+            # Also verify read_timeout triggers 408 when client stalls without calling close()
+            timeout_broker = HostAuthBroker(
+                credentials={"OPENAI_API_KEY": "sk-synthetic-host-key-003"},
+                upstream_url=upstream_url,
+                read_timeout=0.15,
+            ).start()
+            sock2 = socket.create_connection(("127.0.0.1", timeout_broker.port), timeout=2.0)
+            try:
+                sock2.sendall(
+                    (
+                        f"POST /v1/responses HTTP/1.1\r\n"
+                        f"Host: localhost\r\n"
+                        f"Authorization: Bearer {timeout_broker.capability_token}\r\n"
+                        f"Content-Length: 50000\r\n\r\n{{"
+                    ).encode("utf-8")
+                )
+                resp_bytes = sock2.recv(4096)
+                self.assertIn(b"408", resp_bytes)
+            finally:
+                sock2.close()
+                timeout_broker.close()
+
+            # --- Boundary 3: ChatGPT/OAuth and empty credentials fail closed before launch or ledger intent ---
+            oauth_cred = {
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "synthetic-review-oauth",
+                    "account_id": "synthetic-review-account",
+                },
+            }
+            for invalid_cred in (
+                None,
+                {},
+                {"OPENAI_API_KEY": ""},
+                {"OPENAI_API_KEY": "   "},
+                oauth_cred,
+                {"tokens": {"access_token": "nested-only-oauth"}},
+                {"access_token": "top-level-oauth-only"},
+            ):
+                with self.assertRaises(ExecutableBoundaryError):
+                    validate_api_key_credentials(invalid_cred, allow_mock=False)
+                with self.assertRaises(ExecutableBoundaryError):
+                    HostAuthBroker(credentials=invalid_cred, upstream_url=upstream_url)
+
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                oauth_path = os.path.join(tmp_dir, "oauth_auth.json")
+                with open(oauth_path, "w", encoding="utf-8") as f:
+                    json.dump(oauth_cred, f)
+                os.chmod(oauth_path, 0o600)
+
+                with self.assertRaises(ExecutableBoundaryError):
+                    load_host_credentials(is_mock=False, auth_source_path=oauth_path)
+                with self.assertRaises(ExecutableBoundaryError):
+                    setup_credential_home(tmp_dir, is_mock=False, auth_source_path=oauth_path)
+
+                # Verify SolModelProvider fails closed BEFORE recording invocation_intent or spawning Popen
+                ledger = AttemptLedger(os.path.join(tmp_dir, "oauth_reject_ledger.jsonl"))
+                provider = SolModelProvider(
+                    model_name="gpt-5.6-sol",
+                    workspace_root=tmp_dir,
+                    ledger=ledger,
+                    mock_subprocess=False,
+                )
+                with mock.patch.dict(os.environ, {"CODEX_AUTH_PATH": oauth_path}):
+                    with self.assertRaises(ExecutableBoundaryError):
+                        provider._execute_cli_call("oauth_reject_call", b"prompt")
+                self.assertEqual(len(ledger.get_entries()), 0, "Unsupported credentials must fail before recording invocation_intent")
+
+            # --- End-to-end live pinned CLI execution through HostAuthBroker to local fake upstream ---
+            with tempfile.TemporaryDirectory(prefix="rsiloop-cli-broker-e2e-") as scratch:
+                os.makedirs(os.path.join(scratch, ".codex"), mode=0o700, exist_ok=True)
+                os.makedirs(os.path.join(scratch, "tmp"), mode=0o700, exist_ok=True)
+                live_broker = HostAuthBroker(
+                    credentials={"OPENAI_API_KEY": "sk-synthetic-e2e-key"},
+                    upstream_url=upstream_url,
+                    authorized_model="gpt-5.6-sol",
+                    max_requests=1,
+                ).start()
+                try:
+                    sb_profile = render_seatbelt_profile(scratch, BASE_DIR)
+                    cli_cmd = build_codex_cli_command("gpt-5.6-sol", scratch, sb_profile, live_broker.base_url)
+                    cli_env = build_allowlisted_env(scratch)
+                    self.assertNotIn("sk-synthetic-e2e-key", " ".join(cli_cmd))
+                    self.assertNotIn("sk-synthetic-e2e-key", json.dumps(cli_env))
+                    self.assertNotIn(live_broker.capability_token, " ".join(cli_cmd))
+
+                    before_count = len(captures)
+                    proc = subprocess.Popen(
+                        cli_cmd,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        env=cli_env,
+                        cwd=scratch,
+                        start_new_session=True,
+                    )
+                    out_b, err_b = proc.communicate(b"Return SYNTHETIC_LOCAL_ONLY_RESPONSE.", timeout=20)
+                    self.assertEqual(proc.returncode, 0, f"CLI exited {proc.returncode}: {err_b.decode('utf-8', errors='replace')}")
+                    self.assertEqual(len(captures) - before_count, 1)
+                    captured = captures[-1]
+                    self.assertEqual(captured["auth"], "Bearer sk-synthetic-e2e-key")
+                    self.assertEqual(captured["model"], "gpt-5.6-sol")
+                    self.assertEqual(captured["tools"], [])
+                    self.assertEqual(captured["tool_choice"], "none")
+                    self.assertIn(b"SYNTHETIC_LOCAL_ONLY_RESPONSE", out_b)
+                finally:
+                    live_broker.close()
+        finally:
+            upstream_srv.shutdown()
+            upstream_srv.server_close()
 
     def test_host_auth_broker_and_zero_secret_scratch_home_and_tool_rejection(self):
         """Regression test for host-controlled auth, zero-secret scratch home, tool-event rejection, and Seatbelt process-exec/network restrictions."""

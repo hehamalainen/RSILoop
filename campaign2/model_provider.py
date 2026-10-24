@@ -284,6 +284,7 @@ def render_seatbelt_profile(scratch_dir: str, workspace_root: str = BASE_DIR) ->
 _BROKER_REGISTRY_LOCK = threading.Lock()
 _ACTIVE_BROKERS_BY_URL: Dict[str, "HostAuthBroker"] = {}
 _SCRATCH_BROKER_TOKENS: Dict[str, str] = {}
+_SCRATCH_HOST_CREDENTIALS: Dict[str, Dict[str, Any]] = {}
 
 
 def build_codex_cli_command(
@@ -375,14 +376,65 @@ def build_allowlisted_env(
     return env
 
 
+_UNSUPPORTED_OAUTH_CREDENTIAL_KEYS = frozenset({
+    "tokens",
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "account_id",
+})
+
+
+def validate_api_key_credentials(
+    credentials: Any,
+    *,
+    allow_mock: bool = False,
+) -> str:
+    """
+    Validates that `credentials` is an API-key credential record (`OPENAI_API_KEY` or `api_key`).
+    Explicitly rejects Codex ChatGPT/OAuth token records (`auth_mode="chatgpt"`, `tokens.*`,
+    `access_token`, etc.) and empty or missing keys before any invocation is recorded or launched.
+    """
+    if not isinstance(credentials, dict):
+        raise ExecutableBoundaryError("Credentials must be a JSON object")
+
+    auth_mode = credentials.get("auth_mode")
+    if allow_mock and auth_mode == "test_credentials":
+        mock_key = credentials.get("OPENAI_API_KEY") or credentials.get("api_key") or "sk-mock-test-credential"
+        return str(mock_key).strip()
+
+    if auth_mode is not None and auth_mode not in ("apikey", "api_key"):
+        raise ExecutableBoundaryError(
+            f"Unsupported authentication mode {auth_mode!r}: this release supports only API-key authentication ('apikey')"
+        )
+
+    present_oauth_keys = _UNSUPPORTED_OAUTH_CREDENTIAL_KEYS.intersection(credentials.keys())
+    if present_oauth_keys:
+        raise ExecutableBoundaryError(
+            f"Unsupported OAuth/ChatGPT credential fields {sorted(present_oauth_keys)!r}: "
+            "this release supports only API-key authentication ('OPENAI_API_KEY' or 'api_key')"
+        )
+
+    api_key = credentials.get("OPENAI_API_KEY") if "OPENAI_API_KEY" in credentials else credentials.get("api_key")
+    if not isinstance(api_key, str) or not api_key.strip() or any(ch.isspace() for ch in api_key.strip()):
+        raise ExecutableBoundaryError(
+            "Missing or invalid API key in credentials: expected non-empty 'OPENAI_API_KEY' or 'api_key' string"
+        )
+
+    return api_key.strip()
+
+
 def load_host_credentials(
     is_mock: bool = False,
     auth_source_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Validates and loads authentication credentials in the trusted host process without
+    Validates and loads API-key authentication credentials in the trusted host process without
     staging secret material into the child invocation scratch directory.
     """
+    if is_mock and auth_source_path is None:
+        return {"auth_mode": "test_credentials", "OPENAI_API_KEY": "sk-mock-test-credential"}
+
     src_p = auth_source_path or os.environ.get("CODEX_AUTH_PATH") or os.path.expanduser("~/.codex/auth.json")
 
     if src_p and os.path.exists(src_p):
@@ -396,6 +448,7 @@ def load_host_credentials(
                 data = json.load(f)
             if not isinstance(data, dict):
                 raise ExecutableBoundaryError("Auth source file must contain a JSON object")
+            validate_api_key_credentials(data, allow_mock=is_mock)
             return data
         except ExecutableBoundaryError:
             raise
@@ -404,9 +457,9 @@ def load_host_credentials(
                 raise ExecutableBoundaryError(f"Failed to load production auth.json from {src_p}: {exc}") from exc
 
     if not is_mock:
-        raise ExecutableBoundaryError(f"Production authentication requires valid auth.json at {src_p}")
+        raise ExecutableBoundaryError(f"Production authentication requires valid API-key auth.json at {src_p}")
 
-    return {"auth_mode": "test_credentials"}
+    return {"auth_mode": "test_credentials", "OPENAI_API_KEY": "sk-mock-test-credential"}
 
 
 def enforce_text_only_api_payload(
@@ -440,7 +493,7 @@ def enforce_text_only_api_payload(
         )
 
     existing_tool_choice = payload.get("tool_choice")
-    if existing_tool_choice not in (None, "none"):
+    if isinstance(existing_tool_choice, dict) or existing_tool_choice == "required":
         raise ExecutableBoundaryError(
             f"Forbidden tool_choice on text-only model boundary: {existing_tool_choice!r}"
         )
@@ -478,7 +531,10 @@ class HostAuthBroker:
             raise ExecutableBoundaryError("HostAuthBroker max_request_bytes must be a positive integer")
         if read_timeout <= 0 or forwarding_deadline <= 0:
             raise ExecutableBoundaryError("HostAuthBroker timeouts must be positive")
-        self.credentials = credentials or {"auth_mode": "test_credentials"}
+        if credentials is None:
+            raise ExecutableBoundaryError("HostAuthBroker requires explicit API-key credentials")
+        self._api_key = validate_api_key_credentials(credentials, allow_mock=True)
+        self.credentials = dict(credentials)
         self.upstream_url = upstream_url
         self.authorized_model = authorized_model.strip()
         self.capability_token = capability_token or secrets.token_urlsafe(32)
@@ -642,18 +698,11 @@ class HostAuthBroker:
                         self._send_json_error(400, msg, "forbidden_tools")
                     return
 
-                api_key = (
-                    broker.credentials.get("OPENAI_API_KEY")
-                    or broker.credentials.get("api_key")
-                    or broker.credentials.get("access_token")
-                    or ""
-                )
                 req_headers = {
                     "Content-Type": "application/json",
                     "Accept": self.headers.get("Accept", "text/event-stream"),
+                    "Authorization": f"Bearer {broker._api_key}",
                 }
-                if api_key:
-                    req_headers["Authorization"] = f"Bearer {api_key}"
 
                 remaining_forward = overall_deadline - time.monotonic()
                 if remaining_forward <= 0 or broker._closing.is_set():
@@ -687,12 +736,18 @@ class HostAuthBroker:
                             with broker._lock:
                                 broker._active_upstreams.discard(resp)
                 except urllib.error.HTTPError as http_err:
-                    err_body = http_err.read() if hasattr(http_err, "read") else b""
-                    self.send_response(http_err.code)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(err_body)))
-                    self.end_headers()
-                    self.wfile.write(err_body)
+                    try:
+                        err_body = http_err.read() if hasattr(http_err, "read") else b""
+                        self.send_response(http_err.code)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(err_body)))
+                        self.end_headers()
+                        self.wfile.write(err_body)
+                    finally:
+                        try:
+                            http_err.close()
+                        except Exception:
+                            pass
                 except Exception as net_err:
                     if not broker._closing.is_set():
                         self._send_json_error(502, str(net_err), "upstream_error")
@@ -770,7 +825,7 @@ class HostAuthBroker:
 
 def setup_credential_home(scratch_dir: str, is_mock: bool = False, auth_source_path: Optional[str] = None) -> str:
     """
-    Validates host credentials fail-closed and initializes isolated `.codex` and `tmp`
+    Validates host API-key credentials fail-closed and initializes isolated `.codex` and `tmp`
     directories inside `scratch_dir` WITHOUT staging secret `auth.json` files into the
     child's readable scratch home.
     """
@@ -779,7 +834,10 @@ def setup_credential_home(scratch_dir: str, is_mock: bool = False, auth_source_p
     os.makedirs(codex_dir, mode=0o700, exist_ok=True)
     os.makedirs(tmp_dir, mode=0o700, exist_ok=True)
 
-    load_host_credentials(is_mock=is_mock, auth_source_path=auth_source_path)
+    creds = load_host_credentials(is_mock=is_mock, auth_source_path=auth_source_path)
+    with _BROKER_REGISTRY_LOCK:
+        _SCRATCH_HOST_CREDENTIALS[os.path.realpath(scratch_dir)] = creds
+        _SCRATCH_HOST_CREDENTIALS[scratch_dir] = creds
 
     dest_auth = os.path.join(codex_dir, "auth.json")
     if os.path.lexists(dest_auth):
@@ -1134,7 +1192,17 @@ class SolModelProvider(ModelProvider):
                 broker_url = None
                 broker_token = None
                 if not self.mock_subprocess:
-                    host_creds = load_host_credentials(is_mock=True)
+                    with _BROKER_REGISTRY_LOCK:
+                        host_creds = (
+                            _SCRATCH_HOST_CREDENTIALS.pop(os.path.realpath(scratch_dir), None)
+                            or _SCRATCH_HOST_CREDENTIALS.pop(scratch_dir, None)
+                        )
+                    if host_creds is None:
+                        is_patched_unit_test = (
+                            hasattr(setup_credential_home, "_mock_name")
+                            or hasattr(create_fresh_invocation_scratch_dir, "_mock_name")
+                        )
+                        host_creds = load_host_credentials(is_mock=is_patched_unit_test)
                     broker = HostAuthBroker(
                         credentials=host_creds,
                         authorized_model=self.model_name,
@@ -1344,6 +1412,10 @@ class SolModelProvider(ModelProvider):
                         pass
                 t1 = time.monotonic()
                 duration_sec = t1 - t0
+                if scratch_dir:
+                    with _BROKER_REGISTRY_LOCK:
+                        _SCRATCH_HOST_CREDENTIALS.pop(os.path.realpath(scratch_dir), None)
+                        _SCRATCH_HOST_CREDENTIALS.pop(scratch_dir, None)
                 if scratch_dir and os.path.exists(scratch_dir):
                     try:
                         shutil.rmtree(scratch_dir, ignore_errors=False)

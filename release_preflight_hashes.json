@@ -130,7 +130,7 @@
   "campaign2/launch_checklist.py": "61306669263f87b124c46b0173341f0d3c6d5e98609f2e4e5d8f88fdc9edc504",
   "campaign2/launch_lock.py": "f1ed6a353bf1cf97e5b213215a7615e50884f86e1fed1d2e61638f4cc04f5db6",
   "campaign2/manifest.py": "d585399ef9e4302d12d43866b557498c6cfdde143336011af7fa39c302869663",
-  "campaign2/model_provider.py": "f5fa022a62de04a918087699f7f37fa874bb79cd52e3ed8f44a3326d3f6c65b6",
+  "campaign2/model_provider.py": "b72f9ff40ce45584743e0c4371a0fcfdbb6baf7a54a9c19a7c58a4c247f28989",
   "campaign2/orchestrator.py": "d72b7914a2d17b2516546e3bad6cc36d12f47d5f36b02c23b8aee0260bee8122",
   "campaign2/preflight_registry.py": "ea7a51f55164d3bc065402b80b77bd6a9c66c4f31d09800ca63d611def19e0b1",
   "campaign2/proxy.py": "c184eb5bf790214f36b59b380f90669fcbc13a10a943970b2132d2032aed1915",
