@@ -953,7 +953,12 @@ class WorkerIPCClient:
                 self.candidate_exception_occurred = True
                 res_obj = TaggedCodec.decode(resp.get("result"), self.make_host_callback_proxy, self.make_obj_proxy, None, None, lambda h_id: self.host_objects[h_id])
                 if not self.last_exception_message:
-                    self.last_exception_message = f"{type(res_obj).__name__}: {res_obj}" if res_obj else ""
+                    from campaign2.envelope import classify_candidate_exception_type
+                    self.last_exception_message = (
+                        classify_candidate_exception_type(res_obj)
+                        if res_obj is not None
+                        else "CustomCandidateException"
+                    )
                 return res_obj
             elif self.last_status in ("no_func", "no_class"):
                 return None
@@ -1120,11 +1125,14 @@ def evaluate_candidate_code_sandboxed(task_id: str, candidate_code: str, timeout
         if ready_frame.get("candidate_imported") is not False or ready_frame.get("limits") != expected_limits:
             raise InfrastructureError("Worker readiness did not attest pre-import RLIMIT installation")
 
+        from campaign2.envelope import classify_candidate_exception_type
+
         candidate_deadline = time.time() + timeout_seconds
         ipc_client.set_phase("candidate_import", candidate_deadline)
         ipc_client.send_request({"id": "load_candidate", "op": "load_candidate"})
         if ipc_client.candidate_exception_occurred:
-            return 0, 10, False, f"CandidateImportError: {ipc_client.last_exception_message}"
+            exc_type = classify_candidate_exception_type(ipc_client.last_exception_message)
+            return 0, 10, False, f"CandidateImportError: {exc_type}"
         ipc_client.set_phase("candidate_execution", candidate_deadline)
 
         cand_proxy = CandidateModuleProxy(ipc_client)
@@ -1149,7 +1157,7 @@ def evaluate_candidate_code_sandboxed(task_id: str, candidate_code: str, timeout
             )
 
         if getattr(ipc_client, "candidate_process_error", None):
-            return 0, 10, False, f"CandidateProcessError: {ipc_client.candidate_process_error}"
+            return 0, 10, False, "CandidateProcessError: terminated_during_candidate_execution"
 
         if ipc_client.candidate_timeout:
             raise CandidateTimeoutError(
@@ -1161,22 +1169,27 @@ def evaluate_candidate_code_sandboxed(task_id: str, candidate_code: str, timeout
         if getattr(harness_mod, "_sticky_infrastructure_error", None):
             raise harness_mod._sticky_infrastructure_error
 
-        err_trace = f"CandidateException: {ipc_client.last_exception_message}" if ipc_client.candidate_exception_occurred else ""
+        err_trace = (
+            f"CandidateException: {classify_candidate_exception_type(ipc_client.last_exception_message)}"
+            if ipc_client.candidate_exception_occurred
+            else ""
+        )
         return earned, max_s, True, err_trace
     except CandidateTimeoutError:
         # A live worker that stops producing protocol output is not attributable
         # to a scored candidate outcome. Registered Limitation 10 makes this a
         # campaign-fatal ambiguity.
         raise
-    except CandidateProcessError as cpe:
-        return 0, 10, False, f"CandidateProcessError: {cpe}"
+    except CandidateProcessError:
+        return 0, 10, False, "CandidateProcessError: terminated_during_candidate_execution"
     except Exception as e:
         if ipc_client and ipc_client.infrastructure_error:
             raise ipc_client.infrastructure_error
         if isinstance(e, InfrastructureError):
             raise
+        from campaign2.envelope import classify_candidate_exception_type
         # Candidate execution syntax / runtime error -> return candidate failure (0, 10)
-        return 0, 10, False, f"{type(e).__name__}: {e}"
+        return 0, 10, False, f"CandidateException: {classify_candidate_exception_type(e)}"
     finally:
         if ipc_client:
             ipc_client.selector.close()

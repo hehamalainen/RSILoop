@@ -398,6 +398,9 @@ class Campaign2Orchestrator:
         if type(error_trace) is not str:
             raise OrchestratorError(f"error_trace field must be a string, got {type(error_trace)}")
 
+        from campaign2.envelope import canonicalize_failure_trace_for_optimizer
+        error_trace = canonicalize_failure_trace_for_optimizer(error_trace)
+
         if max_s <= 0 or earned < 0 or earned > max_s:
             raise OrchestratorError(
                 f"Evaluator score out of range: earned={earned}, max_s={max_s}"
@@ -520,17 +523,26 @@ class Campaign2Orchestrator:
 
             for rnd in range(1, self.params["mutations_per_arm"] + 1):
                 if is_optimizer_arm:
+                    from campaign2.envelope import (
+                        canonicalize_failure_trace_for_optimizer,
+                        sanitize_failure_context_for_optimizer,
+                    )
                     failed = []
                     for task_id, pairs in last_round_scores.items():
                         earned_total = sum(e for e, _m in pairs)
                         max_total = sum(m for _e, m in pairs)
                         if earned_total < max_total:
-                            traces = last_round_errors.get(task_id, [])
+                            raw_traces = last_round_errors.get(task_id, [])
+                            traces = [
+                                canonicalize_failure_trace_for_optimizer(t)
+                                for t in raw_traces
+                            ]
+                            traces = [t for t in traces if t]
                             trace_text = " | ".join(traces) if traces else "no evaluator trace supplied"
                             failed.append(
                                 f"{task_id}: score {earned_total}/{max_total}; errors: {trace_text}"
                             )
-                    fail_ctx = (
+                    fail_ctx = sanitize_failure_context_for_optimizer(
                         f"Round {rnd-1} feedback (aggregate {current_best_frac:.4f}):\n"
                         + "\n".join(failed)
                     )

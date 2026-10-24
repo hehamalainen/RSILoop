@@ -109,8 +109,10 @@ class MockModelProvider(ModelProvider):
 
     def mutate_prompt(self, mutable_body: str, failure_context: str,
                       call_id: str) -> Tuple[str, int]:
+        from campaign2.envelope import sanitize_failure_context_for_optimizer
+        sanitized_context = sanitize_failure_context_for_optimizer(failure_context)
         body_hash = hashlib.sha256(mutable_body.encode('utf-8')).hexdigest()[:16]
-        has_failures = len(failure_context) > 0
+        has_failures = len(sanitized_context) > 0
         new_body = (
             f"# Mutation {call_id} (guided={has_failures})\n"
             f"# parent_hash={body_hash}\n"
@@ -121,6 +123,7 @@ class MockModelProvider(ModelProvider):
             'type': 'mutate_prompt',
             'call_id': call_id,
             'guided': has_failures,
+            'failure_context': sanitized_context,
             'body_hash': body_hash,
             'tokens': tokens
         })
@@ -902,9 +905,11 @@ class SolModelProvider(ModelProvider):
 
     def mutate_prompt(self, mutable_body: str, failure_context: str,
                       call_id: str) -> Tuple[str, int]:
+        from campaign2.envelope import PromptEnvelope, sanitize_failure_context_for_optimizer
+        sanitized_context = sanitize_failure_context_for_optimizer(failure_context)
         prompt = (
             "# MUTATION REQUEST\n"
-            f"# Failure Context:\n{failure_context}\n\n"
+            f"# Failure Context:\n{sanitized_context}\n\n"
             f"# Mutable Strategy Body:\n{mutable_body}\n"
         )
         stdin_bytes = prompt.encode("utf-8")
@@ -912,7 +917,6 @@ class SolModelProvider(ModelProvider):
         # Transport error raises ExecutableBoundaryError and fails closed
         text, tokens, _ = self._execute_cli_call(call_id, stdin_bytes)
 
-        from campaign2.envelope import PromptEnvelope
         env = PromptEnvelope()
         try:
             clean_body = env.validate_mutation_output(text)

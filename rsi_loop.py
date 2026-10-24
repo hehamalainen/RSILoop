@@ -947,6 +947,67 @@ def evaluate_prompt_on_tasks(
     score = passed_count / len(task_names) if task_names else 0.0
     return score, results, total_tokens
 
+_ALLOWED_CAMPAIGN1_FAILURE_LABELS = frozenset({
+    "ArithmeticError",
+    "AssertionError",
+    "AttributeError",
+    "BufferError",
+    "CandidateExecutionError",
+    "CandidateProtocolError",
+    "EOFError",
+    "Exception",
+    "FloatingPointError",
+    "ImportError",
+    "IndexError",
+    "KeyError",
+    "LookupError",
+    "MemoryError",
+    "ModuleNotFoundError",
+    "NameError",
+    "NotImplementedError",
+    "OSError",
+    "OverflowError",
+    "PermissionError",
+    "RecursionError",
+    "RuntimeError",
+    "StopIteration",
+    "SyntaxError",
+    "SystemError",
+    "TestFailure",
+    "TimeoutError",
+    "TypeError",
+    "UnboundLocalError",
+    "UnicodeDecodeError",
+    "UnicodeEncodeError",
+    "UnicodeError",
+    "ValueError",
+    "ZeroDivisionError",
+})
+
+
+def _canonicalize_campaign1_failure_error(raw_error: object) -> str:
+    """
+    Maps a Campaign 1 evaluator error string to a finite closed-vocabulary
+    classification token. Candidate-controlled exception messages, tracebacks,
+    and candidate source code are never forwarded to the optimizer prompt.
+    """
+    if not isinstance(raw_error, str) or not raw_error.strip():
+        return "TestFailure"
+    text = raw_error.strip()
+    if "exceeded wall-clock timeout" in text or text.startswith("TimeoutError"):
+        return "TimeoutError"
+    if "Runner shutdown integrity check failed" in text or "Sandbox error:" in text:
+        return "CandidateProtocolError"
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        head = stripped.split(":", 1)[0].strip()
+        if head in _ALLOWED_CAMPAIGN1_FAILURE_LABELS:
+            return head
+    return "TestFailure"
+
+
 def mutate_prompt(
     current_prompt: str,
     failures: list,
@@ -958,10 +1019,21 @@ def mutate_prompt(
 
     context = f"Current System Prompt:\n{current_prompt}\n\nFailed Tasks & Errors:\n"
     for fail in failures:
-        context += f"--- Task: {fail['task']} ---\n"
-        context += f"Problem Description:\n{fail['description']}\n"
-        context += f"Failed Solution:\n{fail['code']}\n"
-        context += f"Test Error:\n{fail['error']}\n\n"
+        raw_task = str(fail.get("task", "")).strip() if isinstance(fail, dict) else ""
+        if not _SAFE_RUN_ID_RE.fullmatch(raw_task):
+            raise ExperimentInvalidError(f"Unsafe benchmark task identifier in mutate_prompt: {raw_task!r}")
+        task_problem_path = os.path.join(BENCHMARKS_DIR, raw_task, "problem.txt")
+        if os.path.isfile(task_problem_path) and not os.path.islink(task_problem_path):
+            with open(task_problem_path, "r", encoding="utf-8") as tf:
+                trusted_description = tf.read()
+        else:
+            trusted_description = ""
+        error_label = _canonicalize_campaign1_failure_error(
+            fail.get("error") if isinstance(fail, dict) else None
+        )
+        context += f"--- Task: {raw_task} ---\n"
+        context += f"Problem Description:\n{trusted_description}\n"
+        context += f"Failure Classification: {error_label}\n\n"
 
     return call_codex_sandboxed(
         context, meta_prompt, iter_dir, ctx,
