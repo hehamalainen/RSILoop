@@ -1,23 +1,35 @@
-# RSILoop: Containment-Hardened Recursive Self-Improvement Research Prototype
+# RSILoop
 
-**RSILoop** is an experimental evaluation, containment, and statistical-design prototype for studying **Level 1 Recursive Self-Improvement (RSI)** in LLM-based coding agents. It evaluates candidate code inside a deny-default macOS `sandbox-exec` jail with pre-execution `setrlimit` attestation, pairs failure traces with a meta-optimizer to mutate system prompts under an immutable prompt envelope, and archives cryptographically anchored run evidence.
+RSILoop studies whether a coding agent can improve when a second agent revises its system prompt. The agent can propose a change. The host decides how it scores.
 
----
+A coding agent writes a candidate solution. The host runs the scoring harness and interacts with the candidate through a sandboxed worker. A second agent, the meta-optimizer, uses evaluation feedback to propose a revised system prompt. The next round tests what that revision changes.
 
-## Project Overview & Current Release State
+## What the pilot found
 
-This repository contains four distinct, self-contained components:
+**The Campaign 2 pilot hit its prespecified ceiling.** Across two trials on Suite P, all 16 baseline evaluations on the optimization and selection tasks earned full credit. The optimizer and control arms also earned full credit on those tiers. The `no_headroom` rule fired, and the project stopped before running the confirmatory Suite C experiment.
 
-1. **Campaign 1 (`rsi_loop.py`, `evaluator.py`, `candidate_runner.py`, `benchmarks/`)**:
-   - The foundational bi-level prompt-optimization harness and host-supervised RPC proxy.
-2. **Campaign 2 (`campaign2/`, `benchmarks/campaign2/`, `campaign_archive_manifest.json`, `campaign_claim_record.json`)**:
-   - A 30-task, 4-family benchmark population (`suite_c`: 22 tasks, `suite_p`: 8 tasks) with 90 calibrated defect rungs (`campaign2_parity_matrix.json`), deterministic SHA-256 rejection-sampled family-blocked tier assignment (`campaign2_tier_assignment.json`), crash-recoverable checkpoint durability (`campaign2/durability.py`), and a 3-record append-only invocation ledger (`campaign2/attempt_lifecycle.py`).
-   - **Recorded Campaign 2 Pilot Outcome**: The non-mock Suite P pilot (`history/run_1786134848_cfb514d2/campaign2_pilot_report.json`, sealed under `campaign_archive_manifest.json` and `campaign_claim_record.json`) terminated at the prespecified **`no_headroom`** stop rule (baseline solved 100% of pilot tasks at $1.0$, yielding $\Delta = 0.0$ across optimizer and control arms) and did **not** advance to the confirmatory Suite C run.
-3. **Campaign 3 Statistical Design & Cost Algebra (`campaign3/`, `campaign3/sim/`)**:
-   - Governance and preregistration drafting (`campaign3/governance.py`, `campaign3/verifier.py`, `campaign3/p1_verifier.py`), deterministic Monte Carlo simulation and two-stage moment calibration (`campaign3/sim/model_v2.py`, `campaign3/sim/calibrator_v2.py`, `campaign3/sim/quantizer.py`), and closed-form call/token cost algebra across all four protocol variants (`campaign3/cost_model.py`, `campaign3/cost_model_report.md`).
-   - **Note on Campaign 2 vs. Campaign 3 Conformance**: The `campaign2/` directory retains the historical Campaign 2 archive verifier while defaulting new executions to Campaign 3 strict conformance: `parse_and_classify_jsonl_output(..., require_transport_evidence=True)`, `SolModelProvider(..., require_transport_evidence=True)`, and `is_permitted_local_retry(..., require_transport_evidence=True)` reject post-spawn CLI retries lacking transport-level zero-bytes-sent proof by default, and `Campaign2Orchestrator(..., atomic_parent_feedback=True, require_transport_evidence=True)` updates parent prompts, scores, and failure traces atomically only on accepted improvements (with `False` confined to explicit historical archive verification tests).
-4. **Discovery Probe Sidecar (`discovery_probe/`)**:
-   - A dependency-free, text-only active rule-discovery benchmark inspired by [DiG-bench](https://arxiv.org/abs/2608.12593). Episodes commit to a hidden composition of string operations via SHA-256 before exploration and score only locked holdout challenge predictions. See [`discovery_probe/README.md`](discovery_probe/README.md).
+The ceiling was specific to those tiers. Across the full pilot, the observed optimizer-minus-control difference was `+1/160`. The pilot did not establish that revising the prompt improves performance. It did establish something practical about this benchmark and baseline pairing: on the tasks used to choose a better prompt, the original prompt already earned every available point. [Pilot report](history/run_1786134848_cfb514d2/campaign2_pilot_report.json) · [Stop rule](campaign2/ladder.py) · [Recorded research claim](campaign_claim_record.json)
+
+## Try it without an API key
+
+From the repository root, play a hidden-rule discovery episode with Python’s standard library. No package installation, network connection, or model call is required.
+
+```bash
+python3 -m discovery_probe --seed 42 --tier 2
+```
+
+Enter a string such as `abc` to see how the hidden rule transforms it. Try another string to test your hypothesis. When you type `:solve`, exploration closes and you predict the outputs for a fixed set of challenges. The game reveals the rule afterward so you can check it against the SHA-256 commitment printed before your first move.
+
+## What’s in the repository
+
+| Component | What you can inspect or run |
+|---|---|
+| **Campaign 1** | The original prompt-optimization loop, sandboxed candidate runner, and host-supervised evaluator. |
+| **Campaign 2** | A 30-task benchmark across four task families, plus the archived eight-task Suite P pilot, its invocation ledger, and a manifest for checking the evidence hashes. |
+| **Campaign 3** | Protocol verifiers, Monte Carlo design simulations, and call and token cost estimates. The confirmatory experiment remains unexecuted. |
+| **Discovery Probe** | The standalone hidden-rule game above. It demonstrates how to commit to a task before exploration and score predictions afterward. |
+
+The live coding-agent campaigns and the full environment verifier require macOS. The pinned reproduction environment uses Python 3.12 or newer. RSILoop is released under the MIT License.
 
 ---
 
@@ -49,7 +61,7 @@ Run an interactive hidden-rule discovery episode (or pass `--reveal-rules` for t
 python3 -m discovery_probe --seed 42 --tier 2
 ```
 
-Run a non-interactive programmatic smoke check:
+Run a non-interactive commitment-verification self-test (reads `session._rule` in-process to verify end-to-end scoring and SHA-256 commitment verification; the sidecar itself is an in-process benchmark library and does not isolate an external solver):
 
 ```bash
 python3 -c '
